@@ -1,0 +1,222 @@
+import os
+import logging
+from datetime import datetime, timezone, timedelta
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes
+)
+
+# Configuración del registro de eventos (logs)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Carga de credenciales desde Secrets de Replit
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SAM_API_KEY = os.getenv("SAM_API_KEY")
+
+# Registro para evitar enviar la misma oportunidad más de una vez
+LICITACIONES_NOTIFICADAS = set()
+
+def obtener_mejores_licitaciones_sam():
+    """Consulta la API de SAM.gov y aplica filtros estratégicos ($5k-$100k, 5 a 7 días)."""
+    if not SAM_API_KEY:
+        logging.error("SAM_API_KEY no encontrada en Secrets.")
+        return []
+
+    url = "https://api.sam.gov/prod/opportunities/v2/search"
+    hoy = datetime.now(timezone.utc)
+    fecha_desde = (hoy - timedelta(days=2)).strftime("%m/%d/%Y")
+    
+    params = {
+        "api_key": SAM_API_KEY,
+        "postedFrom": fecha_desde,
+        "postedTo": hoy.strftime("%m/%d/%Y"),
+        "limit": 25,
+        "ptype": "o,k"
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+        
+        candidatas = []
+        for opp in data.get("opportunitiesData", []):
+            opp_id = opp.get("noticeId")
+            if not opp_id or opp_id in LICITACIONES_NOTIFICADAS:
+                continue
+
+            response_date_str = opp.get("responseDeadLine")
+            if not response_date_str:
+                continue
+            
+            try:
+                fecha_cierre = datetime.fromisoformat(response_date_str.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            
+            dias_restantes = (fecha_cierre - hoy).days
+            if not (5 <= dias_restantes <= 7):
+                continue
+
+            monto_estimado = float(opp.get("award", {}).get("amount", 25000) or 25000)
+            if not (5000 <= monto_estimado <= 100000):
+                continue
+
+            candidatas.append({
+                "id": opp_id,
+                "titulo": opp.get("title", "Sin título"),
+                "solicitation_number": opp.get("solicitationNumber", "N/A"),
+                "agencia": opp.get("department", "Agencia Federal"),
+                "cierre_str": fecha_cierre.strftime("%d/%m/%Y"),
+                "dias_restantes": dias_restantes,
+                "monto_est": monto_estimado,
+                "link": opp.get("uiLink", f"https://sam.gov/opp/{opp_id}/view")
+            })
+
+        candidatas.sort(key=lambda x: x["dias_restantes"])
+        return candidatas[:5]
+
+    except Exception as e:
+        logging.error(f"Error al consultar SAM.gov: {e}")
+        return []
+
+async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
+    """Obtiene las licitaciones filtradas y las envía en formato enriquecido a Telegram."""
+    chat_id = context.job.chat_id or TELEGRAM_CHAT_ID
+    licitaciones = obtener_mejores_licitaciones_sam()
+
+    if not licitaciones:
+        logging.info("Búsqueda completada: no se encontraron nuevas licitaciones que cumplan los filtros.")
+        return
+
+    for lic in licitaciones:
+        LICITACIONES_NOTIFICADAS.add(lic["id"])
+        
+        costo_proveedor = lic["monto_est"] * 0.70
+        flete = 400.00
+        factoring = lic["monto_est"] * 0.03
+        ganancia_neta = lic["monto_est"] - (costo_proveedor + flete + factoring)
+
+        mensaje = (
+            "🚨 *NUEVA LICITACIÓN FILTRADA* 🚨\n\n"
+            f"📋 *Título:* {lic['titulo']}\n"
+            f"🏛️ *Agencia:* {lic['agencia']}\n"
+            f"📄 *Solicitation #:* `{lic['solicitation_number']}`\n"
+            f"📅 *Cierre:* {lic['cierre_str']} (En {lic['dias_restantes']} días ⚡)\n\n"
+            "📊 *ESTRATEGIA FINANCIERA ESTIMADA*\n"
+            f"• Costo Proveedor Est.: ${costo_proveedor:,.2f} USD\n"
+            f"• Flete Est. (FOB): ${flete:,.2f} USD\n"
+            f"• Comisión Factoring (3%): ${factoring:,.2f} USD\n\n"
+            "💰 *OFERTA SUGERIDA (TARGET BID)*\n"
+            f"🎯 *Precio Sugerido en SAM.gov:* ${lic['monto_est']:,.2f} USD\n"
+            f"💵 *Ganancia Neta Est.:* ${ganancia_neta:,.2f} USD\n"
+            "🏦 *Desembolso LLC:* $0.00 USD (Vía PO Financing)\n"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🔗 Ver en SAM.gov", url=lic["link"]),
+                InlineKeyboardButton("📦 Packing List", callback_data=f"pkg_{lic['id']}")
+            ],
+            [
+                InlineKeyboardButton("🏢 Generar Vendor PO", callback_data=f"po_{lic['id']}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=mensaje,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 *Cazador de Licitaciones Operativo*\n\n"
+        "Filtros activos:\n"
+        "• Monto: $5,000 — $100,000 USD\n"
+        "• Ventana de cierre: 5 a 7 días\n\n"
+        "Comandos:\n"
+        "• `/on` - Enciende la búsqueda automática\n"
+        "• `/off` - Pausa la búsqueda",
+        parse_mode="Markdown"
+    )
+
+async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    job_name = str(chat_id)
+
+    if context.job_queue is None:
+        await update.message.reply_text("❌ La función JobQueue no está activa. Asegúrate de tener `python-telegram-bot[job-queue]` instalado.")
+        return
+
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    if current_jobs:
+        await update.message.reply_text("⚡ El motor ya está activado y monitoreando.")
+        return
+
+    context.job_queue.run_repeating(
+        buscar_y_notificar,
+        interval=3600,  # Cada hora
+        first=1,        # Primera búsqueda de inmediato
+        chat_id=chat_id,
+        name=job_name
+    )
+
+    await update.message.reply_text("✅ *Motor encendido.* Monitoreando oportunidades top ($5k-$100k, 5-7 días al cierre)...", parse_mode="Markdown")
+
+async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    job_name = str(chat_id)
+
+    if context.job_queue is None:
+        await update.message.reply_text("❌ La función JobQueue no está activa.")
+        return
+
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    if not current_jobs:
+        await update.message.reply_text("💤 El motor ya está apagado.")
+        return
+
+    for job in current_jobs:
+        job.schedule_removal()
+
+    await update.message.reply_text("🛑 *Motor pausado.*", parse_mode="Markdown")
+
+async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data.startswith("pkg_"):
+        lic_id = data.split("_")[1]
+        await query.message.reply_text(f"⏳ Generando Packing List para licitación `{lic_id}`...", parse_mode="Markdown")
+    elif data.startswith("po_"):
+        lic_id = data.split("_")[1]
+        await query.message.reply_text(f"⏳ Generando Orden de Compra (Vendor PO) para `{lic_id}`...", parse_mode="Markdown")
+
+def main():
+    if not TELEGRAM_BOT_TOKEN:
+        print("Error: No se encontró TELEGRAM_BOT_TOKEN en Secrets.")
+        return
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("on", cmd_on))
+    app.add_handler(CommandHandler("off", cmd_off))
+    app.add_handler(CallbackQueryHandler(boton_callback))
+
+    print("🤖 Cazador de Licitaciones iniciando polling...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
