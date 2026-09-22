@@ -42,7 +42,6 @@ SAM_API_KEY = os.getenv("SAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 LICITACIONES_NOTIFICADAS = set()
-# Conjunto para rastrear las licitaciones en las que enviamos oferta
 LICITACIONES_POSTULADAS = set()
 
 ai_client = None
@@ -61,19 +60,19 @@ def analizar_licitacion_con_ia(titulo, descripcion):
             "producto": titulo,
             "cantidad": 1,
             "unidad": "Unidades",
-            "detalles": "Análisis de IA no disponible (Falta GEMINI_API_KEY)."
+            "detalles": "Análisis de IA no disponible."
         }
 
     prompt = f"""
-    Analiza esta licitación del gobierno federal de EE. UU.
+    Analiza esta licitación del gobierno federal de EE. UU. orientada a compra/suministro de productos COTS (Commercial Off-The-Shelf).
     Título: {titulo}
     Descripción: {descripcion}
 
     Extrae en formato JSON únicamente:
     1. "producto": Nombre claro y conciso del producto o ítem físico solicitado.
-    2. "cantidad": Cantidad numérica total solicitada (si no se especifica, asume 1).
-    3. "unidad": Unidad de medida (ej. Cajas, Unidades, Paquetes, Sets).
-    4. "detalles": Breve resumen de 1 oración con especificaciones clave o número de parte/marca.
+    2. "cantidad": Cantidad numérica total solicitada (si no se especifica o es ambigua, responde 1).
+    3. "unidad": Unidad de medida (ej. Cajas, Unidades, Paquetes, Sets, Kits).
+    4. "detalles": Breve resumen de 1 oración con especificaciones clave o número de parte/marca requerida.
     """
 
     try:
@@ -84,7 +83,14 @@ def analizar_licitacion_con_ia(titulo, descripcion):
                 response_mime_type="application/json"
             )
         )
-        return json.loads(response.text)
+        data = json.loads(response.text)
+        # Asegurar cantidad válida
+        try:
+            cant = int(data.get("cantidad", 1))
+            data["cantidad"] = cant if cant > 0 else 1
+        except (ValueError, TypeError):
+            data["cantidad"] = 1
+        return data
     except Exception as e:
         logging.error(f"Error al analizar con Gemini: {e}")
         return {
@@ -98,20 +104,12 @@ def analizar_licitacion_con_ia(titulo, descripcion):
 def buscar_distribuidores_locales(producto, zip_code):
     if not ai_client:
         return [
-            {
-                "nombre": "Fastenal Industrial Supply",
-                "tel": "(800) 416-9400",
-                "web": "fastenal.com"
-            },
-            {
-                "nombre": "Grainger Industrial Supply",
-                "tel": "(800) 472-4643",
-                "web": "grainger.com"
-            }
+            {"nombre": "Grainger Industrial Supply", "tel": "(800) 472-4643", "web": "grainger.com"},
+            {"nombre": "Fastenal Company", "tel": "(800) 416-9400", "web": "fastenal.com"}
         ]
 
     prompt = f"""
-    Genera 2 distribuidores o mayoristas industriales reales o recomendados en EE. UU. que vendan el producto '{producto}' cerca del código postal/región '{zip_code}'.
+    Sugiere 2 distribuidores o mayoristas industriales/comerciales reales en EE. UU. que vendan el producto '{producto}' y que puedan despachar a la región con código postal '{zip_code}'.
 
     Responde ÚNICAMENTE en JSON con una lista de objetos conteniendo: "nombre", "tel" y "web".
     """
@@ -128,22 +126,13 @@ def buscar_distribuidores_locales(producto, zip_code):
 
         if isinstance(data, list):
             return data[:2]
-
         return data.get("distribuidores", [])[:2]
 
     except Exception as e:
         logging.error(f"Error al buscar distribuidores con IA: {e}")
         return [
-            {
-                "nombre": "Fastenal Co.",
-                "tel": "Consulte web",
-                "web": "fastenal.com"
-            },
-            {
-                "nombre": "Grainger Supply",
-                "tel": "Consulte web",
-                "web": "grainger.com"
-            }
+            {"nombre": "Grainger Supply", "tel": "Consulte web", "web": "grainger.com"},
+            {"nombre": "Fastenal Co.", "tel": "Consulte web", "web": "fastenal.com"}
         ]
 
 
@@ -156,19 +145,25 @@ def obtener_mejores_licitaciones_sam():
     hoy = datetime.now(timezone.utc)
     fecha_desde = (hoy - timedelta(days=7)).strftime("%m/%d/%Y")
 
+    # NAICS clave de comercio mayorista, tecnología, suministros y manufactura comercial (Dropshipping friendly)
+    naics_objetivo = "423430,423420,423830,423450,334111,423610,423840,423120"
+
     params = {
         "api_key": SAM_API_KEY,
         "postedFrom": fecha_desde,
         "postedTo": hoy.strftime("%m/%d/%Y"),
-        "limit": 50,
-        "ptype": "o,k"  # Solicitations y Combined Synopsis/Solicitation
+        "limit": 100,
+        "ncode": naics_objetivo,
+        "ptype": "k,o,r"  # Combined Synopsis/Solicitation (k), Solicitations (o), Sources Sought (r)
     }
 
     try:
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, params=params, timeout=20)
         data = response.json()
 
         candidatas = []
+        # Palabras clave incompatibles con dropshipping (requieren trabajo físico en sitio)
+        excluir_keywords = ["construction", "installation required", "on-site service", "site visit mandatory", "janitorial service"]
 
         for opp in data.get("opportunitiesData", []):
             opp_id = opp.get("noticeId")
@@ -176,8 +171,12 @@ def obtener_mejores_licitaciones_sam():
             if not opp_id or opp_id in LICITACIONES_NOTIFICADAS:
                 continue
 
-            psc_code = opp.get("classificationCode", "")
-            if psc_code and psc_code[0].isalpha():
+            titulo = opp.get("title", "")
+            descripcion = opp.get("description", "")
+            texto_completo = f"{titulo} {descripcion}".lower()
+
+            # Descartar licitaciones con requerimientos de servicio u obra en sitio
+            if any(kw in texto_completo for kw in excluir_keywords):
                 continue
 
             response_date_str = opp.get("responseDeadLine")
@@ -193,7 +192,8 @@ def obtener_mejores_licitaciones_sam():
 
             dias_restantes = (fecha_cierre - hoy).days
 
-            if not (1 <= dias_restantes <= 20):
+            # Ventana ampliada de 1 a 45 días para dar tiempo de cotización con distribuidores
+            if not (1 <= dias_restantes <= 45):
                 continue
 
             raw_amount = opp.get("award", {}).get("amount")
@@ -208,8 +208,8 @@ def obtener_mejores_licitaciones_sam():
 
             candidatas.append({
                 "id": opp_id,
-                "titulo": opp.get("title", "Sin título"),
-                "descripcion": opp.get("description", "Sin descripción"),
+                "titulo": titulo or "Sin título",
+                "descripcion": descripcion or "Sin descripción",
                 "solicitation_number": opp.get(
                     "solicitationNumber", "N/A"
                 ),
@@ -228,7 +228,7 @@ def obtener_mejores_licitaciones_sam():
 
         candidatas.sort(key=lambda x: x["dias_restantes"])
 
-        return candidatas[:5]
+        return candidatas[:8]  # Retornar las 8 más relevantes por ejecución
 
     except Exception as e:
         logging.error(f"Error al consultar SAM.gov: {e}")
@@ -236,7 +236,6 @@ def obtener_mejores_licitaciones_sam():
 
 
 def verificar_adjudicaciones_sam():
-    """Consulta SAM.gov buscando Award Notices ('ptype=a') para las solicitudes postuladas."""
     if not SAM_API_KEY or not LICITACIONES_POSTULADAS:
         return []
 
@@ -249,7 +248,7 @@ def verificar_adjudicaciones_sam():
         "postedFrom": fecha_desde,
         "postedTo": hoy.strftime("%m/%d/%Y"),
         "limit": 50,
-        "ptype": "a"  # Award Notices (Avisos de Adjudicación)
+        "ptype": "a"  # Award Notices
     }
 
     adjudicadas_encontradas = []
@@ -260,11 +259,10 @@ def verificar_adjudicaciones_sam():
 
         for opp in data.get("opportunitiesData", []):
             sol_num = opp.get("solicitationNumber", "")
-            
-            # Revisamos si el solicitationNumber coincide con alguno de nuestra lista
+
             if sol_num in LICITACIONES_POSTULADAS:
                 award_data = opp.get("award", {})
-                
+
                 adjudicadas_encontradas.append({
                     "solicitation_number": sol_num,
                     "titulo": opp.get("title", "Sin título"),
@@ -287,16 +285,14 @@ def nombre_job(chat_id):
 
 async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id or TELEGRAM_CHAT_ID
-    
-    # -----------------------------------------------------
-    # 1. RASTREAR ADJUDICACIONES DE NUESTRAS POSTULACIONES
-    # -----------------------------------------------------
+
+    # 1. RASTREAR ADJUDICACIONES
     adjudicaciones = verificar_adjudicaciones_sam()
     for adj in adjudicaciones:
         sol_num = adj["solicitation_number"]
         monto = adj["monto_adjudicado"]
         ganador = adj["adjudicatario"]
-        
+
         mensaje_adj = (
             "🏆 *¡RESULTADO DE ADJUDICACIÓN REGISTRADO!* 🏆\n\n"
             f"📄 *Solicitation #:* `{sol_num}`\n"
@@ -304,21 +300,18 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
             f"💵 *Monto Adjudicado:* ${monto}\n"
             f"🏢 *Adjudicatario registrado:* {ganador}\n\n"
             f"🔗 [Ver Registro Oficial en SAM.gov]({adj['link']})\n\n"
-            "💡 _Si tu empresa figura como adjudicataria, revisa tu correo electrónico para recibir el documento oficial SF-1449 del oficial de compras._"
+            "💡 _Si L.A.M.B Logistics LLC figura como adjudicataria, revisa tu correo para el documento SF-1449._"
         )
-        
+
         await context.bot.send_message(
             chat_id=chat_id,
             text=mensaje_adj,
             parse_mode="Markdown"
         )
-        
-        # Una vez notificada, la removemos de la lista activa
+
         LICITACIONES_POSTULADAS.discard(sol_num)
 
-    # -----------------------------------------------------
-    # 2. BUSCAR NUEVAS OPORTUNIDADES ABIERTAS
-    # -----------------------------------------------------
+    # 2. BUSCAR NUEVAS OPORTUNIDADES DROPSHIPPING
     licitaciones = obtener_mejores_licitaciones_sam()
 
     for lic in licitaciones:
@@ -344,9 +337,7 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
         costo_proveedor = monto_total * 0.70
         flete = 400.00
         factoring = monto_total * 0.03
-        ganancia_neta = monto_total - (
-            costo_proveedor + flete + factoring
-        )
+        ganancia_neta = monto_total - (costo_proveedor + flete + factoring)
 
         distrib_str = ""
         for idx, dist in enumerate(distribuidores, 1):
@@ -357,19 +348,19 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
             )
 
         mensaje = (
-            "🚨 *NUEVA LICITACIÓN DE SUMINISTROS (DROPSHIPPING)* 🚨\n\n"
+            "🚨 *NUEVA LICITACIÓN DE PRODUCTOS (DROPSHIPPING)* 🚨\n\n"
             f"📋 *Producto:* {producto}\n"
             f"📦 *Cantidad:* {cantidad} {ia_data.get('unidad', 'Unidades')}\n"
             f"🏛️ *Agencia:* {lic['agencia']}\n"
             f"📍 *Entrega (ZIP):* {lic['zip_code']}\n"
             f"📄 *Solicitation #:* `{lic['solicitation_number']}`\n"
             f"📅 *Cierre:* {lic['cierre_str']} (En {lic['dias_restantes']} días ⚡)\n\n"
-            "📊 *ANÁLISIS UNITARIO & ESTRATEGIA (TARGET BID)*\n"
+            "📊 *ANÁLISIS UNITARIO & TARGET BID*\n"
             f"• Presupuesto Est.: ${monto_total:,.2f} USD\n"
-            f"• Precio Bid Unitario Sugerido:* ${precio_unitario_bid:,.2f} / unid.\n"
-            f"• Costo Máx. Compra Objetivo:* <= ${target_cost_unitario:,.2f} / unid.\n"
+            f"• Precio Bid Unitario Sugerido: ${precio_unitario_bid:,.2f} / unid.\n"
+            f"• Costo Máx. Compra Objetivo: <= ${target_cost_unitario:,.2f} / unid.\n"
             f"💵 *Ganancia Neta Est.:* ${ganancia_neta:,.2f} USD (Margen ~30%)\n\n"
-            f"🏬 *DISTRIBUIDORES SUGERIDOS CERCA:* \n"
+            f"🏬 *DISTRIBUIDORES SUGERIDOS CERCA:*\n"
             f"{distrib_str}"
         )
 
@@ -409,14 +400,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Cazador de Licitaciones & Rastreos Operativo*\n\n"
         "Filtros activos:\n"
-        "• Ventana de cierre: 1 a 20 días\n"
+        "• Ventana de cierre: 1 a 45 días\n"
         "• Publicaciones: Últimos 7 días\n"
-        "• Exclusivo: Suministros y Productos Físicos\n\n"
+        "• Modelo: Dropshipping / Suministros y Productos COTS\n\n"
         "Comandos:\n"
         "• `/on` - Enciende la búsqueda automática\n"
         "• `/off` - Pausa la búsqueda\n"
-        "• `/postulado <solicitation_num>` - Registra una licitación a la que postulaste\n"
-        "• `/mis_postulaciones` - Ver lista de licitaciones bajo seguimiento",
+        "• `/postulado <solicitation_num>` - Registra una licitación postulada\n"
+        "• `/mis_postulaciones` - Ver lista bajo seguimiento",
         parse_mode="Markdown"
     )
 
@@ -434,7 +425,7 @@ async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     LICITACIONES_POSTULADAS.add(sol_num)
 
     await update.message.reply_text(
-        f"🎯 *Licitaciones bajo seguimiento:* `{sol_num}`\n"
+        f"🎯 *Licitación bajo seguimiento:* `{sol_num}`\n"
         "El bot monitoreará los avisos de adjudicación (Award Notices) en SAM.gov y te avisará cuando haya resultados.",
         parse_mode="Markdown"
     )
@@ -475,7 +466,7 @@ async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        "✅ *Motor con IA encendido.* Monitoreando oportunidades y adjudicaciones...",
+        "✅ *Motor con IA encendido.* Monitoreando oportunidades COTS/Dropshipping y adjudicaciones...",
         parse_mode="Markdown"
     )
 
