@@ -42,6 +42,8 @@ SAM_API_KEY = os.getenv("SAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 LICITACIONES_NOTIFICADAS = set()
+# Conjunto para rastrear las licitaciones en las que enviamos oferta
+LICITACIONES_POSTULADAS = set()
 
 ai_client = None
 if GEMINI_API_KEY:
@@ -152,14 +154,14 @@ def obtener_mejores_licitaciones_sam():
 
     url = "https://api.sam.gov/prod/opportunities/v2/search"
     hoy = datetime.now(timezone.utc)
-    fecha_desde = (hoy - timedelta(days=2)).strftime("%m/%d/%Y")
+    fecha_desde = (hoy - timedelta(days=7)).strftime("%m/%d/%Y")
 
     params = {
         "api_key": SAM_API_KEY,
         "postedFrom": fecha_desde,
         "postedTo": hoy.strftime("%m/%d/%Y"),
-        "limit": 25,
-        "ptype": "o,k"
+        "limit": 50,
+        "ptype": "o,k"  # Solicitations y Combined Synopsis/Solicitation
     }
 
     try:
@@ -175,12 +177,10 @@ def obtener_mejores_licitaciones_sam():
                 continue
 
             psc_code = opp.get("classificationCode", "")
-
             if psc_code and psc_code[0].isalpha():
                 continue
 
             response_date_str = opp.get("responseDeadLine")
-
             if not response_date_str:
                 continue
 
@@ -193,15 +193,14 @@ def obtener_mejores_licitaciones_sam():
 
             dias_restantes = (fecha_cierre - hoy).days
 
-            if not (5 <= dias_restantes <= 7):
+            if not (1 <= dias_restantes <= 20):
                 continue
 
-            monto_estimado = float(
-                opp.get("award", {}).get("amount", 25000) or 25000
-            )
-
-            if not (5000 <= monto_estimado <= 100000):
-                continue
+            raw_amount = opp.get("award", {}).get("amount")
+            if raw_amount:
+                monto_estimado = float(raw_amount)
+            else:
+                monto_estimado = 25000.0
 
             zip_code = opp.get(
                 "placeOfPerformance", {}
@@ -236,12 +235,90 @@ def obtener_mejores_licitaciones_sam():
         return []
 
 
+def verificar_adjudicaciones_sam():
+    """Consulta SAM.gov buscando Award Notices ('ptype=a') para las solicitudes postuladas."""
+    if not SAM_API_KEY or not LICITACIONES_POSTULADAS:
+        return []
+
+    url = "https://api.sam.gov/prod/opportunities/v2/search"
+    hoy = datetime.now(timezone.utc)
+    fecha_desde = (hoy - timedelta(days=14)).strftime("%m/%d/%Y")
+
+    params = {
+        "api_key": SAM_API_KEY,
+        "postedFrom": fecha_desde,
+        "postedTo": hoy.strftime("%m/%d/%Y"),
+        "limit": 50,
+        "ptype": "a"  # Award Notices (Avisos de Adjudicación)
+    }
+
+    adjudicadas_encontradas = []
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+
+        for opp in data.get("opportunitiesData", []):
+            sol_num = opp.get("solicitationNumber", "")
+            
+            # Revisamos si el solicitationNumber coincide con alguno de nuestra lista
+            if sol_num in LICITACIONES_POSTULADAS:
+                award_data = opp.get("award", {})
+                
+                adjudicadas_encontradas.append({
+                    "solicitation_number": sol_num,
+                    "titulo": opp.get("title", "Sin título"),
+                    "monto_adjudicado": award_data.get("amount", "No especificado"),
+                    "adjudicatario": award_data.get("awardee", {}).get("name", "Contratista"),
+                    "fecha_adjudicacion": award_data.get("date", "Reciente"),
+                    "link": opp.get("uiLink", f"https://sam.gov/opp/{opp.get('noticeId')}/view")
+                })
+
+        return adjudicadas_encontradas
+
+    except Exception as e:
+        logging.error(f"Error al verificar adjudicaciones en SAM.gov: {e}")
+        return []
+
+
 def nombre_job(chat_id):
     return f"monitor_{chat_id}"
 
 
 async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id or TELEGRAM_CHAT_ID
+    
+    # -----------------------------------------------------
+    # 1. RASTREAR ADJUDICACIONES DE NUESTRAS POSTULACIONES
+    # -----------------------------------------------------
+    adjudicaciones = verificar_adjudicaciones_sam()
+    for adj in adjudicaciones:
+        sol_num = adj["solicitation_number"]
+        monto = adj["monto_adjudicado"]
+        ganador = adj["adjudicatario"]
+        
+        mensaje_adj = (
+            "🏆 *¡RESULTADO DE ADJUDICACIÓN REGISTRADO!* 🏆\n\n"
+            f"📄 *Solicitation #:* `{sol_num}`\n"
+            f"📋 *Título:* {adj['titulo']}\n"
+            f"💵 *Monto Adjudicado:* ${monto}\n"
+            f"🏢 *Adjudicatario registrado:* {ganador}\n\n"
+            f"🔗 [Ver Registro Oficial en SAM.gov]({adj['link']})\n\n"
+            "💡 _Si tu empresa figura como adjudicataria, revisa tu correo electrónico para recibir el documento oficial SF-1449 del oficial de compras._"
+        )
+        
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=mensaje_adj,
+            parse_mode="Markdown"
+        )
+        
+        # Una vez notificada, la removemos de la lista activa
+        LICITACIONES_POSTULADAS.discard(sol_num)
+
+    # -----------------------------------------------------
+    # 2. BUSCAR NUEVAS OPORTUNIDADES ABIERTAS
+    # -----------------------------------------------------
     licitaciones = obtener_mejores_licitaciones_sam()
 
     for lic in licitaciones:
@@ -272,7 +349,6 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
         )
 
         distrib_str = ""
-
         for idx, dist in enumerate(distribuidores, 1):
             distrib_str += (
                 f"{idx}. *{dist.get('nombre')}* | "
@@ -281,28 +357,18 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
             )
 
         mensaje = (
-            "🚨 *NUEVA LICITACIÓN DE SUMINISTROS "
-            "(DROPSHIPPING)* 🚨\n\n"
+            "🚨 *NUEVA LICITACIÓN DE SUMINISTROS (DROPSHIPPING)* 🚨\n\n"
             f"📋 *Producto:* {producto}\n"
-            f"📦 *Cantidad:* {cantidad} "
-            f"{ia_data.get('unidad', 'Unidades')}\n"
+            f"📦 *Cantidad:* {cantidad} {ia_data.get('unidad', 'Unidades')}\n"
             f"🏛️ *Agencia:* {lic['agencia']}\n"
             f"📍 *Entrega (ZIP):* {lic['zip_code']}\n"
-            f"📄 *Solicitation #:* "
-            f"`{lic['solicitation_number']}`\n"
-            f"📅 *Cierre:* {lic['cierre_str']} "
-            f"(En {lic['dias_restantes']} días ⚡)\n\n"
-            "📊 *ANÁLISIS UNITARIO & ESTRATEGIA "
-            "(TARGET BID)*\n"
-            f"• Presupuesto Total Est.: "
-            f"${monto_total:,.2f} USD\n"
-            f"• Precio Bid Unitario Sugerido:* "
-            f"${precio_unitario_bid:,.2f} / unid.\n"
-            f"• Costo Máx. Compra Objetivo:* "
-            f"<= ${target_cost_unitario:,.2f} / unid.\n"
-            f"💵 *Ganancia Neta Est.:* "
-            f"${ganancia_neta:,.2f} USD "
-            f"(Margen 30%)\n\n"
+            f"📄 *Solicitation #:* `{lic['solicitation_number']}`\n"
+            f"📅 *Cierre:* {lic['cierre_str']} (En {lic['dias_restantes']} días ⚡)\n\n"
+            "📊 *ANÁLISIS UNITARIO & ESTRATEGIA (TARGET BID)*\n"
+            f"• Presupuesto Est.: ${monto_total:,.2f} USD\n"
+            f"• Precio Bid Unitario Sugerido:* ${precio_unitario_bid:,.2f} / unid.\n"
+            f"• Costo Máx. Compra Objetivo:* <= ${target_cost_unitario:,.2f} / unid.\n"
+            f"💵 *Ganancia Neta Est.:* ${ganancia_neta:,.2f} USD (Margen ~30%)\n\n"
             f"🏬 *DISTRIBUIDORES SUGERIDOS CERCA:* \n"
             f"{distrib_str}"
         )
@@ -336,17 +402,52 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ---------------------------------------------------------
+# COMANDOS DE TELEGRAM
+# ---------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Cazador de Licitaciones Operativo con IA "
-        "(Gemini)*\n\n"
+        "🤖 *Cazador de Licitaciones & Rastreos Operativo*\n\n"
         "Filtros activos:\n"
-        "• Monto: $5,000 — $100,000 USD\n"
-        "• Ventana de cierre: 5 a 7 días\n"
+        "• Ventana de cierre: 1 a 20 días\n"
+        "• Publicaciones: Últimos 7 días\n"
         "• Exclusivo: Suministros y Productos Físicos\n\n"
         "Comandos:\n"
         "• `/on` - Enciende la búsqueda automática\n"
-        "• `/off` - Pausa la búsqueda",
+        "• `/off` - Pausa la búsqueda\n"
+        "• `/postulado <solicitation_num>` - Registra una licitación a la que postulaste\n"
+        "• `/mis_postulaciones` - Ver lista de licitaciones bajo seguimiento",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Debes proporcionar el número de solicitud.\n"
+            "Ejemplo: `/postulado W9124D-26-Q-0001`",
+            parse_mode="Markdown"
+        )
+        return
+
+    sol_num = context.args[0].strip()
+    LICITACIONES_POSTULADAS.add(sol_num)
+
+    await update.message.reply_text(
+        f"🎯 *Licitaciones bajo seguimiento:* `{sol_num}`\n"
+        "El bot monitoreará los avisos de adjudicación (Award Notices) en SAM.gov y te avisará cuando haya resultados.",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_mis_postulaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not LICITACIONES_POSTULADAS:
+        await update.message.reply_text("📋 Actualmente no tienes licitaciones en seguimiento.")
+        return
+
+    lista_str = "\n".join([f"• `{num}`" for num in LICITACIONES_POSTULADAS])
+    await update.message.reply_text(
+        f"📋 *Licitaciones postuladas bajo seguimiento:*\n\n{lista_str}",
         parse_mode="Markdown"
     )
 
@@ -356,17 +457,13 @@ async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_name = nombre_job(chat_id)
 
     if context.job_queue is None:
-        await update.message.reply_text(
-            "❌ La función JobQueue no está activa."
-        )
+        await update.message.reply_text("❌ La función JobQueue no está activa.")
         return
 
     current_jobs = context.job_queue.get_jobs_by_name(job_name)
 
     if current_jobs:
-        await update.message.reply_text(
-            "⚡ El motor con IA ya está activado y monitoreando."
-        )
+        await update.message.reply_text("⚡ El motor con IA ya está activado y monitoreando.")
         return
 
     context.job_queue.run_repeating(
@@ -378,8 +475,7 @@ async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        "✅ *Motor con IA encendido.* "
-        "Monitoreando productos y distribuidores...",
+        "✅ *Motor con IA encendido.* Monitoreando oportunidades y adjudicaciones...",
         parse_mode="Markdown"
     )
 
@@ -389,26 +485,19 @@ async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_name = nombre_job(chat_id)
 
     if context.job_queue is None:
-        await update.message.reply_text(
-            "❌ La función JobQueue no está activa."
-        )
+        await update.message.reply_text("❌ La función JobQueue no está activa.")
         return
 
     current_jobs = context.job_queue.get_jobs_by_name(job_name)
 
     if not current_jobs:
-        await update.message.reply_text(
-            "💤 El motor ya está apagado."
-        )
+        await update.message.reply_text("💤 El motor ya está apagado.")
         return
 
     for job in current_jobs:
         job.schedule_removal()
 
-    await update.message.reply_text(
-        "🛑 *Motor pausado.*",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("🛑 *Motor pausado.*", parse_mode="Markdown")
 
 
 async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -421,8 +510,7 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lic_id = data.split("_")[1]
 
         await query.message.reply_text(
-            f"⏳ Generando Packing List para "
-            f"licitación `{lic_id}`...",
+            f"⏳ Generando Packing List para licitación `{lic_id}`...",
             parse_mode="Markdown"
         )
 
@@ -430,30 +518,25 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lic_id = data.split("_")[1]
 
         await query.message.reply_text(
-            f"⏳ Generando Orden de Compra (Vendor PO) "
-            f"para `{lic_id}`...",
+            f"⏳ Generando Orden de Compra (Vendor PO) para `{lic_id}`...",
             parse_mode="Markdown"
         )
 
 
 def main():
-    # Inicia Flask en un hilo secundario para mantener el puerto de Render abierto
     threading.Thread(target=run_flask, daemon=True).start()
 
     if not TELEGRAM_BOT_TOKEN:
-        print(
-            "Error: No se encontró TELEGRAM_BOT_TOKEN "
-            "en Environment Variables."
-        )
+        print("Error: No se encontró TELEGRAM_BOT_TOKEN en Environment Variables.")
         return
 
-    app = Application.builder().token(
-        TELEGRAM_BOT_TOKEN
-    ).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("on", cmd_on))
     app.add_handler(CommandHandler("off", cmd_off))
+    app.add_handler(CommandHandler("postulado", cmd_postulado))
+    app.add_handler(CommandHandler("mis_postulaciones", cmd_mis_postulaciones))
     app.add_handler(CallbackQueryHandler(boton_callback))
 
     if TELEGRAM_CHAT_ID:
@@ -461,8 +544,7 @@ def main():
 
         if app.job_queue is None:
             logging.error(
-                "No se pudo activar el monitoreo automático: "
-                "JobQueue no está disponible."
+                "No se pudo activar el monitoreo automático: JobQueue no está disponible."
             )
         else:
             app.job_queue.run_repeating(
@@ -473,20 +555,11 @@ def main():
                 name=job_name
             )
 
-            logging.info(
-                "Monitoreo automático continuo configurado "
-                "cada hora, todos los días."
-            )
+            logging.info("Monitoreo automático continuo configurado cada hora.")
     else:
-        logging.warning(
-            "TELEGRAM_CHAT_ID no está configurado; usa /on "
-            "desde Telegram para activar el monitoreo manual."
-        )
+        logging.warning("TELEGRAM_CHAT_ID no configurado; usa /on en Telegram.")
 
-    print(
-        "🤖 Cazador de Licitaciones con IA iniciando polling..."
-    )
-
+    print("🤖 Cazador de Licitaciones con IA iniciando polling...")
     app.run_polling()
 
 
