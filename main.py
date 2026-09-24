@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -32,7 +33,10 @@ def run_flask():
 # ---------------------------------------------------------
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
 # ---------------------------------------------------------
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -47,8 +51,9 @@ ai_client = None
 if GEMINI_API_KEY:
     try:
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        logger.info("✅ Cliente de Gemini API inicializado.")
     except Exception as e:
-        print(f"❌ Error al inicializar Gemini API: {e}", flush=True)
+        logger.error(f"❌ Error al inicializar Gemini API: {e}")
 
 # ---------------------------------------------------------
 # GENERADOR DE DOCUMENTOS PDF (ReportLab)
@@ -94,6 +99,7 @@ def generar_pdf_po(lic_data):
     c.showPage()
     c.save()
     buffer.seek(0)
+    buffer.name = f"Vendor_PO_{lic_data.get('solicitation_number', 'Doc')}.pdf"
     return buffer
 
 
@@ -123,12 +129,20 @@ def generar_pdf_packing_list(lic_data):
     c.showPage()
     c.save()
     buffer.seek(0)
+    buffer.name = f"Packing_List_{lic_data.get('solicitation_number', 'Doc')}.pdf"
     return buffer
 
 
 # ---------------------------------------------------------
 # FUNCIONES IA (GEMINI) Y SAM.GOV
 # ---------------------------------------------------------
+
+
+def limpiar_json_respuesta(texto_raw):
+    """Elimina delimitadores de código markdown antes de parsear JSON."""
+    texto_limpio = re.sub(r"```json\s*", "", texto_raw, flags=re.IGNORECASE)
+    texto_limpio = re.sub(r"```\s*", "", texto_limpio)
+    return texto_limpio.strip()
 
 
 def analizar_licitacion_con_ia(titulo, descripcion):
@@ -158,7 +172,7 @@ def analizar_licitacion_con_ia(titulo, descripcion):
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
-        data = json.loads(response.text)
+        data = json.loads(limpiar_json_respuesta(response.text))
         try:
             cant = int(data.get("cantidad", 1))
             data["cantidad"] = cant if cant > 0 else 1
@@ -166,7 +180,7 @@ def analizar_licitacion_con_ia(titulo, descripcion):
             data["cantidad"] = 1
         return data
     except Exception as e:
-        print(f"⚠️ Error en análisis Gemini: {e}", flush=True)
+        logger.warning(f"⚠️ Error en análisis Gemini: {e}")
         return {
             "producto": titulo,
             "cantidad": 1,
@@ -193,12 +207,12 @@ def buscar_distribuidores_locales(producto, zip_code):
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
-        data = json.loads(response.text)
+        data = json.loads(limpiar_json_respuesta(response.text))
         if isinstance(data, list):
             return data[:2]
         return data.get("distribuidores", [])[:2]
     except Exception as e:
-        print(f"⚠️ Error al buscar distribuidores: {e}", flush=True)
+        logger.warning(f"⚠️ Error al buscar distribuidores: {e}")
         return [
             {"nombre": "Grainger Supply", "tel": "Ver web", "web": "grainger.com"},
             {"nombre": "Fastenal Co.", "tel": "Ver web", "web": "fastenal.com"},
@@ -207,7 +221,7 @@ def buscar_distribuidores_locales(producto, zip_code):
 
 def obtener_mejores_licitaciones_sam():
     if not SAM_API_KEY:
-        print("❌ SAM_API_KEY no encontrada en variables de entorno.", flush=True)
+        logger.error("❌ SAM_API_KEY no encontrada en variables de entorno.")
         return []
 
     url = "https://api.sam.gov/prod/opportunities/v2/search"
@@ -224,11 +238,11 @@ def obtener_mejores_licitaciones_sam():
         "is_active": "true",
     }
 
-    print(f"🔍 [SAM.gov] Escaneando licitaciones activas ({fecha_desde} - {fecha_hasta})...", flush=True)
+    logger.info(f"🔍 [SAM.gov] Escaneando licitaciones activas ({fecha_desde} - {fecha_hasta})...")
 
     try:
         response = requests.get(url, params=params, timeout=20)
-        print(f"📊 [SAM.gov] Código HTTP de respuesta: {response.status_code}", flush=True)
+        logger.info(f"📊 [SAM.gov] Código HTTP de respuesta: {response.status_code}")
 
         if response.status_code != 200:
             return []
@@ -303,12 +317,12 @@ def obtener_mejores_licitaciones_sam():
             )
 
         candidatas.sort(key=lambda x: x["dias_restantes"])
-        print(f"🎯 [SAM.gov] {len(candidatas)} licitaciones COTS válidas listadas.", flush=True)
+        logger.info(f"🎯 [SAM.gov] {len(candidatas)} licitaciones COTS válidas listadas.")
 
         return candidatas[:5]
 
     except Exception as e:
-        print(f"⚠️ Error durante la consulta SAM.gov: {e}", flush=True)
+        logger.error(f"⚠️ Error durante la consulta SAM.gov: {e}")
         return []
 
 
@@ -331,6 +345,9 @@ def verificar_adjudicaciones_sam():
     adjudicadas = []
     try:
         response = requests.get(url, params=params, timeout=15)
+        if response.status_code != 200:
+            return []
+
         data = response.json()
 
         for opp in data.get("opportunitiesData", []):
@@ -348,7 +365,7 @@ def verificar_adjudicaciones_sam():
                 )
         return adjudicadas
     except Exception as e:
-        print(f"⚠️ Error al consultar adjudicaciones: {e}", flush=True)
+        logger.warning(f"⚠️ Error al consultar adjudicaciones: {e}")
         return []
 
 
@@ -363,7 +380,11 @@ def nombre_job(chat_id):
 
 async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id or TELEGRAM_CHAT_ID
-    print("⏰ [Bucle] Ejecutando escaneo automático en SAM.gov...", flush=True)
+    if not chat_id:
+        logger.warning("⚠️ No hay TELEGRAM_CHAT_ID definido para enviar notificaciones.")
+        return
+
+    logger.info("⏰ [Bucle] Ejecutando escaneo automático en SAM.gov...")
 
     # 1. Rastrear Adjudicaciones
     adjudicaciones = verificar_adjudicaciones_sam()
@@ -447,7 +468,7 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        print(f"📩 Alerta enviada a Telegram: {lic['id']}", flush=True)
+        logger.info(f"📩 Alerta enviada a Telegram: {lic['id']}")
 
 
 # ---------------------------------------------------------
@@ -564,7 +585,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_file,
-            filename=f"Packing_List_{lic_data.get('solicitation_number', 'Doc')}.pdf",
             caption="📦 **Packing List generado exitosamente.**",
             parse_mode="Markdown",
         )
@@ -578,7 +598,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_file,
-            filename=f"Vendor_PO_{lic_data.get('solicitation_number', 'Doc')}.pdf",
             caption="🏢 **Vendor Purchase Order generado exitosamente.**",
             parse_mode="Markdown",
         )
@@ -593,7 +612,7 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
     if not TELEGRAM_BOT_TOKEN:
-        print("❌ TELEGRAM_BOT_TOKEN no definido.", flush=True)
+        logger.error("❌ TELEGRAM_BOT_TOKEN no definido.")
         return
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -613,14 +632,13 @@ def main():
                 buscar_y_notificar,
                 interval=3600,
                 first=1,
-                chat_id=TELEGRAM_CHAT_ID,
+                chat_id=int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID.isdigit() or TELEGRAM_CHAT_ID.startswith("-") else TELEGRAM_CHAT_ID,
                 name=job_name,
             )
-            print("🟢 Monitoreo automático en segundo plano activado.", flush=True)
+            logger.info("🟢 Monitoreo automático en segundo plano activado.")
 
-    print("🤖 Cazador de Licitaciones activo. Iniciando polling...", flush=True)
+    logger.info("🤖 Cazador de Licitaciones activo. Iniciando polling...")
     app.run_polling()
 
 
 if __name__ == "__main__":
-    main()
