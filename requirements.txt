@@ -1,5 +1,5 @@
-requests
 python-telegram-bot[job-queue]
-APScheduler
+requests
 google-genai
 flask
+reportlab
