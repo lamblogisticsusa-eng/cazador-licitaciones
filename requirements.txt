@@ -1,5 +1,5 @@
-python-telegram-bot[job-queue]
-requests
-google-genai
 flask
+google-genai
 reportlab
+requests
+python-telegram-bot[job-queue]
