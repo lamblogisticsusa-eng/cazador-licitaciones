@@ -45,15 +45,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 LICITACIONES_NOTIFICADAS = set()
 LICITACIONES_POSTULADAS = set()
-MEMORIA_LICITACIONES = {}  # Guarda los detalles parseados para la generación de documentos
+MEMORIA_LICITACIONES = {}
 
 ai_client = None
 if GEMINI_API_KEY:
     try:
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
-        logger.info("✅ Cliente de Gemini API inicializado.")
+        logger.info("Cliente de Gemini API inicializado.")
     except Exception as e:
-        logger.error(f"❌ Error al inicializar Gemini API: {e}")
+        logger.error(f"Error al inicializar Gemini API: {e}")
 
 # ---------------------------------------------------------
 # GENERADOR DE DOCUMENTOS PDF (ReportLab)
@@ -139,7 +139,6 @@ def generar_pdf_packing_list(lic_data):
 
 
 def limpiar_json_respuesta(texto_raw):
-    """Elimina delimitadores de código markdown antes de parsear JSON."""
     texto_limpio = re.sub(r"```json\s*", "", texto_raw, flags=re.IGNORECASE)
     texto_limpio = re.sub(r"```\s*", "", texto_limpio)
     return texto_limpio.strip()
@@ -180,7 +179,7 @@ def analizar_licitacion_con_ia(titulo, descripcion):
             data["cantidad"] = 1
         return data
     except Exception as e:
-        logger.warning(f"⚠️ Error en análisis Gemini: {e}")
+        logger.warning(f"Error en análisis Gemini: {e}")
         return {
             "producto": titulo,
             "cantidad": 1,
@@ -212,7 +211,7 @@ def buscar_distribuidores_locales(producto, zip_code):
             return data[:2]
         return data.get("distribuidores", [])[:2]
     except Exception as e:
-        logger.warning(f"⚠️ Error al buscar distribuidores: {e}")
+        logger.warning(f"Error al buscar distribuidores: {e}")
         return [
             {"nombre": "Grainger Supply", "tel": "Ver web", "web": "grainger.com"},
             {"nombre": "Fastenal Co.", "tel": "Ver web", "web": "fastenal.com"},
@@ -221,7 +220,7 @@ def buscar_distribuidores_locales(producto, zip_code):
 
 def obtener_mejores_licitaciones_sam():
     if not SAM_API_KEY:
-        logger.error("❌ SAM_API_KEY no encontrada en variables de entorno.")
+        logger.error("SAM_API_KEY no encontrada en variables de entorno.")
         return []
 
     url = "https://api.sam.gov/prod/opportunities/v2/search"
@@ -238,11 +237,11 @@ def obtener_mejores_licitaciones_sam():
         "is_active": "true",
     }
 
-    logger.info(f"🔍 [SAM.gov] Escaneando licitaciones activas ({fecha_desde} - {fecha_hasta})...")
+    logger.info(f"Escaneando licitaciones activas ({fecha_desde} - {fecha_hasta})...")
 
     try:
         response = requests.get(url, params=params, timeout=20)
-        logger.info(f"📊 [SAM.gov] Código HTTP de respuesta: {response.status_code}")
+        logger.info(f"Código HTTP de respuesta: {response.status_code}")
 
         if response.status_code != 200:
             return []
@@ -317,12 +316,12 @@ def obtener_mejores_licitaciones_sam():
             )
 
         candidatas.sort(key=lambda x: x["dias_restantes"])
-        logger.info(f"🎯 [SAM.gov] {len(candidatas)} licitaciones COTS válidas listadas.")
+        logger.info(f"{len(candidatas)} licitaciones COTS válidas listadas.")
 
         return candidatas[:5]
 
     except Exception as e:
-        logger.error(f"⚠️ Error durante la consulta SAM.gov: {e}")
+        logger.error(f"Error durante la consulta SAM.gov: {e}")
         return []
 
 
@@ -365,7 +364,7 @@ def verificar_adjudicaciones_sam():
                 )
         return adjudicadas
     except Exception as e:
-        logger.warning(f"⚠️ Error al consultar adjudicaciones: {e}")
+        logger.warning(f"Error al consultar adjudicaciones: {e}")
         return []
 
 
@@ -381,27 +380,25 @@ def nombre_job(chat_id):
 async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id or TELEGRAM_CHAT_ID
     if not chat_id:
-        logger.warning("⚠️ No hay TELEGRAM_CHAT_ID definido para enviar notificaciones.")
+        logger.warning("No hay TELEGRAM_CHAT_ID definido para enviar notificaciones.")
         return
 
-    logger.info("⏰ [Bucle] Ejecutando escaneo automático en SAM.gov...")
+    logger.info("Ejecutando escaneo automático en SAM.gov...")
 
-    # 1. Rastrear Adjudicaciones
     adjudicaciones = verificar_adjudicaciones_sam()
     for adj in adjudicaciones:
         sol_num = adj["solicitation_number"]
         mensaje_adj = (
-            "🏆 *¡RESULTADO DE ADJUDICACIÓN PUBLICADO!* 🏆\n\n"
-            f"📄 *Solicitation #:* `{sol_num}`\n"
-            f"📋 *Título:* {adj['titulo']}\n"
-            f"💵 *Monto:* ${adj['monto_adjudicado']}\n"
-            f"🏢 *Adjudicatario:* {adj['adjudicatario']}\n\n"
-            f"🔗 [Ver Registro Oficial]({adj['link']})"
+            "🏆 RESULTADO DE ADJUDICACIÓN PUBLICADO! 🏆\n\n"
+            f"Solicitation #: {sol_num}\n"
+            f"Título: {adj['titulo']}\n"
+            f"Monto: ${adj['monto_adjudicado']}\n"
+            f"Adjudicatario: {adj['adjudicatario']}\n\n"
+            f"Ver Registro Oficial: {adj['link']}"
         )
-        await context.bot.send_message(chat_id=chat_id, text=mensaje_adj, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text=mensaje_adj)
         LICITACIONES_POSTULADAS.discard(sol_num)
 
-    # 2. Buscar Oportunidades COTS
     licitaciones = obtener_mejores_licitaciones_sam()
 
     for lic in licitaciones:
@@ -423,7 +420,6 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
         factoring = monto_total * 0.03
         ganancia_neta = monto_total - (costo_proveedor + flete + factoring)
 
-        # Guardar en memoria para generar PDFs posteriormente
         MEMORIA_LICITACIONES[lic["id"]] = {
             "solicitation_number": lic["solicitation_number"],
             "producto": producto,
@@ -435,40 +431,39 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
 
         distrib_str = ""
         for idx, dist in enumerate(distribuidores, 1):
-            distrib_str += f"{idx}. *{dist.get('nombre')}* | 📞 {dist.get('tel')} | 🌐 {dist.get('web')}\n"
+            distrib_str += f"{idx}. {dist.get('nombre')} | Tel: {dist.get('tel')} | Web: {dist.get('web')}\n"
 
         mensaje = (
-            "🚨 *NUEVA LICITACIÓN DE PRODUCTOS (<$250k)* 🚨\n\n"
-            f"📋 *Producto:* {producto}\n"
-            f"📦 *Cantidad:* {cantidad} {unidad}\n"
-            f"🏛️ *Agencia:* {lic['agencia']}\n"
-            f"📍 *Entrega (ZIP):* {lic['zip_code']}\n"
-            f"📄 *Solicitation #:* `{lic['solicitation_number']}`\n"
-            f"📅 *Cierre:* {lic['cierre_str']} (En {lic['dias_restantes']} días ⚡)\n\n"
-            "📊 *ANÁLISIS UNITARIO & TARGET BID*\n"
+            "🚨 NUEVA LICITACIÓN DE PRODUCTOS (<$250k) 🚨\n\n"
+            f"Producto: {producto}\n"
+            f"Cantidad: {cantidad} {unidad}\n"
+            f"Agencia: {lic['agencia']}\n"
+            f"Entrega (ZIP): {lic['zip_code']}\n"
+            f"Solicitation #: {lic['solicitation_number']}\n"
+            f"Cierre: {lic['cierre_str']} (En {lic['dias_restantes']} días)\n\n"
+            "ANÁLISIS UNITARIO & TARGET BID\n"
             f"• Presupuesto Est.: ${monto_total:,.2f} USD\n"
             f"• Precio Bid Unitario Sugerido: ${precio_unitario_bid:,.2f} / unid.\n"
             f"• Costo Máx. Compra Objetivo: <= ${target_cost_unitario:,.2f} / unid.\n"
-            f"💵 *Ganancia Neta Est.:* ${ganancia_neta:,.2f} USD\n\n"
-            f"🏬 *DISTRIBUIDORES SUGERIDOS CERCA:*\n"
+            f"Ganancia Neta Est.: ${ganancia_neta:,.2f} USD\n\n"
+            f"DISTRIBUIDORES SUGERIDOS CERCA:\n"
             f"{distrib_str}"
         )
 
         keyboard = [
             [
-                InlineKeyboardButton("🔗 Ver en SAM.gov", url=lic["link"]),
-                InlineKeyboardButton("📦 Packing List (PDF)", callback_data=f"pkg_{lic['id']}"),
+                InlineKeyboardButton("Ver en SAM.gov", url=lic["link"]),
+                InlineKeyboardButton("Packing List (PDF)", callback_data=f"pkg_{lic['id']}"),
             ],
-            [InlineKeyboardButton("🏢 Generar Vendor PO (PDF)", callback_data=f"po_{lic['id']}")],
+            [InlineKeyboardButton("Generar Vendor PO (PDF)", callback_data=f"po_{lic['id']}")],
         ]
 
         await context.bot.send_message(
             chat_id=chat_id,
             text=mensaje,
-            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        logger.info(f"📩 Alerta enviada a Telegram: {lic['id']}")
+        logger.info(f"Alerta enviada a Telegram: {lic['id']}")
 
 
 # ---------------------------------------------------------
@@ -478,62 +473,53 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Cazador de Licitaciones L.A.M.B. Logistics LLC*\n\n"
+        "Cazador de Licitaciones L.A.M.B. Logistics LLC\n\n"
         "Comandos disponibles:\n"
-        "• `/on` - Iniciar escaneo automático cada hora\n"
-        "• `/off` - Pausar el escaneo\n"
-        "• `/postulado <solicitation_num>` - Dar seguimiento a una postura\n"
-        "• `/rfq <solicitation_num>` - Generar borrador de correo RFQ para proveedores\n"
-        "• `/mis_postulaciones` - Ver lista de licitaciones bajo monitoreo",
-        parse_mode="Markdown",
+        "• /on - Iniciar escaneo automático cada hora\n"
+        "• /off - Pausar el escaneo\n"
+        "• /postulado <solicitation_num> - Dar seguimiento a una postura\n"
+        "• /rfq <solicitation_num> - Generar borrador de correo RFQ para proveedores\n"
+        "• /mis_postulaciones - Ver lista de licitaciones bajo monitoreo"
     )
 
 
 async def cmd_rfq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/rfq <solicitation_number>`", parse_mode="Markdown")
+        await update.message.reply_text("Uso: /rfq <solicitation_number>")
         return
 
     sol_num = context.args[0].strip()
     mensaje_rfq = (
-        "✉️ *SOLICITUD DE COTIZACIÓN (RFQ) - DRAFT PARA PROVEEDOR*\n\n"
-        "**Subject:** RFQ / Price Quote Request - L.A.M.B. Logistics LLC (Ref: "
-        + sol_num
-        + ")\n\n"
+        "SOLICITUD DE COTIZACIÓN (RFQ) - DRAFT PARA PROVEEDOR\n\n"
+        f"Subject: RFQ / Price Quote Request - L.A.M.B. Logistics LLC (Ref: {sol_num})\n\n"
         "Dear Sales Department,\n\n"
-        "L.A.M.B. Logistics LLC is currently preparing a federal supply bid for "
-        + sol_num
-        + ".\n"
+        f"L.A.M.B. Logistics LLC is currently preparing a federal supply bid for {sol_num}.\n"
         "Please provide your best wholesale pricing, availability, and estimated lead times for the required items.\n\n"
-        "• **Delivery Zip Code:** As specified in requirements.\n"
-        "• **Payment Terms:** Net 30 or Credit Card.\n\n"
+        "• Delivery Zip Code: As specified in requirements.\n"
+        "• Payment Terms: Net 30 or Credit Card.\n\n"
         "Thank you,\n"
-        "*Purchasing Dept | L.A.M.B. Logistics LLC*"
+        "Purchasing Dept | L.A.M.B. Logistics LLC"
     )
-    await update.message.reply_text(mensaje_rfq, parse_mode="Markdown")
+    await update.message.reply_text(mensaje_rfq)
 
 
 async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/postulado W9124D-26-Q-0001`", parse_mode="Markdown")
+        await update.message.reply_text("Uso: /postulado W9124D-26-Q-0001")
         return
 
     sol_num = context.args[0].strip()
     LICITACIONES_POSTULADAS.add(sol_num)
-    await update.message.reply_text(
-        f"🎯 *Licitación en seguimiento:* `{sol_num}`", parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"Licitación en seguimiento: {sol_num}")
 
 
 async def cmd_mis_postulaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not LICITACIONES_POSTULADAS:
-        await update.message.reply_text("📋 No tienes licitaciones registradas en seguimiento.")
+        await update.message.reply_text("No tienes licitaciones registradas en seguimiento.")
         return
 
-    lista_str = "\n".join([f"• `{num}`" for num in LICITACIONES_POSTULADAS])
-    await update.message.reply_text(
-        f"📋 *Licitaciones bajo monitoreo:*\n\n{lista_str}", parse_mode="Markdown"
-    )
+    lista_str = "\n".join([f"• {num}" for num in LICITACIONES_POSTULADAS])
+    await update.message.reply_text(f"Licitaciones bajo monitoreo:\n\n{lista_str}")
 
 
 async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -541,17 +527,17 @@ async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_name = nombre_job(chat_id)
 
     if context.job_queue is None:
-        await update.message.reply_text("❌ Error: JobQueue no configurado.")
+        await update.message.reply_text("Error: JobQueue no configurado.")
         return
 
     if context.job_queue.get_jobs_by_name(job_name):
-        await update.message.reply_text("⚡ El escaneo automático ya está activo.")
+        await update.message.reply_text("El escaneo automático ya está activo.")
         return
 
     context.job_queue.run_repeating(
         buscar_y_notificar, interval=3600, first=1, chat_id=chat_id, name=job_name
     )
-    await update.message.reply_text("✅ *Motor encendido.* Monitoreando SAM.gov...", parse_mode="Markdown")
+    await update.message.reply_text("Motor encendido. Monitoreando SAM.gov...")
 
 
 async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -563,12 +549,12 @@ async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     jobs = context.job_queue.get_jobs_by_name(job_name)
     if not jobs:
-        await update.message.reply_text("💤 El motor ya está apagado.")
+        await update.message.reply_text("El motor ya está apagado.")
         return
 
     for job in jobs:
         job.schedule_removal()
-    await update.message.reply_text("🛑 *Motor pausado.*", parse_mode="Markdown")
+    await update.message.reply_text("Motor pausado.")
 
 
 async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -585,8 +571,7 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_file,
-            caption="📦 **Packing List generado exitosamente.**",
-            parse_mode="Markdown",
+            caption="Packing List generado exitosamente.",
         )
 
     elif data.startswith("po_"):
@@ -598,8 +583,7 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_file,
-            caption="🏢 **Vendor Purchase Order generado exitosamente.**",
-            parse_mode="Markdown",
+            caption="Vendor Purchase Order generado exitosamente.",
         )
 
 
@@ -612,7 +596,7 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN no definido.")
+        logger.error("TELEGRAM_BOT_TOKEN no definido.")
         return
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -628,17 +612,23 @@ def main():
     if TELEGRAM_CHAT_ID:
         job_name = nombre_job(TELEGRAM_CHAT_ID)
         if app.job_queue is not None:
+            target_chat = (
+                int(TELEGRAM_CHAT_ID)
+                if TELEGRAM_CHAT_ID.isdigit() or TELEGRAM_CHAT_ID.startswith("-")
+                else TELEGRAM_CHAT_ID
+            )
             app.job_queue.run_repeating(
                 buscar_y_notificar,
                 interval=3600,
                 first=1,
-                chat_id=int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID.isdigit() or TELEGRAM_CHAT_ID.startswith("-") else TELEGRAM_CHAT_ID,
+                chat_id=target_chat,
                 name=job_name,
             )
-            logger.info("🟢 Monitoreo automático en segundo plano activado.")
+            logger.info("Monitoreo automático en segundo plano activado.")
 
-    logger.info("🤖 Cazador de Licitaciones activo. Iniciando polling...")
+    logger.info("Cazador de Licitaciones activo. Iniciando polling...")
     app.run_polling()
 
 
 if __name__ == "__main__":
+    main()
