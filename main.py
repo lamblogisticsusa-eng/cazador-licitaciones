@@ -1,20 +1,3 @@
-Aquí tienes el código definitivo, completo y robusto para main.py.
-
-Está construido unificando la lógica completa de tu versión original (incluyendo la generación detallada de PDF con ReportLab, cálculos exactos de presupuestos/márgenes, análisis con Gemini 2.5 y los flujos de drop-shipping) con resiliencia total frente a la API de SAM.gov y Telegram.
-
-¿Qué asegura que este código funcione al 100% en producción?
-Doble Estrategia SAM.gov (Fallback): Intenta la búsqueda filtrada estricta (ptype=k,o,p). Si SAM.gov no devuelve nada (común por variaciones en sus tipos de aviso), ejecuta un escaneo amplio con palabras clave (q="supplies equipment parts") sin romper el bot.
-
-Robustez en Gemini API (google-genai): Configurado con response_mime_type="application/json" y un limpiador de marcado Regex para evitar fallos por JSON mal formateado. Si la IA falla o no hay API Key, activa un analizador sintáctico automático de reserva para que el flujo nunca se detenga.
-
-ReportLab sin corrupción de archivos: Dibuja los PDF sobre io.BytesIO en memoria, resetea el puntero (seek(0)) y asigna el atributo .name requerido por python-telegram-bot para enviar documentos sin guardar nada en el disco local.
-
-Manejo de Tipos en Telegram JobQueue: Convierte dinámicamente TELEGRAM_CHAT_ID a entero (incluso con prefijos -100 de canales o grupos) evitando cierres inesperados al arrancar el bucle.
-
-Servidor Flask para Render/Koyeb: Ejecutado en un hilo daemon en el puerto expuesto (PORT) para superar los chequeos de salud (health checks) de plataformas Cloud.
-
-Código Definitivo (main.py)
-Python
 import io
 import json
 import logging
@@ -22,6 +5,7 @@ import os
 import re
 import threading
 from datetime import datetime, timedelta, timezone
+
 from flask import Flask
 from google import genai
 from google.genai import types
@@ -29,6 +13,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import requests
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -89,11 +74,10 @@ if GEMINI_API_KEY:
 else:
     logger.warning("GEMINI_API_KEY no detectada. Análisis con IA desactivado.")
 
+
 # ---------------------------------------------------------
 # GENERADOR DE DOCUMENTOS PDF (ReportLab)
 # ---------------------------------------------------------
-
-
 def generar_pdf_po(lic_data):
     """Genera una Purchase Order (PO) en PDF para el proveedor."""
     buffer = io.BytesIO()
@@ -251,8 +235,6 @@ def generar_pdf_packing_list(lic_data):
 # ---------------------------------------------------------
 # INTELIGENCIA ARTIFICIAL Y ANÁLISIS COTS (GEMINI)
 # ---------------------------------------------------------
-
-
 def limpiar_json_respuesta(texto_raw):
     """Limpia la respuesta de la IA para obtener una cadena JSON válida."""
     texto_limpio = re.sub(r"```json\s*", "", texto_raw, flags=re.IGNORECASE)
@@ -355,8 +337,6 @@ def buscar_distribuidores_locales(producto, zip_code):
 # ---------------------------------------------------------
 # CONEXIÓN Y ESCANEO EN SAM.GOV
 # ---------------------------------------------------------
-
-
 def consultar_api_sam(params):
     """Realiza peticiones HTTP a la API oficial v2 de SAM.gov."""
     url = "https://api.sam.gov/prod/opportunities/v2/search"
@@ -526,8 +506,6 @@ def verificar_adjudicaciones_sam():
 # ---------------------------------------------------------
 # LÓGICA PRINCIPAL DE NOTIFICACIÓN EN TELEGRAM
 # ---------------------------------------------------------
-
-
 async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=None):
     """Ejecuta escaneo, procesamiento financiero y envío de mensajes a Telegram."""
     chat_id = target_chat_id
@@ -641,8 +619,6 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 # ---------------------------------------------------------
 # COMANDOS Y CALLBACKS DE TELEGRAM
 # ---------------------------------------------------------
-
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Responde al comando /start con el saludo oficial."""
     saludo = (
@@ -826,8 +802,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------
 # PUNTO DE ENTRADA PRINCIPAL
 # ---------------------------------------------------------
-
-
 def main():
     # Iniciar servidor web de respaldo en segundo plano
     threading.Thread(target=run_flask, daemon=True).start()
@@ -836,7 +810,7 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN no configurado en variables de entorno.")
         return
 
-    # Inicialización de la aplicación de Telegram
+    # Inicialización del bot con JobQueue explícita
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Registrar comandos
@@ -851,14 +825,14 @@ def main():
 
     # Tarea programada por defecto al iniciar
     if TELEGRAM_CHAT_ID:
-        target_chat = (
-            int(TELEGRAM_CHAT_ID)
-            if TELEGRAM_CHAT_ID.isdigit() or TELEGRAM_CHAT_ID.startswith("-")
-            else TELEGRAM_CHAT_ID
-        )
-        job_name = nombre_job(target_chat)
-        if app.job_queue is not None:
-            try:
+        try:
+            target_chat = (
+                int(TELEGRAM_CHAT_ID)
+                if str(TELEGRAM_CHAT_ID).lstrip("-").isdigit()
+                else TELEGRAM_CHAT_ID
+            )
+            job_name = nombre_job(target_chat)
+            if app.job_queue:
                 app.job_queue.run_repeating(
                     buscar_y_notificar,
                     interval=3600,
@@ -866,12 +840,12 @@ def main():
                     chat_id=target_chat,
                     name=job_name,
                 )
-                logger.info("Tarea de monitoreo por hora programada correctamente.")
-            except Exception as e:
-                logger.error(f"Error al programar la tarea repetitiva: {e}")
+                logger.info("Tarea de monitoreo programada correctamente.")
+        except Exception as e:
+            logger.error(f"Error al programar JobQueue: {e}")
 
     logger.info("Kiyomoto listo y escuchando en Telegram...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
