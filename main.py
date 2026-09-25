@@ -16,10 +16,11 @@ import requests
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    JobQueue,
 )
 
 # ---------------------------------------------------------
@@ -70,9 +71,19 @@ if GEMINI_API_KEY:
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
         logger.info("Cliente de Gemini API inicializado correctamente.")
     except Exception as e:
-        logger.error(f"Error crítico al inicializar Gemini API: {e}")
+        logger.error(f"Error al inicializar Gemini API: {e}")
 else:
-    logger.warning("GEMINI_API_KEY no detectada. Análisis con IA desactivado.")
+    logger.warning("GEMINI_API_KEY no detectada. Análisis de IA desactivado.")
+
+
+# ---------------------------------------------------------
+# HELPER DE LIMPIEZA DE TEXTO (Evita crash de Markdown en Telegram)
+# ---------------------------------------------------------
+def escapar_markdown(texto: str) -> str:
+    """Escapa guiones bajos y asteriscos en identificadores para evitar fallos en el parser de Telegram."""
+    if not texto:
+        return ""
+    return str(texto).replace("_", "\\_").replace("*", "\\*")
 
 
 # ---------------------------------------------------------
@@ -360,7 +371,6 @@ def obtener_mejores_licitaciones_sam():
     fecha_desde = (hoy - timedelta(days=14)).strftime("%m/%d/%Y")
     fecha_hasta = hoy.strftime("%m/%d/%Y")
 
-    # 1. Búsqueda por tipos de contratos COTS
     params_estrictos = {
         "api_key": SAM_API_KEY,
         "postedFrom": fecha_desde,
@@ -373,9 +383,8 @@ def obtener_mejores_licitaciones_sam():
     logger.info(f"Escaneando SAM.gov ({fecha_desde} - {fecha_hasta})...")
     opps = consultar_api_sam(params_estrictos)
 
-    # 2. Búsqueda Fallback amplia si el filtro de tipo no arroja resultados
     if not opps:
-        logger.info("Filtro estricto sin resultados. Ejecutando búsqueda ampliada (Fallback)...")
+        logger.info("Filtro estricto sin resultados. Ejecutando búsqueda ampliada...")
         params_fallback = {
             "api_key": SAM_API_KEY,
             "postedFrom": fecha_desde,
@@ -527,10 +536,10 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
         sol_num = adj["solicitation_number"]
         mensaje_adj = (
             "🏆 **RESULTADO DE ADJUDICACIÓN PUBLICADO** 🏆\n\n"
-            f"📋 **Solicitation #:** `{sol_num}`\n"
-            f"📌 **Título:** {adj['titulo']}\n"
+            f"📋 **Solicitation #:** `{escapar_markdown(sol_num)}`\n"
+            f"📌 **Título:** {escapar_markdown(adj['titulo'])}\n"
             f"💰 **Monto Adjudicado:** ${adj['monto_adjudicado']}\n"
-            f"🏢 **Ganador:** {adj['adjudicatario']}\n\n"
+            f"🏢 **Ganador:** {escapar_markdown(adj['adjudicatario'])}\n\n"
             f"🔗 [Ver Registro Oficial en SAM.gov]({adj['link']})"
         )
         await context.bot.send_message(
@@ -551,7 +560,6 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 
         distribuidores = buscar_distribuidores_locales(producto, lic["zip_code"])
 
-        # Análisis financiero de la licitación
         monto_total = lic["monto_est"]
         precio_unitario_bid = monto_total / cantidad
         target_cost_unitario = (monto_total * 0.70) / cantidad
@@ -572,15 +580,20 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 
         distrib_str = ""
         for idx, dist in enumerate(distribuidores, 1):
-            distrib_str += f"{idx}. *{dist.get('nombre')}* | Tel: {dist.get('tel')} | Web: {dist.get('web')}\n"
+            nombre_dist = escapar_markdown(dist.get("nombre", "Mayorista"))
+            distrib_str += f"{idx}. *{nombre_dist}* | Tel: {dist.get('tel')} | Web: {dist.get('web')}\n"
+
+        sol_num_escapada = escapar_markdown(lic["solicitation_number"])
+        producto_escapado = escapar_markdown(producto)
+        agencia_escapada = escapar_markdown(lic["agencia"])
 
         mensaje = (
             "🚨 **NUEVA LICITACIÓN DE PRODUCTOS (<$250k)** 🚨\n\n"
-            f"📦 **Producto:** {producto}\n"
+            f"📦 **Producto:** {producto_escapado}\n"
             f"🔢 **Cantidad:** {cantidad:,} {unidad}\n"
-            f"🏛 **Agencia:** {lic['agencia']}\n"
+            f"🏛 **Agencia:** {agencia_escapada}\n"
             f"📍 **Entrega (ZIP):** {lic['zip_code']}\n"
-            f"📋 **Solicitation #:** `{lic['solicitation_number']}`\n"
+            f"📋 **Solicitation #:** `{sol_num_escapada}`\n"
             f"⏳ **Cierre:** {lic['cierre_str']} (En {lic['dias_restantes']} días)\n\n"
             "💵 **ANÁLISIS FINANCIERO & TARGET BID**\n"
             f"• Presupuesto Est.: ${monto_total:,.2f} USD\n"
@@ -620,7 +633,6 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 # COMANDOS Y CALLBACKS DE TELEGRAM
 # ---------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde al comando /start con el saludo oficial."""
     saludo = (
         "Hola Bastian, es hora de facturar! (´◡`) (⺣◡⺣)♡*\n\n"
         "🤖 **Soy Kiyomoto**, tu asistente de inteligencia y monitoreo "
@@ -637,7 +649,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ejecuta una búsqueda manual inmediata."""
     await update.message.reply_text(
         "🔎 **Kiyomoto iniciando escaneo en SAM.gov...**\nPor favor espera unos momentos.",
         parse_mode="Markdown",
@@ -653,7 +664,6 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_rfq(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera plantilla de correo RFQ comercial en inglés."""
     if not context.args:
         await update.message.reply_text(
             "⚠️ **Uso correcto:** `/rfq <solicitation_number>`", parse_mode="Markdown"
@@ -683,7 +693,6 @@ async def cmd_rfq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Registra un número de oferta para seguimiento de adjudicación."""
     if not context.args:
         await update.message.reply_text(
             "⚠️ **Uso correcto:** `/postulado SPE8E6-26-U-0012`", parse_mode="Markdown"
@@ -692,21 +701,21 @@ async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sol_num = context.args[0].strip()
     LICITACIONES_POSTULADAS.add(sol_num)
+    sol_num_escapada = escapar_markdown(sol_num)
     await update.message.reply_text(
-        f"✅ **Kiyomoto registró la licitación:** `{sol_num}`\nTe notificaré cuando SAM.gov publique el resultado.",
+        f"✅ **Kiyomoto registró la licitación:** `{sol_num_escapada}`\nTe notificaré cuando SAM.gov publique el resultado.",
         parse_mode="Markdown",
     )
 
 
 async def cmd_mis_postulaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista todas las postulaciones registradas."""
     if not LICITACIONES_POSTULADAS:
         await update.message.reply_text(
             "ℹ️ No hay licitaciones bajo seguimiento activo actualmente."
         )
         return
 
-    lista_str = "\n".join([f"• `{num}`" for num in LICITACIONES_POSTULADAS])
+    lista_str = "\n".join([f"• `{escapar_markdown(num)}`" for num in LICITACIONES_POSTULADAS])
     await update.message.reply_text(
         f"📋 **Licitaciones bajo monitoreo activo:**\n\n{lista_str}",
         parse_mode="Markdown",
@@ -718,7 +727,6 @@ def nombre_job(chat_id):
 
 
 async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Activa el temporizador de escaneo cada 60 minutos."""
     chat_id = update.effective_chat.id
     job_name = nombre_job(chat_id)
 
@@ -742,7 +750,6 @@ async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pausa el temporizador de monitoreo automático."""
     chat_id = update.effective_chat.id
     job_name = nombre_job(chat_id)
 
@@ -765,7 +772,6 @@ async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde a los botones de generación de PDF."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -800,20 +806,26 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------
-# PUNTO DE ENTRADA PRINCIPAL
+# PUNTO DE ENTRADA PRINCIPAL (Corregido para PTB v21)
 # ---------------------------------------------------------
 def main():
-    # Iniciar servidor web de respaldo en segundo plano
+    # Iniciar servidor web Flask en segundo plano
     threading.Thread(target=run_flask, daemon=True).start()
 
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN no configurado en variables de entorno.")
         return
 
-    # Inicialización del bot con JobQueue explícita
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Inicialización explícita de JobQueue para evitar incompatibilidad en v21
+    job_queue = JobQueue()
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .job_queue(job_queue)
+        .build()
+    )
 
-    # Registrar comandos
+    # Registrar Handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("on", cmd_on))
@@ -823,7 +835,7 @@ def main():
     app.add_handler(CommandHandler("mis_postulaciones", cmd_mis_postulaciones))
     app.add_handler(CallbackQueryHandler(boton_callback))
 
-    # Tarea programada por defecto al iniciar
+    # Tarea inicial si hay un CHAT_ID configurado
     if TELEGRAM_CHAT_ID:
         try:
             target_chat = (
@@ -832,19 +844,18 @@ def main():
                 else TELEGRAM_CHAT_ID
             )
             job_name = nombre_job(target_chat)
-            if app.job_queue:
-                app.job_queue.run_repeating(
-                    buscar_y_notificar,
-                    interval=3600,
-                    first=1,
-                    chat_id=target_chat,
-                    name=job_name,
-                )
-                logger.info("Tarea de monitoreo programada correctamente.")
+            app.job_queue.run_repeating(
+                buscar_y_notificar,
+                interval=3600,
+                first=5,
+                chat_id=target_chat,
+                name=job_name,
+            )
+            logger.info("Tarea programada en JobQueue correctamente.")
         except Exception as e:
-            logger.error(f"Error al programar JobQueue: {e}")
+            logger.error(f"Error al configurar JobQueue inicial: {e}")
 
-    logger.info("Kiyomoto listo y escuchando en Telegram...")
+    logger.info("Kiyomoto iniciado correctamente y escuchando...")
     app.run_polling(drop_pending_updates=True)
 
 
