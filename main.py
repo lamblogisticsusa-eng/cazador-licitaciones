@@ -828,6 +828,10 @@ def main():
             logger.error(f"Error programando tarea automática: {e}")
 
     logger.info("Servidor iniciado y bot listo...")
+
+    # Forzar la eliminación de webhooks previos para desbloquear el polling
+    app.bot.delete_webhook(drop_pending_updates=True)
+
     app.run_polling(drop_pending_updates=True)
 
 
