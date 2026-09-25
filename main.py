@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger("Kiyomoto_Logistics_Bot")
 
 # ---------------------------------------------------------
-# SERVIDOR FLASK (Keep-Alive / Health Check para Render)
+# SERVIDOR FLASK (Health Check para Render)
 # ---------------------------------------------------------
 flask_app = Flask(__name__)
 
@@ -48,7 +48,7 @@ def health_check():
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
 # ---------------------------------------------------------
@@ -76,25 +76,22 @@ else:
 
 
 # ---------------------------------------------------------
-# HELPER DE LIMPIEZA DE TEXTO (Evita crash de Markdown)
+# HELPER DE LIMPIEZA DE TEXTO
 # ---------------------------------------------------------
 def escapar_markdown(texto: str) -> str:
-    """Escapa caracteres especiales para evitar fallos en el parser de Telegram."""
     if not texto:
         return ""
     return str(texto).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
 
 
 # ---------------------------------------------------------
-# GENERADOR DE DOCUMENTOS PDF (ReportLab)
+# GENERADOR DE DOCUMENTOS PDF
 # ---------------------------------------------------------
 def generar_pdf_po(lic_data):
-    """Genera una Purchase Order (PO) en PDF para el proveedor."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
-    # Encabezado Empresa
     c.setFont("Helvetica-Bold", 16)
     c.setFillColor(colors.HexColor("#1A365D"))
     c.drawString(50, height - 50, "L.A.M.B. LOGISTICS LLC")
@@ -104,7 +101,6 @@ def generar_pdf_po(lic_data):
     c.drawString(50, height - 65, "Government Contracting & Supply Chain Division")
     c.drawString(50, height - 77, "Email: logistics@lamblogistics.com")
 
-    # Datos de la Orden de Compra
     c.setFont("Helvetica-Bold", 14)
     c.setFillColor(colors.HexColor("#2B6CB0"))
     c.drawString(380, height - 50, "PURCHASE ORDER")
@@ -118,12 +114,10 @@ def generar_pdf_po(lic_data):
         f"Solicitation Ref: {lic_data.get('solicitation_number', 'N/A')}",
     )
 
-    # Línea Divisoria
     c.setStrokeColor(colors.HexColor("#CBD5E0"))
     c.setLineWidth(1)
     c.line(50, height - 95, width - 50, height - 95)
 
-    # Contenido del Producto
     c.setFont("Helvetica-Bold", 11)
     c.drawString(50, height - 120, "1. Specification & Quantities:")
 
@@ -149,7 +143,6 @@ def generar_pdf_po(lic_data):
         f"• Delivery ZIP Code: {lic_data.get('zip_code', 'Destination Point')}",
     )
 
-    # Instrucciones de Entrega / Drop-Shipping
     y_pos -= 35
     c.setFont("Helvetica-Bold", 11)
     c.drawString(50, y_pos, "2. Logistics & Delivery Instructions:")
@@ -166,7 +159,6 @@ def generar_pdf_po(lic_data):
         c.drawString(65, y_pos, line)
         y_pos -= 15
 
-    # Pie de página
     c.setFont("Helvetica-Oblique", 8)
     c.setFillColor(colors.gray)
     c.drawString(
@@ -181,7 +173,6 @@ def generar_pdf_po(lic_data):
 
 
 def generar_pdf_packing_list(lic_data):
-    """Genera una Packing List neutra para Drop-Shipping."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
@@ -243,17 +234,15 @@ def generar_pdf_packing_list(lic_data):
 
 
 # ---------------------------------------------------------
-# INTELIGENCIA ARTIFICIAL Y ANÁLISIS COTS (GEMINI)
+# IA Y ANÁLISIS COTS
 # ---------------------------------------------------------
 def limpiar_json_respuesta(texto_raw):
-    """Limpia la respuesta de la IA para obtener una cadena JSON válida."""
     texto_limpio = re.sub(r"```json\s*", "", texto_raw, flags=re.IGNORECASE)
     texto_limpio = re.sub(r"```\s*", "", texto_limpio)
     return texto_limpio.strip()
 
 
 def analizar_licitacion_con_ia(titulo, descripcion):
-    """Extrae especificaciones clave y cantidades usando Gemini 2.5 Flash."""
     if not ai_client:
         return {
             "producto": titulo,
@@ -263,15 +252,15 @@ def analizar_licitacion_con_ia(titulo, descripcion):
         }
 
     prompt = f"""
-    Analiza esta oportunidad de contratación del gobierno federal de EE. UU. orientada a compras COTS (Commercial Off-The-Shelf).
+    Analiza esta oportunidad de contratación del gobierno federal de EE. UU. orientada a compras COTS.
     Título: {titulo}
     Descripción: {descripcion}
 
     Extrae en formato JSON estricto únicamente:
-    1. "producto": Nombre claro y conciso del producto o material en español.
-    2. "cantidad": Cantidad numérica total requerida (si es ambigua o no se especifica, asigna 1).
-    3. "unidad": Unidad de medida (Cajas, Unidades, Paquetes, Kits, Rollos).
-    4. "detalles": Un resumen de 1 oración con especificaciones clave o número de parte si aplica.
+    1. "producto": Nombre claro del producto en español.
+    2. "cantidad": Cantidad numérica total requerida (por defecto 1).
+    3. "unidad": Unidad de medida (Cajas, Unidades, Paquetes, Kits).
+    4. "detalles": Resumen corto de especificaciones.
     """
 
     try:
@@ -293,12 +282,11 @@ def analizar_licitacion_con_ia(titulo, descripcion):
             "producto": titulo,
             "cantidad": 1,
             "unidad": "Unidades",
-            "detalles": "No fue posible extraer detalles automáticos.",
+            "detalles": "No se pudieron extraer detalles.",
         }
 
 
 def buscar_distribuidores_locales(producto, zip_code):
-    """Sugiere distribuidores o mayoristas comerciales en EE. UU."""
     if not ai_client:
         return [
             {
@@ -314,8 +302,8 @@ def buscar_distribuidores_locales(producto, zip_code):
         ]
 
     prompt = f"""
-    Sugiéreme 2 distribuidores o mayoristas comerciales principales en EE. UU. que distribuyan el producto '{producto}' y hagan envíos a la zona del código postal '{zip_code}'.
-    Responde ÚNICAMENTE en formato JSON con una lista de objetos conteniendo las llaves: "nombre", "tel", "web".
+    Sugiéreme 2 distribuidores o mayoristas principales en EE. UU. para el producto '{producto}' hacia el ZIP '{zip_code}'.
+    Responde ÚNICAMENTE en formato JSON con la lista de objetos conteniendo: "nombre", "tel", "web".
     """
 
     try:
@@ -345,10 +333,9 @@ def buscar_distribuidores_locales(producto, zip_code):
 
 
 # ---------------------------------------------------------
-# CONEXIÓN Y ESCANEO EN SAM.GOV
+# CONEXIÓN A SAM.GOV
 # ---------------------------------------------------------
 def consultar_api_sam(params):
-    """Realiza peticiones HTTP a la API oficial v2 de SAM.gov."""
     url = "https://api.sam.gov/prod/opportunities/v2/search"
     try:
         response = requests.get(url, params=params, timeout=25)
@@ -361,9 +348,8 @@ def consultar_api_sam(params):
 
 
 def obtener_mejores_licitaciones_sam():
-    """Consulta SAM.gov ejecutando primero búsqueda estricta y aplicando fallback si no hay datos."""
     if not SAM_API_KEY:
-        logger.error("SAM_API_KEY no está configurada en el entorno.")
+        logger.error("SAM_API_KEY no configurada.")
         return []
 
     hoy = datetime.now(timezone.utc)
@@ -383,7 +369,6 @@ def obtener_mejores_licitaciones_sam():
     opps = consultar_api_sam(params_estrictos)
 
     if not opps:
-        logger.info("Filtro estricto sin resultados. Ejecutando búsqueda ampliada...")
         params_fallback = {
             "api_key": SAM_API_KEY,
             "postedFrom": fecha_desde,
@@ -467,12 +452,10 @@ def obtener_mejores_licitaciones_sam():
         )
 
     candidatas.sort(key=lambda x: x["dias_restantes"])
-    logger.info(f"Oportunidades válidas encontradas: {len(candidatas)}")
     return candidatas[:5]
 
 
 def verificar_adjudicaciones_sam():
-    """Monitorea publicaciones de premios/adjudicaciones en SAM.gov."""
     if not SAM_API_KEY or not LICITACIONES_POSTULADAS:
         return []
 
@@ -512,10 +495,9 @@ def verificar_adjudicaciones_sam():
 
 
 # ---------------------------------------------------------
-# LÓGICA PRINCIPAL DE NOTIFICACIÓN EN TELEGRAM
+# NOTIFICACIONES DE TELEGRAM
 # ---------------------------------------------------------
 async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=None):
-    """Ejecuta escaneo, procesamiento financiero y envío de mensajes a Telegram."""
     chat_id = target_chat_id
     if not chat_id and context.job:
         chat_id = context.job.chat_id
@@ -523,13 +505,13 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
         chat_id = TELEGRAM_CHAT_ID
 
     if not chat_id:
-        logger.warning("TELEGRAM_CHAT_ID no configurado. Envío cancelado.")
+        logger.warning("TELEGRAM_CHAT_ID no configurado.")
         return 0
 
     if isinstance(chat_id, str) and (chat_id.isdigit() or chat_id.startswith("-")):
         chat_id = int(chat_id)
 
-    # 1. Notificar Adjudicaciones
+    # Adjudicaciones
     adjudicaciones = verificar_adjudicaciones_sam()
     for adj in adjudicaciones:
         sol_num = adj["solicitation_number"]
@@ -546,7 +528,7 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
         )
         LICITACIONES_POSTULADAS.discard(sol_num)
 
-    # 2. Buscar Oportunidades Nuevas
+    # Nuevas licitaciones
     licitaciones = obtener_mejores_licitaciones_sam()
 
     for lic in licitaciones:
@@ -629,35 +611,31 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 
 
 # ---------------------------------------------------------
-# COMANDOS Y CALLBACKS DE TELEGRAM
+# COMANDOS Y CALLBACKS
 # ---------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     saludo = (
         "Hola Bastian, es hora de facturar! (´◡`) (⺣◡⺣)♡*\n\n"
-        "🤖 **Soy Kiyomoto**, tu asistente de inteligencia y monitoreo "
-        "para oportunidades de contratación COTS en SAM.gov (L.A.M.B. Logistics LLC).\n\n"
+        "🤖 **Soy Kiyomoto**, tu asistente de inteligencia para oportunidades SAM.gov.\n\n"
         "**Comandos Disponibles:**\n"
         "• `/scan` - Ejecutar escaneo manual inmediato\n"
-        "• `/on` - Activar el monitoreo automático cada hora\n"
-        "• `/off` - Pausar el monitoreo automático\n"
+        "• `/on` - Activar monitoreo automático cada hora\n"
+        "• `/off` - Pausar monitoreo automático\n"
         "• `/postulado <solicitation_num>` - Registrar oferta para seguimiento\n"
         "• `/rfq <solicitation_num>` - Generar plantilla RFQ para proveedores\n"
-        "• `/mis_postulaciones` - Listar licitaciones en seguimiento"
+        "• `/mis_postulaciones` - Listar licitaciones bajo seguimiento"
     )
     await update.message.reply_text(saludo, parse_mode="Markdown")
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 **Kiyomoto iniciando escaneo en SAM.gov...**\nPor favor espera unos momentos.",
-        parse_mode="Markdown",
+        "🔎 **Kiyomoto iniciando escaneo en SAM.gov...**", parse_mode="Markdown"
     )
-
     total = await buscar_y_notificar(context, target_chat_id=update.effective_chat.id)
-
     if total == 0:
         await update.message.reply_text(
-            "ℹ️ **Sin novedades:** No se encontraron nuevas licitaciones COTS aptas en este momento.",
+            "ℹ️ **Sin novedades:** No se encontraron nuevas licitaciones en este momento.",
             parse_mode="Markdown",
         )
 
@@ -702,7 +680,7 @@ async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     LICITACIONES_POSTULADAS.add(sol_num)
     sol_num_escapada = escapar_markdown(sol_num)
     await update.message.reply_text(
-        f"✅ **Kiyomoto registró la licitación:** `{sol_num_escapada}`\nTe notificaré cuando SAM.gov publique el resultado.",
+        f"✅ **Licitación registrada:** `{sol_num_escapada}`\nTe notificaré cuando SAM.gov publique el resultado.",
         parse_mode="Markdown",
     )
 
@@ -743,7 +721,7 @@ async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buscar_y_notificar, interval=3600, first=1, chat_id=chat_id, name=job_name
     )
     await update.message.reply_text(
-        "🚀 **Kiyomoto activado:** Escaneando SAM.gov automáticamente cada 60 minutos.",
+        "🚀 **Kiyomoto activado:** Escaneando SAM.gov cada 60 minutos.",
         parse_mode="Markdown",
     )
 
@@ -805,20 +783,21 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------
-# PUNTO DE ENTRADA PRINCIPAL (100% Compatible con Render)
+# PUNTO DE ENTRADA PRINCIPAL
 # ---------------------------------------------------------
 def main():
-    # Iniciar servidor Flask para el Health Check de Render
-    threading.Thread(target=run_flask, daemon=True).start()
+    # Servidor web en hilo secundario daemon
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN no configurado en variables de entorno.")
+        logger.error("TELEGRAM_BOT_TOKEN no configurado.")
         return
 
-    # Construcción estándar de PTB v21 (Crea la JobQueue automáticamente de fondo)
+    # Iniciar aplicación de Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Registrar Handlers
+    # Handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("on", cmd_on))
@@ -828,7 +807,7 @@ def main():
     app.add_handler(CommandHandler("mis_postulaciones", cmd_mis_postulaciones))
     app.add_handler(CallbackQueryHandler(boton_callback))
 
-    # Tarea programada si existe CHAT_ID en las variables de entorno
+    # Tarea automática si existe CHAT_ID
     if TELEGRAM_CHAT_ID and app.job_queue:
         try:
             target_chat = (
@@ -844,11 +823,11 @@ def main():
                 chat_id=target_chat,
                 name=job_name,
             )
-            logger.info("Tarea de escaneo automático lista en JobQueue.")
+            logger.info("Tarea de escaneo programada correctamente.")
         except Exception as e:
-            logger.error(f"Error al programar tarea automática: {e}")
+            logger.error(f"Error programando tarea automática: {e}")
 
-    logger.info("Kiyomoto iniciado y listo en Render...")
+    logger.info("Servidor iniciado y bot listo...")
     app.run_polling(drop_pending_updates=True)
 
 
