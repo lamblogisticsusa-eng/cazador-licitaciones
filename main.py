@@ -20,7 +20,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    JobQueue,
 )
 
 # ---------------------------------------------------------
@@ -33,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger("Kiyomoto_Logistics_Bot")
 
 # ---------------------------------------------------------
-# SERVIDOR FLASK (Keep-Alive para Cloud Services / Render)
+# SERVIDOR FLASK (Keep-Alive / Health Check para Render)
 # ---------------------------------------------------------
 flask_app = Flask(__name__)
 
@@ -77,13 +76,13 @@ else:
 
 
 # ---------------------------------------------------------
-# HELPER DE LIMPIEZA DE TEXTO (Evita crash de Markdown en Telegram)
+# HELPER DE LIMPIEZA DE TEXTO (Evita crash de Markdown)
 # ---------------------------------------------------------
 def escapar_markdown(texto: str) -> str:
-    """Escapa guiones bajos y asteriscos en identificadores para evitar fallos en el parser de Telegram."""
+    """Escapa caracteres especiales para evitar fallos en el parser de Telegram."""
     if not texto:
         return ""
-    return str(texto).replace("_", "\\_").replace("*", "\\*")
+    return str(texto).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
 
 
 # ---------------------------------------------------------
@@ -806,24 +805,18 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------
-# PUNTO DE ENTRADA PRINCIPAL (Corregido para PTB v21)
+# PUNTO DE ENTRADA PRINCIPAL (100% Compatible con Render)
 # ---------------------------------------------------------
 def main():
-    # Iniciar servidor web Flask en segundo plano
+    # Iniciar servidor Flask para el Health Check de Render
     threading.Thread(target=run_flask, daemon=True).start()
 
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN no configurado en variables de entorno.")
         return
 
-    # Inicialización explícita de JobQueue para evitar incompatibilidad en v21
-    job_queue = JobQueue()
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .job_queue(job_queue)
-        .build()
-    )
+    # Construcción estándar de PTB v21 (Crea la JobQueue automáticamente de fondo)
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Registrar Handlers
     app.add_handler(CommandHandler("start", cmd_start))
@@ -835,8 +828,8 @@ def main():
     app.add_handler(CommandHandler("mis_postulaciones", cmd_mis_postulaciones))
     app.add_handler(CallbackQueryHandler(boton_callback))
 
-    # Tarea inicial si hay un CHAT_ID configurado
-    if TELEGRAM_CHAT_ID:
+    # Tarea programada si existe CHAT_ID en las variables de entorno
+    if TELEGRAM_CHAT_ID and app.job_queue:
         try:
             target_chat = (
                 int(TELEGRAM_CHAT_ID)
@@ -847,15 +840,15 @@ def main():
             app.job_queue.run_repeating(
                 buscar_y_notificar,
                 interval=3600,
-                first=5,
+                first=10,
                 chat_id=target_chat,
                 name=job_name,
             )
-            logger.info("Tarea programada en JobQueue correctamente.")
+            logger.info("Tarea de escaneo automático lista en JobQueue.")
         except Exception as e:
-            logger.error(f"Error al configurar JobQueue inicial: {e}")
+            logger.error(f"Error al programar tarea automática: {e}")
 
-    logger.info("Kiyomoto iniciado correctamente y escuchando...")
+    logger.info("Kiyomoto iniciado y listo en Render...")
     app.run_polling(drop_pending_updates=True)
 
 
