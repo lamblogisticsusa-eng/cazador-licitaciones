@@ -34,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger("Kiyomoto_Logistics_Bot")
 
 # ---------------------------------------------------------
-# SERVIDOR FLASK (Health Check para Render)
+# SERVIDOR FLASK (Health Check para Render y UptimeRobot)
 # ---------------------------------------------------------
 flask_app = Flask(__name__)
 
@@ -87,12 +87,12 @@ def escapar_markdown(texto: str) -> str:
 
 
 # ---------------------------------------------------------
-# GENERADOR DE DOCUMENTOS DOCX (NUEVO)
+# GENERADOR DE DOCUMENTOS DOCX
 # ---------------------------------------------------------
 def generar_docx_rfq(lic_data):
     doc = Document()
 
-    # Configuración de márgenes
+    # Configuración de márgenes (1 pulgada)
     sections = doc.sections
     for section in sections:
         section.top_margin = Inches(1)
@@ -124,7 +124,7 @@ def generar_docx_rfq(lic_data):
     head_run.font.size = Pt(14)
     head_run.font.color.rgb = RGBColor(0x2B, 0x6C, 0xB0)
 
-    # Contenido
+    # Contenido de la Solicitud
     sol_num = lic_data.get("solicitation_number", "N/A")
     producto = lic_data.get("producto", "Product Specification")
     cantidad = lic_data.get("cantidad", 1)
@@ -142,7 +142,7 @@ def generar_docx_rfq(lic_data):
         "your best wholesale pricing and lead time for the following commercial item(s):\n"
     )
 
-    # Detalle de Producto
+    # Detalle de Producto en Tabla
     table = doc.add_table(rows=1, cols=3)
     table.style = "Table Grid"
     hdr_cells = table.rows[0].cells
@@ -605,7 +605,7 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
     if isinstance(chat_id, str) and (chat_id.isdigit() or chat_id.startswith("-")):
         chat_id = int(chat_id)
 
-    # Adjudicaciones
+    # Verificación de Adjudicaciones
     adjudicaciones = verificar_adjudicaciones_sam()
     for adj in adjudicaciones:
         sol_num = adj["solicitation_number"]
@@ -622,7 +622,7 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
         )
         LICITACIONES_POSTULADAS.discard(sol_num)
 
-    # Nuevas licitaciones
+    # Búsqueda de Oportunidades Nuevas
     licitaciones = obtener_mejores_licitaciones_sam()
 
     for lic in licitaciones:
@@ -805,7 +805,9 @@ async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_name = nombre_job(chat_id)
 
     if context.job_queue is None:
-        await update.message.reply_text("❌ Error: Sistema JobQueue no inicializado.")
+        await update.message.reply_text(
+            "❌ **Error:** Sistema JobQueue no disponible. Verifica que la librería 'APScheduler' esté instalada correctamente."
+        )
         return
 
     if context.job_queue.get_jobs_by_name(job_name):
@@ -897,18 +899,18 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PUNTO DE ENTRADA PRINCIPAL
 # ---------------------------------------------------------
 def main():
-    # Servidor web en hilo secundario daemon
+    # Servidor web en hilo secundario daemon para UptimeRobot / Render
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN no configurado.")
+        logger.error("TELEGRAM_BOT_TOKEN no configurado en variables de entorno.")
         return
 
     # Iniciar aplicación de Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Handlers
+    # Registros de Comandos y Callbacks
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("on", cmd_on))
@@ -918,31 +920,37 @@ def main():
     app.add_handler(CommandHandler("mis_postulaciones", cmd_mis_postulaciones))
     app.add_handler(CallbackQueryHandler(boton_callback))
 
-    # Tarea automática si existe CHAT_ID
-    if TELEGRAM_CHAT_ID and app.job_queue:
-        try:
-            target_chat = (
-                int(TELEGRAM_CHAT_ID)
-                if str(TELEGRAM_CHAT_ID).lstrip("-").isdigit()
-                else TELEGRAM_CHAT_ID
+    # Tarea automática si existe TELEGRAM_CHAT_ID y el JobQueue está habilitado
+    if TELEGRAM_CHAT_ID:
+        if app.job_queue:
+            try:
+                target_chat = (
+                    int(TELEGRAM_CHAT_ID)
+                    if str(TELEGRAM_CHAT_ID).lstrip("-").isdigit()
+                    else TELEGRAM_CHAT_ID
+                )
+                job_name = nombre_job(target_chat)
+                app.job_queue.run_repeating(
+                    buscar_y_notificar,
+                    interval=3600,
+                    first=10,
+                    chat_id=target_chat,
+                    name=job_name,
+                )
+                logger.info("Tarea de escaneo programada correctamente.")
+            except Exception as e:
+                logger.error(f"Error programando tarea automática: {e}")
+        else:
+            logger.error(
+                "JobQueue no está disponible. Revisa que APScheduler o python-telegram-bot[job-queue] esté instalado."
             )
-            job_name = nombre_job(target_chat)
-            app.job_queue.run_repeating(
-                buscar_y_notificar,
-                interval=3600,
-                first=10,
-                chat_id=target_chat,
-                name=job_name,
-            )
-            logger.info("Tarea de escaneo programada correctamente.")
-        except Exception as e:
-            logger.error(f"Error programando tarea automática: {e}")
 
     logger.info("Servidor iniciado y bot listo...")
 
-    # Forzar la eliminación de webhooks previos para desbloquear el polling
+    # Limpieza de webhooks previos para evitar interferencias
     app.bot.delete_webhook(drop_pending_updates=True)
 
+    # Iniciar Polling
     app.run_polling(drop_pending_updates=True)
 
 
