@@ -711,28 +711,49 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 # COMANDOS Y CALLBACKS
 # ---------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Botones del menú interactivo principal
+    keyboard = [
+        [
+            InlineKeyboardButton("🔎 Escanear Ahora", callback_data="btn_scan"),
+            InlineKeyboardButton("🚀 Activar Auto (/on)", callback_data="btn_on"),
+        ],
+        [
+            InlineKeyboardButton("⏸ Pausar Auto (/off)", callback_data="btn_off"),
+            InlineKeyboardButton("📋 Mis Postulaciones", callback_data="btn_postulaciones"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     saludo = (
         "Hola Bastian, es hora de facturar! (´◡`) (⺣◡⺣)♡*\n\n"
         "🤖 **Soy Kiyomoto**, tu asistente de inteligencia para oportunidades SAM.gov.\n\n"
-        "**Comandos Disponibles:**\n"
-        "• `/scan` - Ejecutar escaneo manual inmediato\n"
+        "Selecciona una opción del menú o usa los comandos:\n"
+        "• `/scan` - Escaneo manual inmediato\n"
         "• `/on` - Activar monitoreo automático cada hora\n"
         "• `/off` - Pausar monitoreo automático\n"
-        "• `/postulado <solicitation_num>` - Registrar oferta para seguimiento\n"
-        "• `/rfq <solicitation_num>` - Generar plantilla RFQ para proveedores\n"
-        "• `/mis_postulaciones` - Listar licitaciones bajo seguimiento"
+        "• `/postulado <solicitation_num>` - Registrar oferta\n"
+        "• `/rfq <solicitation_num>` - Generar plantilla RFQ\n"
+        "• `/mis_postulaciones` - Ver ofertas en seguimiento"
     )
-    await update.message.reply_text(saludo, parse_mode="Markdown")
+
+    if update.message:
+        await update.message.reply_text(
+            saludo, reply_markup=reply_markup, parse_mode="Markdown"
+        )
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔎 **Kiyomoto iniciando escaneo en SAM.gov...**", parse_mode="Markdown"
+    chat_id = update.effective_chat.id
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="🔎 **Kiyomoto iniciando escaneo en SAM.gov...**",
+        parse_mode="Markdown",
     )
-    total = await buscar_y_notificar(context, target_chat_id=update.effective_chat.id)
+    total = await buscar_y_notificar(context, target_chat_id=chat_id)
     if total == 0:
-        await update.message.reply_text(
-            "ℹ️ **Sin novedades:** No se encontraron nuevas licitaciones en este momento.",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="ℹ️ **Sin novedades:** No se encontraron nuevas licitaciones en este momento.",
             parse_mode="Markdown",
         )
 
@@ -801,32 +822,37 @@ def nombre_job(chat_id):
 
 
 async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = update.effective_chat.id if update.effective_chat else update.callback_query.message.chat_id
     job_name = nombre_job(chat_id)
 
     if context.job_queue is None:
-        await update.message.reply_text(
-            "❌ **Error:** Sistema JobQueue no disponible. Verifica que la librería 'APScheduler' esté instalada correctamente."
-        )
+        msg = "❌ **Error:** Sistema JobQueue no disponible. Verifica que la librería 'APScheduler' esté instalada correctamente."
+        if update.message:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
         return
 
     if context.job_queue.get_jobs_by_name(job_name):
-        await update.message.reply_text(
-            "🟢 El monitoreo automático ya está **ACTIVO**.", parse_mode="Markdown"
-        )
+        msg = "🟢 El monitoreo automático ya está **ACTIVO**."
+        if update.message:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
         return
 
     context.job_queue.run_repeating(
         buscar_y_notificar, interval=3600, first=1, chat_id=chat_id, name=job_name
     )
-    await update.message.reply_text(
-        "🚀 **Kiyomoto activado:** Escaneando SAM.gov cada 60 minutos.",
-        parse_mode="Markdown",
-    )
+    msg = "🚀 **Kiyomoto activado:** Escaneando SAM.gov cada 60 minutos."
+    if update.message:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = update.effective_chat.id if update.effective_chat else update.callback_query.message.chat_id
     job_name = nombre_job(chat_id)
 
     if context.job_queue is None:
@@ -834,17 +860,21 @@ async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     jobs = context.job_queue.get_jobs_by_name(job_name)
     if not jobs:
-        await update.message.reply_text(
-            "🔴 El monitoreo automático está **DESACTIVADO**.", parse_mode="Markdown"
-        )
+        msg = "🔴 El monitoreo automático está **DESACTIVADO**."
+        if update.message:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
         return
 
     for job in jobs:
         job.schedule_removal()
-    await update.message.reply_text(
-        "⏸ **Kiyomoto en pausa:** Monitoreo automático desactivado.",
-        parse_mode="Markdown",
-    )
+
+    msg = "⏸ **Kiyomoto en pausa:** Monitoreo automático desactivado."
+    if update.message:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -852,7 +882,21 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    if data.startswith("pkg_"):
+    # Acciones del Menú Principal
+    if data == "btn_scan":
+        await cmd_scan(update, context)
+
+    elif data == "btn_on":
+        await cmd_on(update, context)
+
+    elif data == "btn_off":
+        await cmd_off(update, context)
+
+    elif data == "btn_postulaciones":
+        await cmd_mis_postulaciones(update, context)
+
+    # Descarga de Documentos (PDF / DOCX)
+    elif data.startswith("pkg_"):
         lic_id = data.replace("pkg_", "")
         lic_data = MEMORIA_LICITACIONES.get(
             lic_id,
@@ -942,7 +986,7 @@ def main():
                 logger.error(f"Error programando tarea automática: {e}")
         else:
             logger.error(
-                "JobQueue no está disponible. Revisa que APScheduler o python-telegram-bot[job-queue] esté instalado."
+                "JobQueue no está disponible. Revisa que APScheduler esté instalado."
             )
 
     logger.info("Servidor iniciado y bot listo...")
