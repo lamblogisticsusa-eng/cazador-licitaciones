@@ -1,5 +1,5 @@
-flask
-google-genai
-reportlab
-requests
-python-telegram-bot[job-queue]
+python-telegram-bot>=21.0
+google-genai>=0.1.1
+reportlab>=4.0.0
+flask>=3.0.0
+requests>=2.31.0
