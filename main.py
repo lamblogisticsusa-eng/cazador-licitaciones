@@ -6,6 +6,8 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
 from flask import Flask
 from google import genai
 from google.genai import types
@@ -82,6 +84,98 @@ def escapar_markdown(texto: str) -> str:
     if not texto:
         return ""
     return str(texto).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+
+
+# ---------------------------------------------------------
+# GENERADOR DE DOCUMENTOS DOCX (NUEVO)
+# ---------------------------------------------------------
+def generar_docx_rfq(lic_data):
+    doc = Document()
+
+    # Configuración de márgenes
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1)
+        section.right_margin = Inches(1)
+
+    # Encabezado Empresa
+    title_p = doc.add_paragraph()
+    title_run = title_p.add_run("L.A.M.B. LOGISTICS LLC")
+    title_run.bold = True
+    title_run.font.size = Pt(18)
+    title_run.font.color.rgb = RGBColor(0x1A, 0x36, 0x5D)
+
+    sub_p = doc.add_paragraph()
+    sub_run = sub_p.add_run(
+        "Government Contracting & Wholesale Supply Chain Division\n"
+        "Email: logistics@lamblogistics.com"
+    )
+    sub_run.font.size = Pt(9)
+    sub_run.font.color.rgb = RGBColor(0x71, 0x80, 0x96)
+
+    doc.add_paragraph("―" * 55)
+
+    # Título Documento
+    head_p = doc.add_paragraph()
+    head_run = head_p.add_run("OFFICIAL REQUEST FOR QUOTATION (RFQ)")
+    head_run.bold = True
+    head_run.font.size = Pt(14)
+    head_run.font.color.rgb = RGBColor(0x2B, 0x6C, 0xB0)
+
+    # Contenido
+    sol_num = lic_data.get("solicitation_number", "N/A")
+    producto = lic_data.get("producto", "Product Specification")
+    cantidad = lic_data.get("cantidad", 1)
+    unidad = lic_data.get("unidad", "Units")
+    zip_code = lic_data.get("zip_code", "Destination ZIP")
+
+    p1 = doc.add_paragraph()
+    p1.add_run(f"Date: {datetime.now().strftime('%B %d, %Y')}\n").bold = True
+    p1.add_run(f"Solicitation Ref: {sol_num}\n").bold = True
+
+    p2 = doc.add_paragraph(
+        "\nDear Sales / Commercial Quotations Department,\n\n"
+        "L.A.M.B. Logistics LLC is currently finalizing a formal proposal response for "
+        f"U.S. Federal Government Procurement Ref #{sol_num}. We invite your company to provide "
+        "your best wholesale pricing and lead time for the following commercial item(s):\n"
+    )
+
+    # Detalle de Producto
+    table = doc.add_table(rows=1, cols=3)
+    table.style = "Table Grid"
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = "Item Description"
+    hdr_cells[1].text = "Quantity"
+    hdr_cells[2].text = "Destination ZIP"
+
+    for cell in hdr_cells:
+        for p in cell.paragraphs:
+            for r in p.runs:
+                r.bold = True
+
+    row_cells = table.add_row().cells
+    row_cells[0].text = str(producto)
+    row_cells[1].text = f"{cantidad:,} {unidad}"
+    row_cells[2].text = str(zip_code)
+
+    p3 = doc.add_paragraph(
+        "\nRequirements & Terms:\n"
+        "1. Freight: Drop-shipment to specified destination ZIP.\n"
+        "2. Payment Terms: Credit Card / Net 30.\n"
+        "3. Packaging: Must include L.A.M.B. Logistics Packing Slip on outer cartons.\n\n"
+        "Please submit your formal quotation as soon as possible to logistics@lamblogistics.com."
+    )
+
+    p4 = doc.add_paragraph("\nSincerely,\n\nPurchasing Department\nL.A.M.B. Logistics LLC")
+    p4.runs[0].bold = True
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    buffer.name = f"RFQ_Vendor_{sol_num}.docx"
+    return buffer
 
 
 # ---------------------------------------------------------
@@ -595,7 +689,10 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
             [
                 InlineKeyboardButton(
                     "📝 Generar Vendor PO (PDF)", callback_data=f"po_{lic['id']}"
-                )
+                ),
+                InlineKeyboardButton(
+                    "✉️ Generar RFQ (DOCX)", callback_data=f"docx_{lic['id']}"
+                ),
             ],
         ]
 
@@ -778,6 +875,20 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             document=pdf_file,
             caption="📝 **Purchase Order (PO) Generada por Kiyomoto**",
+            parse_mode="Markdown",
+        )
+
+    elif data.startswith("docx_"):
+        lic_id = data.replace("docx_", "")
+        lic_data = MEMORIA_LICITACIONES.get(
+            lic_id,
+            {"solicitation_number": lic_id, "producto": "Producto COTS", "cantidad": 1},
+        )
+        docx_file = generar_docx_rfq(lic_data)
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
+            document=docx_file,
+            caption="✉️ **RFQ Document (DOCX) Generado por Kiyomoto**",
             parse_mode="Markdown",
         )
 
