@@ -711,7 +711,7 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 # COMANDOS Y CALLBACKS
 # ---------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Botones del menú interactivo principal
+    # Definición de botones interactivos para el menú desplegable
     keyboard = [
         [
             InlineKeyboardButton("🔎 Escanear Ahora", callback_data="btn_scan"),
@@ -727,7 +727,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     saludo = (
         "Hola Bastian, es hora de facturar! (´◡`) (⺣◡⺣)♡*\n\n"
         "🤖 **Soy Kiyomoto**, tu asistente de inteligencia para oportunidades SAM.gov.\n\n"
-        "Selecciona una opción del menú o usa los comandos:\n"
+        "Selecciona una opción del menú o interactúa mediante comandos:\n"
         "• `/scan` - Escaneo manual inmediato\n"
         "• `/on` - Activar monitoreo automático cada hora\n"
         "• `/off` - Pausar monitoreo automático\n"
@@ -882,7 +882,7 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # Acciones del Menú Principal
+    # Acciones del Menú Interactivo
     if data == "btn_scan":
         await cmd_scan(update, context)
 
@@ -895,7 +895,7 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "btn_postulaciones":
         await cmd_mis_postulaciones(update, context)
 
-    # Descarga de Documentos (PDF / DOCX)
+    # Descarga de Documentos PDF y DOCX
     elif data.startswith("pkg_"):
         lic_id = data.replace("pkg_", "")
         lic_data = MEMORIA_LICITACIONES.get(
