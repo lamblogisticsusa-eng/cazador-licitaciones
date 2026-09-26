@@ -391,10 +391,14 @@ def analizar_licitacion_ia(titulo, descripcion):
         "detalles": "Resumen técnico rápido"
     }}
     """
-    for attempt in range(2):
+    
+    # Modelos a probar en orden de disponibilidad
+    modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+    for model_name in modelos:
         try:
             resp = ai_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
@@ -405,8 +409,8 @@ def analizar_licitacion_ia(titulo, descripcion):
             data["cantidad"] = max(1, int(data.get("cantidad", 1)))
             return data
         except Exception as e:
-            logger.warning(f"Error parseando Gemini en intento {attempt + 1}: {e}")
-            time.sleep(1)
+            logger.warning(f"Error parseando Gemini con {model_name}: {e}")
+            time.sleep(0.5)
 
     return {
         "es_producto_cots": False,
@@ -436,10 +440,13 @@ def buscar_distribuidores_ia(producto, zip_code):
     Encuentra 2 distribuidores o mayoristas reales en EE. UU. que vendan el producto físico '{producto}' y envíen al ZIP '{zip_code}'.
     Responde ÚNICAMENTE en JSON con una lista de 2 objetos conteniendo: "nombre", "tel", "web".
     """
-    for attempt in range(2):
+    
+    modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+    for model_name in modelos:
         try:
             resp = ai_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
@@ -450,8 +457,8 @@ def buscar_distribuidores_ia(producto, zip_code):
             if isinstance(data, list) and len(data) > 0:
                 return data
         except Exception as e:
-            logger.warning(f"Error buscando proveedores en intento {attempt + 1}: {e}")
-            time.sleep(1)
+            logger.warning(f"Error buscando proveedores con {model_name}: {e}")
+            time.sleep(0.5)
 
     return [
         {"nombre": "Grainger Supply", "tel": "(800) 472-4643", "web": "grainger.com"},
