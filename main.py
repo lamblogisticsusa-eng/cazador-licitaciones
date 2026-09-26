@@ -45,7 +45,7 @@ flask_app = Flask(__name__)
 def health_check():
     return (
         "<h2>(✿◠‿◠) Kiyomoto Helper - L.A.M.B. Logistics LLC</h2>"
-        "<p>Estado: Activa y rastreando SAM.gov 24/7 (Filtro COTS Estricto)</p>",
+        "<p>Estado: Activa y rastreando SAM.gov 24/7 (Filtro COTS Tangible Estricto <= $250k)</p>",
         200,
     )
 
@@ -210,7 +210,7 @@ def generar_docx_rfq(lic_data):
     doc.add_paragraph(
         "Dear Commercial Quotations Department,\n\n"
         f"L.A.M.B. Logistics LLC is submitting a formal bid response for U.S. Federal Procurement Ref #{sol_num}. "
-        "We kindly request your best wholesale unit pricing, availability, and lead time for the following items:\n"
+        "We kindly request your best wholesale unit pricing, availability, and lead time for the following physical items:\n"
     )
 
     table = doc.add_table(rows=1, cols=3)
@@ -360,12 +360,12 @@ def generar_pdf_packing_list(lic_data):
 
 
 # ---------------------------------------------------------
-# ANÁLISIS DE IA CON GEMINI (FILTRO COTS REFORZADO)
+# ANÁLISIS DE IA CON GEMINI (EVALUACIÓN DE TANGIBILIDAD STRICT COTS)
 # ---------------------------------------------------------
 def analizar_licitacion_ia(titulo, descripcion):
     if not ai_client:
         return {
-            "es_producto_cots": True,
+            "es_producto_cots": False,
             "producto": titulo,
             "cantidad": 1,
             "unidad": "Unidades",
@@ -373,21 +373,22 @@ def analizar_licitacion_ia(titulo, descripcion):
         }
 
     prompt = f"""
-    Analiza esta licitación pública de compras públicas de EE. UU.:
+    Eres un experto en contrataciones del gobierno federal de EE. UU. Tu ÚNICA tarea es evaluar si una licitación es exclusivamente para COMPRAR Y ENVIAR UN PRODUCTO FÍSICO TANGIBLE (COTS/Suministros) que pueda empacarse en una caja, palé o contenedor y despacharse por flete/correo.
+
     Título: {titulo}
     Descripción: {descripcion}
 
-    REGLA CRÍTICA:
-    Determina si la licitación es estrictamente para COMPRAR Y ENTREGAR PRODUCTOS FÍSICOS COMERCIALES (COTS) (ej. herramientas, suministros, piezas, equipos).
-    Si se trata de SERVICIOS, TRABAJOS DE CAMPO, DEMOLICIÓN, REMOCIÓN, MANTENIMIENTO, CONSTRUCCIÓN O INSTALACIÓN EN SITIO, debes marcar "es_producto_cots": false.
+    REGLAS ESTRICTAS DE EVALUACIÓN:
+    1. Si es un programa educativo, entrenamiento, residencia médica, servicio profesional, software/SaaS, mano de obra, demolición, remoción, mantenimiento o construcción: "es_producto_cots" DEBE SER false.
+    2. Si es un producto tangible que se fabrica y se envía (ej. tuberías, repuestos, herramientas, bombas, cables, cajas, insumos médicos físicos, equipos mecánicos/eléctricos): "es_producto_cots" DEBE SER true.
 
     Responde ÚNICAMENTE en JSON con esta estructura exacta:
     {{
-        "es_producto_cots": true/false,
-        "producto": "Nombre claro del producto en español",
-        "cantidad": 100,
-        "unidad": "Unidades/Cajas/Kits",
-        "detalles": "Resumen rápido de las especificaciones"
+        "es_producto_cots": true o false,
+        "producto": "Nombre conciso del producto físico en español",
+        "cantidad": 1,
+        "unidad": "Unidades/Cajas/Kits/Palés",
+        "detalles": "Resumen técnico rápido"
     }}
     """
     for attempt in range(2):
@@ -408,11 +409,11 @@ def analizar_licitacion_ia(titulo, descripcion):
             time.sleep(1)
 
     return {
-        "es_producto_cots": True,
+        "es_producto_cots": False,
         "producto": titulo,
         "cantidad": 1,
         "unidad": "Unidades",
-        "detalles": "Resumen no disponible.",
+        "detalles": "Error de procesamiento.",
     }
 
 
@@ -432,7 +433,7 @@ def buscar_distribuidores_ia(producto, zip_code):
         ]
 
     prompt = f"""
-    Encuentra 2 distribuidores o mayoristas reales en EE. UU. que vendan el producto '{producto}' y envíen al ZIP '{zip_code}'.
+    Encuentra 2 distribuidores o mayoristas reales en EE. UU. que vendan el producto físico '{producto}' y envíen al ZIP '{zip_code}'.
     Responde ÚNICAMENTE en JSON con una lista de 2 objetos conteniendo: "nombre", "tel", "web".
     """
     for attempt in range(2):
@@ -459,7 +460,7 @@ def buscar_distribuidores_ia(producto, zip_code):
 
 
 # ---------------------------------------------------------
-# CONEXIÓN SAM.GOV (FILTRO MEJORADO ANTI-SERVICIOS)
+# CONEXIÓN SAM.GOV (FILTRO PRELIMINAR EXTENDIDO ANTI-SERVICIOS)
 # ---------------------------------------------------------
 def consultar_sam():
     if not SAM_API_KEY:
@@ -489,12 +490,14 @@ def consultar_sam():
         logger.error(f"Error consultando SAM.gov: {e}")
         return []
 
-    # Lista ampliada de exclusión de servicios y obras físicas
+    # Exclusión estricta de servicios, educación, salud, obras y mano de obra
     excluir = [
-        "construction", "service", "maintenance", "repair",
-        "janitorial", "installation", "demolition", "removal",
+        "construction", "service", "maintenance", "repair", 
+        "janitorial", "installation", "demolition", "removal", 
         "disposal", "rental", "lease", "dredging", "painting",
-        "inspection", "labor", "testing", "calibration", "renovation"
+        "inspection", "labor", "testing", "calibration", "renovation",
+        "training", "residency", "fellowship", "education", "rotation",
+        "medical", "consulting", "support", "management", "curriculum"
     ]
     candidatas = []
 
@@ -526,7 +529,7 @@ def consultar_sam():
         if dias_restantes < 1 or dias_restantes > 45:
             continue
 
-        # Monto Estimado (Blindaje contra NoneType)
+        # Monto Estimado (Límite máximo $250,000 USD)
         monto_est = 35000.0
         award_dict = opp.get("award") or {}
         raw_amt = award_dict.get("amount")
@@ -641,10 +644,10 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
     for lic in licitaciones:
         marcar_notificada(lic["id"])
 
-        # Filtro 2: Validación por IA Gemini
+        # Filtro 2: Validación de producto físico por IA Gemini
         ia_res = analizar_licitacion_ia(lic["titulo"], lic["descripcion"])
-        if not ia_res.get("es_producto_cots", True):
-            logger.info(f"Omitiendo {lic['id']} por ser un servicio/obra física según Gemini.")
+        if not ia_res.get("es_producto_cots", False):
+            logger.info(f"Omitiendo {lic['id']} por no ser un producto físico tangible.")
             continue
 
         cantidad = max(1, int(ia_res.get("cantidad", 1)))
@@ -741,7 +744,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     saludo = (
         "¡Hola Bastian! (⺣◡⺣)♡*\n"
-        "Soy **Kiyomoto**, lista para cazar las mejores oportunidades en SAM.gov para **L.A.M.B. Logistics LLC**.\n\n"
+        "Soy **Kiyomoto**, lista para cazar únicamente productos físicos COTS (<= $250k) en SAM.gov para **L.A.M.B. Logistics LLC**.\n\n"
         "Presiona un botón abajo o usa los comandos rápidos:\n"
         "• `/scan` - Escanear oportunidades ahora mismo\n"
         "• `/on` - Activar rastreo automático cada hora\n"
@@ -761,14 +764,14 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="🔎 **Kiyomoto escaneando SAM.gov en tiempo real...** (✿◠‿◠)",
+        text="🔎 **Kiyomoto escaneando SAM.gov en tiempo real (Filtro COTS Tangibles)...** (✿◠‿◠)",
         parse_mode="Markdown",
     )
     encontradas = await buscar_y_notificar(context, target_chat_id=chat_id)
     if encontradas == 0:
         await context.bot.send_message(
             chat_id=chat_id,
-            text="ℹ️ **Sin novedades:** No se encontraron licitaciones nuevas de productos COTS en este momento.",
+            text="ℹ️ **Sin novedades:** No se encontraron licitaciones de productos físicos en este momento.",
             parse_mode="Markdown",
         )
 
@@ -857,7 +860,7 @@ async def cmd_rfq(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Subject: Urgent RFQ Quote Request - L.A.M.B. Logistics LLC (Ref: {sol_num})\n\n"
         "Dear Sales Department,\n\n"
         f"L.A.M.B. Logistics LLC is preparing a formal offer for U.S. Federal Solicitation {sol_num}.\n\n"
-        "Could you please share your wholesale unit price, availability, and delivery lead time?\n\n"
+        "Could you please share your wholesale unit price, availability, and delivery lead time for these items?\n\n"
         "Key Delivery Terms:\n"
         "• Direct Freight: Destination ZIP specified in purchase order\n"
         "• Payment: Credit Card / Net 30\n"
@@ -971,7 +974,7 @@ def main():
             logger.error(f"Error en programador de tareas: {e}")
 
     logger.info("Kiyomoto Helper iniciada y lista.")
-    
+
     app.run_polling(drop_pending_updates=True)
 
 
