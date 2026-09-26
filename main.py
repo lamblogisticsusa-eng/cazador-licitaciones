@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import threading
 import requests
 from datetime import datetime, timedelta
 from flask import Flask
@@ -194,6 +195,15 @@ server = Flask(__name__)
 def home():
     return "Kiyomoto Logistics Bot está activo y funcionando.", 200
 
+# --- CONTROLADOR PARA TELEGRAM IN-THREAD ---
+_bot_iniciado = False
+
+def iniciar_polling_bot(telegram_app):
+    global _bot_iniciado
+    if not _bot_iniciado:
+        _bot_iniciado = True
+        telegram_app.run_polling(drop_pending_updates=True, stop_signals=None)
+
 # --- APLICACIÓN PRINCIPAL ---
 def main():
     init_db()
@@ -204,7 +214,7 @@ def main():
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CommandHandler("forzar_escaneo", forzar_escaneo_command))
     
-    # Configurar programador en segundo plano (APScheduler) para escaneos periódicos cada 4 horas
+    # Programador en segundo plano (APScheduler)
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         func=ejecutar_monitoreo_licitaciones,
@@ -216,11 +226,15 @@ def main():
     )
     scheduler.start()
     
+    # Iniciar Polling de Telegram en un Hilo separado
+    thread_bot = threading.Thread(target=iniciar_polling_bot, args=(telegram_app,), daemon=True)
+    thread_bot.start()
+    
     print("✨ Kiyomoto lista y escuchando...")
     
-    # Iniciar Telegram Polling en segundo plano y servidor Web Flask
-    telegram_app.run_polling(drop_pending_updates=True)
+    # Iniciar servidor Flask para el Health Check de Render
+    port = int(os.environ.get("PORT", 10000))
+    server.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    # Si se ejecuta directamente, arranca la aplicación
     main()
