@@ -116,24 +116,24 @@ def obtener_oportunidades_sam():
 
     url = "https://api.sam.gov/prod/opportunities/v2/search"
     
-    # Formato estrictamente requerido por SAM.gov v2 API: YYYY-MM-DD
+    # Rango extendido a 7 días y hasta 100 registros
     fecha_hasta = datetime.now(timezone.utc)
-    fecha_desde = fecha_hasta - timedelta(days=2)
+    fecha_desde = fecha_hasta - timedelta(days=7)
     
     params = {
         "api_key": sam_api_key,
         "postedFrom": fecha_desde.strftime("%Y-%m-%d"),
         "postedTo": fecha_hasta.strftime("%Y-%m-%d"),
         "ptype": "o,k,p",  # Solicitations, Combined Synopsis, Presolicitations
-        "limit": 25
+        "limit": 100
     }
 
     try:
-        response = requests.get(url, params=params, timeout=20)
+        response = requests.get(url, params=params, timeout=30)
         if response.status_code == 200:
             data = response.json()
             opps = data.get("opportunitiesData", [])
-            logger.info(f"📊 SAM.gov devolvió {len(opps)} registros.")
+            logger.info(f"📊 SAM.gov devolvió {len(opps)} registros de los últimos 7 días.")
             return opps
         else:
             logger.error(f"❌ Error API SAM.gov ({response.status_code}): {response.text}")
@@ -157,7 +157,7 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
         logger.info("Monitoreo pausado por órdenes del usuario (/off).~")
         return
 
-    logger.info("🔍 Kiyomoto rastreando nuevas oportunidades en SAM.gov...")
+    logger.info("🔍 Kiyomoto rastreando oportunidades (hasta 100) en SAM.gov...")
     
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     oportunidades = obtener_oportunidades_sam()
@@ -177,30 +177,35 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
         ui_link = opp.get("uiLink", f"https://sam.gov/opp/{notice_id}/view")
 
         prompt = f"""
-        Analiza esta oportunidad de licitación de SAM.gov.
-        Determina si busca comprar PRODUCTOS FÍSICOS/TANGIBLES COTS (equipos, repuestos, suministros, partes) o si es un servicio intangible/mantenimiento.
+        Analiza detalladamente esta oportunidad de licitación de SAM.gov para un distribuidor/intermediario de logística.
+
+        CRITERIOS DE APROBACIÓN:
+        1. Requiere la entrega/suministro de PRODUCTOS FÍSICOS O BIENES TANGIBLES (equipos, repuestos, herramientas, insumos, partes COTS, mercancía física).
+        2. El valor estimado o alcance sugiere una compra pequeña/mediana (Simplified Acquisition Threshold <= $250,000 USD, o adquisiciones de contrato directo/SAP). Si es un mega contrato de cientos de millones o servicios de construcción masiva, MARCA FALSO.
+        3. NO debe ser únicamente un servicio puro intangibles (consultoría, soporte de software, mantenimiento de edificios, servicios médicos).
 
         Título: {titulo}
-        Descripción: {descripcion[:1500]}
+        Descripción: {descripcion[:2000]}
 
-        Responde exclusivamente en este formato JSON:
-        {{"es_producto_fisico": true/false, "resumen": "Resumen conciso en 2 frases de lo que piden"}}
+        Responde en formato JSON estricto:
+        {{"es_producto_fisico": true/false, "cumple_criterio_monto": true/false, "resumen": "Resumen conciso en 2 frases de lo que solicitan comprarde la mercancía"}}
         """
 
         resultado = procesar_con_gemini(prompt)
         
-        if resultado and "true" in resultado.lower():
+        # Evaluamos la respuesta de Gemini
+        if resultado and '"es_producto_fisico": true' in resultado.lower() and '"cumple_criterio_monto": true' in resultado.lower():
             registrar_licitacion(notice_id, titulo, True)
             logger.info(f"✨ Licitación {notice_id} aprobada por Kiyomoto!")
             
             if bot_application and chat_id:
                 mensaje_notif = (
-                    f"🌸 <b>¡Nueva Oportunidad Detectada en SAM.gov!</b> 📦✨\n\n"
+                    f"🌸 <b>¡Nueva Oportunidad Calificada Detectada!</b> 📦✨\n\n"
                     f"🆔 <b>ID:</b> <code>{notice_id}</code>\n"
                     f"🏢 <b>Agencia:</b> {agencia}\n"
                     f"📌 <b>Título:</b> {titulo}\n"
                     f"🔗 <b>Enlace:</b> <a href='{ui_link}'>Ver en SAM.gov</a>\n\n"
-                    f"💡 <b>Análisis de Kiyomoto:</b> Es un suministro o producto tangible listo para cotizar. 🚀"
+                    f"💡 <b>Análisis de Kiyomoto:</b> Producto físico/suministro dentro del rango viable (&lt;=$250k). 🚀"
                 )
                 asyncio.run_coroutine_threadsafe(
                     notificar_telegram(bot_application, chat_id, mensaje_notif),
@@ -249,9 +254,9 @@ async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔴 <b>¡Monitoreo pausado!</b> En pausa hasta tu orden. (⁠´⁠ー⁠｀⁠)", parse_mode="HTML")
 
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 <b>¡Buscando en SAM.gov ahora mismo!</b>... (⁠✦⁠‿⁠✦⁠)", parse_mode="HTML")
+    await update.message.reply_text("🔍 <b>¡Escaneando SAM.gov (últimos 7 días / 100 registros)!</b>... (⁠✦⁠‿⁠✦⁠)", parse_mode="HTML")
     ejecutar_monitoreo_licitaciones(context.application)
-    await update.message.reply_text("✨ <b>¡Escaneo completado!</b> Si hay novedades te las notifiqué arriba. 🌸", parse_mode="HTML")
+    await update.message.reply_text("✨ <b>¡Escaneo completado!</b> Si hay oportunidades que cumplan tus criterios, te las envié arriba. 🌸", parse_mode="HTML")
 
 # ---------------------------------------------------------------------------
 # 8. PUNTO DE ENTRADA PRINCIPAL
