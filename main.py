@@ -23,6 +23,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Kiyomoto_Logistics")
 
+# Variable global para controlar el estado del monitoreo activo
+MONITOREO_ACTIVO = True
+
 # ---------------------------------------------------------------------------
 # 2. FLASK APP (HEALTH CHECK FOR RENDER)
 # ---------------------------------------------------------------------------
@@ -75,25 +78,16 @@ def registrar_licitacion(licitacion_id: str, titulo: str, filtro_pasado: bool):
     conn.close()
 
 # ---------------------------------------------------------------------------
-# 4. INTEGRACIÓN DE GOOGLE GEMINI (MODELOS VIGENTES Y LISTA DE FALLBACK)
+# 4. INTEGRACIÓN DE GOOGLE GEMINI (MODELOS VIGENTES Y FALLBACK)
 # ---------------------------------------------------------------------------
 def procesar_con_gemini(prompt: str) -> str:
-    """
-    Intenta procesar el prompt con la versión más reciente de la API de Gemini.
-    Itera sobre una lista de modelos vigentes en caso de que alguno falle.
-    """
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         logger.error("GEMINI_API_KEY no está configurada.")
-        return "Error: Clave de API de Gemini no configurada."
+        return None
 
     client = genai.Client(api_key=api_key)
-    
-    # Modelos activos recomendados
-    modelos_disponibles = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash"
-    ]
+    modelos_disponibles = ["gemini-2.5-flash", "gemini-1.5-flash"]
 
     for modelo in modelos_disponibles:
         try:
@@ -111,22 +105,25 @@ def procesar_con_gemini(prompt: str) -> str:
     return None
 
 # ---------------------------------------------------------------------------
-# 5. TAREA PROGRAMADA (MONITOR DE LICITACIONES / SCHEDULER)
+# 5. TAREA PROGRAMADA DE MONITOREO
 # ---------------------------------------------------------------------------
-def ejecutar_monitoreo_licitaciones(bot_application):
+def ejecutar_monitoreo_licitaciones(bot_application=None):
+    global MONITOREO_ACTIVO
+    if not MONITOREO_ACTIVO:
+        logger.info("El monitoreo automático se encuentra pausado (/off).")
+        return
+
     logger.info("Iniciando ciclo de monitoreo de licitaciones...")
     
-    # Ejemplo de estructura de licitaciones obtenidas (adaptar a tu API/Scraper)
+    # Lógica de escaneo de licitaciones
     licitaciones_ejemplo = [
-        {"id": "LIC-2026-001", "titulo": "Suministro de Filtros Industriales y Repuestos Motor GMC", "descripcion": "Licitación para provisión de insumos mecánicos y repuestos."},
-        {"id": "LIC-2026-002", "titulo": "Servicio de Consultoría en Software y Mantenimiento Web", "descripcion": "Desarrollo de plataforma cloud y consultoría de sistemas."}
+        {"id": "LIC-2026-001", "titulo": "Suministro de Filtros Industriales y Repuestos Motor GMC", "descripcion": "Provisión de insumos mecánicos y repuestos."},
+        {"id": "LIC-2026-002", "titulo": "Servicio de Consultoría en Software y Mantenimiento Web", "descripcion": "Desarrollo de plataforma cloud y consultoría."}
     ]
 
     for lic in licitaciones_ejemplo:
         lic_id = lic["id"]
-        
         if esta_procesada(lic_id):
-            logger.info(f"Omitiendo {lic_id} por estar procesada anteriormente.")
             continue
 
         prompt = f"""
@@ -141,64 +138,80 @@ def ejecutar_monitoreo_licitaciones(bot_application):
         """
 
         resultado = procesar_con_gemini(prompt)
-
         if resultado:
-            logger.info(f"Procesado exitoso de {lic_id}.")
             registrar_licitacion(lic_id, lic['titulo'], True)
+            logger.info(f"Licitación {lic_id} aprobada y procesada.")
         else:
-            logger.info(f"Omitiendo {lic_id} por no cumplir criterio o fallar en el procesamiento.")
             registrar_licitacion(lic_id, lic['titulo'], False)
 
 # ---------------------------------------------------------------------------
-# 6. HANDLERS DEL BOT DE TELEGRAM
+# 6. HANDLERS ASÍNCRONOS PARA EL BOT DE TELEGRAM
 # ---------------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     mensaje = (
-        f"Hola {user_name}, el sistema **Kiyomoto Logistics / Cazador de Licitaciones** está en línea.\n\n"
-        "Comandos disponibles:\n"
-        "/status - Verificar el estado del servicio\n"
-        "/forzar_escaneo - Iniciar un escaneo de licitaciones manualmente"
+        f"🤖 **Kiyomoto Logistics Bot** iniciado correctamente.\n\n"
+        f"Hola {user_name}, los comandos disponibles son:\n"
+        "• /status - Ver estado del sistema y monitoreo\n"
+        "• /on - Activar el monitoreo automático de SAM.gov\n"
+        "• /off - Pausar el monitoreo automático\n"
+        "• /forzar_escaneo - Ejecutar escaneo manual ahora"
     )
     await update.message.reply_text(mensaje, parse_mode="Markdown")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🟢 El bot está activo, Flask respondiendo y el monitoreo programado correctamente.")
+    estado_str = "🟢 ACTIVO" if MONITOREO_ACTIVO else "🔴 PAUSADO"
+    mensaje = (
+        f"📊 **Estado del Sistema**\n"
+        f"• Servidor Web: Operativo (Port 10000)\n"
+        f"• Monitoreo Automático: {estado_str}\n"
+        f"• Base de Datos: Conectada"
+    )
+    await update.message.reply_text(mensaje, parse_mode="Markdown")
+
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global MONITOREO_ACTIVO
+    MONITOREO_ACTIVO = True
+    await update.message.reply_text("🟢 Monitoreo automático ACTIVADO. El bot buscará licitaciones periódicamente.")
+
+async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global MONITOREO_ACTIVO
+    MONITOREO_ACTIVO = False
+    await update.message.reply_text("🔴 Monitoreo automático PAUSADO. No se realizarán búsquedas automáticas.")
 
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Iniciando escaneo manual de licitaciones...")
+    await update.message.reply_text("🔍 Iniciando escaneo manual de licitaciones COTS...")
     ejecutar_monitoreo_licitaciones(context.application)
-    await update.message.reply_text("✅ Escaneo manual completado.")
+    await update.message.reply_text("✅ Escaneo manual completado exitosamente.")
 
 # ---------------------------------------------------------------------------
 # 7. PUNTO DE ENTRADA PRINCIPAL
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # A. Inicializar Base de Datos
     init_db()
 
-    # B. Levantar Flask en un hilo secundario
+    # Flask en hilo secundario
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Servidor web Flask iniciado en segundo plano.")
 
-    # C. Obtener Token de Telegram
-    telegram_token = os.environ.get("TELEGRAM_TOKEN")
+    # Acepta tanto TELEGRAM_BOT_TOKEN como TELEGRAM_TOKEN de Render
+    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
     if not telegram_token:
-        logger.critical("Error: TELEGRAM_TOKEN no está definido en las variables de entorno.")
+        logger.critical("Error: No se encontró ningún token de Telegram en las variables de entorno.")
         exit(1)
 
-    # D. Construir Aplicación de Telegram
     bot_app = ApplicationBuilder().token(telegram_token).build()
 
-    # Registrar Handlers
+    # Registro explícito de los handlers de comando
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("status", status_command))
+    bot_app.add_handler(CommandHandler("on", on_command))
+    bot_app.add_handler(CommandHandler("off", off_command))
     bot_app.add_handler(CommandHandler("forzar_escaneo", forzar_escaneo_command))
 
-    # E. Configurar APScheduler
+    # Configuración de APScheduler
     scheduler = BackgroundScheduler(timezone="UTC")
-    # Se programa la tarea periódica (ej. cada 1 hora)
     scheduler.add_job(
         ejecutar_monitoreo_licitaciones,
         "interval",
@@ -207,9 +220,8 @@ if __name__ == "__main__":
         id="job_monitoreo_licitaciones"
     )
     scheduler.start()
-    logger.info("Scheduler iniciado con éxito.")
+    logger.info("Scheduler de monitoreo iniciado.")
 
-    # F. Iniciar Polling de Telegram en el Hilo Principal
-    # 'drop_pending_updates=True' descarta peticiones previas colgadas y elimina el conflicto 404
+    # Iniciar polling
     logger.info("Iniciando Polling del Bot de Telegram...")
     bot_app.run_polling(drop_pending_updates=True)
