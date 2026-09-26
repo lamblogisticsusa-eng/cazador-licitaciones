@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from docx import Document
@@ -44,7 +45,7 @@ flask_app = Flask(__name__)
 def health_check():
     return (
         "<h2>(✿◠‿◠) Kiyomoto Helper - L.A.M.B. Logistics LLC</h2>"
-        "<p>Estado: Activa y rastreando SAM.gov 24/7</p>",
+        "<p>Estado: Activa y rastreando SAM.gov 24/7 (Filtro COTS Estricto)</p>",
         200,
     )
 
@@ -359,11 +360,12 @@ def generar_pdf_packing_list(lic_data):
 
 
 # ---------------------------------------------------------
-# ANÁLISIS DE IA CON GEMINI
+# ANÁLISIS DE IA CON GEMINI (FILTRO COTS REFORZADO)
 # ---------------------------------------------------------
 def analizar_licitacion_ia(titulo, descripcion):
     if not ai_client:
         return {
+            "es_producto_cots": True,
             "producto": titulo,
             "cantidad": 1,
             "unidad": "Unidades",
@@ -371,38 +373,47 @@ def analizar_licitacion_ia(titulo, descripcion):
         }
 
     prompt = f"""
-    Analiza esta licitación pública de compras COTS de EE. UU.:
+    Analiza esta licitación pública de compras públicas de EE. UU.:
     Título: {titulo}
     Descripción: {descripcion}
 
-    Responde ÚNICAMENTE en JSON con esta estructura:
+    REGLA CRÍTICA:
+    Determina si la licitación es estrictamente para COMPRAR Y ENTREGAR PRODUCTOS FÍSICOS COMERCIALES (COTS) (ej. herramientas, suministros, piezas, equipos).
+    Si se trata de SERVICIOS, TRABAJOS DE CAMPO, DEMOLICIÓN, REMOCIÓN, MANTENIMIENTO, CONSTRUCCIÓN O INSTALACIÓN EN SITIO, debes marcar "es_producto_cots": false.
+
+    Responde ÚNICAMENTE en JSON con esta estructura exacta:
     {{
+        "es_producto_cots": true/false,
         "producto": "Nombre claro del producto en español",
         "cantidad": 100,
         "unidad": "Unidades/Cajas/Kits",
-        "detalles": "Resumen rápido"
+        "detalles": "Resumen rápido de las especificaciones"
     }}
     """
-    try:
-        resp = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-        text_clean = re.sub(
-            r"```json\s*", "", resp.text, flags=re.IGNORECASE
-        ).replace("```", "").strip()
-        data = json.loads(text_clean)
-        data["cantidad"] = max(1, int(data.get("cantidad", 1)))
-        return data
-    except Exception as e:
-        logger.warning(f"Error parseando Gemini: {e}")
-        return {
-            "producto": titulo,
-            "cantidad": 1,
-            "unidad": "Unidades",
-            "detalles": "Resumen no disponible.",
-        }
+    for attempt in range(2):
+        try:
+            resp = ai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            text_clean = re.sub(
+                r"```json\s*", "", resp.text, flags=re.IGNORECASE
+            ).replace("```", "").strip()
+            data = json.loads(text_clean)
+            data["cantidad"] = max(1, int(data.get("cantidad", 1)))
+            return data
+        except Exception as e:
+            logger.warning(f"Error parseando Gemini en intento {attempt + 1}: {e}")
+            time.sleep(1)
+
+    return {
+        "es_producto_cots": True,
+        "producto": titulo,
+        "cantidad": 1,
+        "unidad": "Unidades",
+        "detalles": "Resumen no disponible.",
+    }
 
 
 def buscar_distribuidores_ia(producto, zip_code):
@@ -421,29 +432,34 @@ def buscar_distribuidores_ia(producto, zip_code):
         ]
 
     prompt = f"""
-    Menciona 2 distribuidores o mayoristas principales en EE. UU. que vendan '{producto}' y envíen al ZIP '{zip_code}'.
+    Encuentra 2 distribuidores o mayoristas reales en EE. UU. que vendan el producto '{producto}' y envíen al ZIP '{zip_code}'.
     Responde ÚNICAMENTE en JSON con una lista de 2 objetos conteniendo: "nombre", "tel", "web".
     """
-    try:
-        resp = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-        text_clean = re.sub(
-            r"```json\s*", "", resp.text, flags=re.IGNORECASE
-        ).replace("```", "").strip()
-        data = json.loads(text_clean)
-        return data if isinstance(data, list) else data.get("distribuidores", [])
-    except Exception:
-        return [
-            {"nombre": "Grainger", "tel": "Consulte Web", "web": "grainger.com"},
-            {"nombre": "MSC Industrial", "tel": "Consulte Web", "web": "mscdirect.com"},
-        ]
+    for attempt in range(2):
+        try:
+            resp = ai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            text_clean = re.sub(
+                r"```json\s*", "", resp.text, flags=re.IGNORECASE
+            ).replace("```", "").strip()
+            data = json.loads(text_clean)
+            if isinstance(data, list) and len(data) > 0:
+                return data
+        except Exception as e:
+            logger.warning(f"Error buscando proveedores en intento {attempt + 1}: {e}")
+            time.sleep(1)
+
+    return [
+        {"nombre": "Grainger Supply", "tel": "(800) 472-4643", "web": "grainger.com"},
+        {"nombre": "MSC Industrial Direct", "tel": "(800) 645-7270", "web": "mscdirect.com"},
+    ]
 
 
 # ---------------------------------------------------------
-# CONEXIÓN SAM.GOV (CORREGIDO BLINDAJE DE AWARD)
+# CONEXIÓN SAM.GOV (FILTRO MEJORADO ANTI-SERVICIOS)
 # ---------------------------------------------------------
 def consultar_sam():
     if not SAM_API_KEY:
@@ -473,13 +489,12 @@ def consultar_sam():
         logger.error(f"Error consultando SAM.gov: {e}")
         return []
 
+    # Lista ampliada de exclusión de servicios y obras físicas
     excluir = [
-        "construction",
-        "service",
-        "maintenance",
-        "repair",
-        "janitorial",
-        "installation required",
+        "construction", "service", "maintenance", "repair",
+        "janitorial", "installation", "demolition", "removal",
+        "disposal", "rental", "lease", "dredging", "painting",
+        "inspection", "labor", "testing", "calibration", "renovation"
     ]
     candidatas = []
 
@@ -492,6 +507,7 @@ def consultar_sam():
         desc = opp.get("description", "")
         texto = f"{titulo} {desc}".lower()
 
+        # Filtro 1: Palabras clave excluidas
         if any(kw in texto for kw in excluir):
             continue
 
@@ -510,7 +526,7 @@ def consultar_sam():
         if dias_restantes < 1 or dias_restantes > 45:
             continue
 
-        # Monto Estimado - BLINDAJE APLICADO AQUÍ
+        # Monto Estimado (Blindaje contra NoneType)
         monto_est = 35000.0
         award_dict = opp.get("award") or {}
         raw_amt = award_dict.get("amount")
@@ -620,11 +636,17 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
 
     # 2. Nuevas Licitaciones
     licitaciones = consultar_sam()
+    enviadas_count = 0
 
     for lic in licitaciones:
         marcar_notificada(lic["id"])
 
+        # Filtro 2: Validación por IA Gemini
         ia_res = analizar_licitacion_ia(lic["titulo"], lic["descripcion"])
+        if not ia_res.get("es_producto_cots", True):
+            logger.info(f"Omitiendo {lic['id']} por ser un servicio/obra física según Gemini.")
+            continue
+
         cantidad = max(1, int(ia_res.get("cantidad", 1)))
         producto = ia_res.get("producto", lic["titulo"])
         unidad = ia_res.get("unidad", "Unidades")
@@ -695,8 +717,9 @@ async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=
             parse_mode="Markdown",
             reply_markup=keyboard,
         )
+        enviadas_count += 1
 
-    return len(licitaciones)
+    return enviadas_count
 
 
 # ---------------------------------------------------------
@@ -745,7 +768,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if encontradas == 0:
         await context.bot.send_message(
             chat_id=chat_id,
-            text="ℹ️ **Sin novedades:** No se encontraron licitaciones nuevas en este momento.",
+            text="ℹ️ **Sin novedades:** No se encontraron licitaciones nuevas de productos COTS en este momento.",
             parse_mode="Markdown",
         )
 
@@ -909,7 +932,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PUNTO DE ENTRADA PRINCIPAL
 # ---------------------------------------------------------
 def main():
-    # Iniciar servidor Flask en hilo secundario para mantener activo Render
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
@@ -950,7 +972,6 @@ def main():
 
     logger.info("Kiyomoto Helper iniciada y lista.")
     
-    # Manejo sincrónico para evitar RuntimeWarning al iniciar el Polling
     app.run_polling(drop_pending_updates=True)
 
 
