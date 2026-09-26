@@ -443,7 +443,7 @@ def buscar_distribuidores_ia(producto, zip_code):
 
 
 # ---------------------------------------------------------
-# CONEXIÓN SAM.GOV
+# CONEXIÓN SAM.GOV (CORREGIDO BLINDAJE DE AWARD)
 # ---------------------------------------------------------
 def consultar_sam():
     if not SAM_API_KEY:
@@ -510,19 +510,21 @@ def consultar_sam():
         if dias_restantes < 1 or dias_restantes > 45:
             continue
 
-        # Monto Estimado
+        # Monto Estimado - BLINDAJE APLICADO AQUÍ
         monto_est = 35000.0
-        raw_amt = opp.get("award", {}).get("amount")
+        award_dict = opp.get("award") or {}
+        raw_amt = award_dict.get("amount")
         if raw_amt:
             try:
                 monto_est = float(raw_amt)
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
 
         if monto_est > 250000.0:
             continue
 
-        zip_code = opp.get("placeOfPerformance", {}).get("zip", "USA")
+        place_dict = opp.get("placeOfPerformance") or {}
+        zip_code = place_dict.get("zip", "USA")
 
         candidatas.append(
             {
@@ -572,13 +574,14 @@ def verificar_adjudicaciones():
     for opp in opps:
         sol_num = opp.get("solicitationNumber", "")
         if sol_num in postuladas:
-            award = opp.get("award", {})
+            award = opp.get("award") or {}
+            awardee = award.get("awardee") or {}
             adjudicadas.append(
                 {
                     "solicitation_number": sol_num,
                     "titulo": opp.get("title", "Licitación"),
                     "monto": award.get("amount", "N/A"),
-                    "ganador": award.get("awardee", {}).get("name", "Desconocido"),
+                    "ganador": awardee.get("name", "Desconocido"),
                     "link": opp.get(
                         "uiLink", f"https://sam.gov/opp/{opp.get('noticeId')}/view"
                     ),
@@ -946,7 +949,8 @@ def main():
             logger.error(f"Error en programador de tareas: {e}")
 
     logger.info("Kiyomoto Helper iniciada y lista.")
-    app.bot.delete_webhook(drop_pending_updates=True)
+    
+    # Manejo sincrónico para evitar RuntimeWarning al iniciar el Polling
     app.run_polling(drop_pending_updates=True)
 
 
