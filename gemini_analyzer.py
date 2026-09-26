@@ -240,10 +240,25 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
             ultimo_error = e
             texto = str(e)
             # Reintentar un 400 de prompt o un 404 de modelo no sirve de nada.
-            if "API key not valid" in texto or "API_KEY_INVALID" in texto:
+            # OJO: desde el 28-may-2026 AI Studio crea "auth keys" ligadas a una
+            # service account que ya NO empiezan por AIza, asi que el prefijo
+            # no es un diagnostico valido. 401 aqui significa que Google no
+            # reconoce la credencial, y las causas mas comunes son otras.
+            if "401" in texto or "UNAUTHENTICATED" in texto:
                 raise GeminiError(
-                    "GEMINI_API_KEY invalida o revocada. Genera una nueva en "
-                    "https://aistudio.google.com/apikey (debe empezar con 'AIza')."
+                    "Google respondio 401: no reconoce GEMINI_API_KEY como "
+                    "credencial valida para la API de Gemini.\n"
+                    "Causas probables, en orden:\n"
+                    "1. La clave se copio incompleta (puede llevar espacios o "
+                    "cortarse al pegar; son ~53 caracteres con un punto).\n"
+                    "2. La clave tiene restriccion de IP/origen. Render usa IPs "
+                    "dinamicas, asi que una clave restringida a tu IP local "
+                    "funciona en tu casa y falla en Render.\n"
+                    "3. La API Generative Language no esta habilitada en el "
+                    "proyecto de Google Cloud asociado.\n"
+                    "4. La clave es de otro producto de Google, no de AI Studio.\n"
+                    "Solucion: en https://aistudio.google.com/apikey crea una "
+                    "auth key nueva, SIN restriccion de IP, y copiala completa."
                 ) from e
             if "not found" in texto.lower() and "model" in texto.lower():
                 raise GeminiError(

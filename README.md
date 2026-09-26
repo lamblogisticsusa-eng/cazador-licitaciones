@@ -1,4 +1,4 @@
-# Kyomoto ✨
+﻿# Kyomoto ✨
 
 Asistente kawaii que busca licitaciones de **compra de productos** en SAM.gov y
 te las manda a Telegram con el análisis financiero, precio unitario, ganancia
@@ -29,18 +29,19 @@ HTML. `sam_api.obtener_descripcion()` hace esa llamada.
 > como texto vacío, avisa en la ficha que las cifras son estimaciones por
 > título, y sigue adelante con el pre-filtrado por título.
 
-### 2. Tu clave de Gemini no es válida
+### 2. Google no reconocía la credencial de Gemini
 
-Probada directamente contra la API de Google:
+Probada por cinco vías contra la API real (`?key=`, `Authorization: Bearer`,
+`tokeninfo`, header `x-goog-api-key` con tres modelos, y el SDK `google-genai`):
+todas devolvieron `401`. `tokeninfo` la identificaba como `invalid_token`, así
+que no es una API key ni un token OAuth valido.
 
-```
-401 UNAUTHENTICATED - ACCESS_TOKEN_TYPE_UNSUPPORTED
-```
+Lo importante: **esto no era culpa del prefijo.** Desde el 28-may-2026 Google
+crea *auth keys* ligadas a una service account que ya no empiezan con `AIza`, así
+que un `AQ.` es perfectamente válido *en principio*. El código de la versión
+anterior asumía `AIza` y daba un diagnóstico equivocado; ya no lo hace.
 
-Tu clave empieza con `AQ.`. Las claves de Google AI Studio empiezan con
-**`AIza`**. Lo que tienes parece un token de OAuth, no una API key de Gemini.
-
-Y aquí está lo peligroso: tu código hacía
+Y el detalle que convirtió esto en un silencio de horas: el código hacía
 
 ```python
 except Exception as e:
@@ -48,12 +49,10 @@ except Exception as e:
     return "NO_VIABLE"
 ```
 
-Es decir, **cualquier error de Gemini se disfrazaba de "esta oportunidad no me
-sirve"**. Como el error solo se escribía en el log de Render y el bot no te
-avisaba, tu único síntoma era silencio. Kyomoto nunca pudo evaluar nada.
-
-`gemini_analyzer.py` ahora lanza `GeminiError` y te lo reporta a Telegram. Y
-`/selftest` te dice en 20 segundos qué parte está rota.
+**Cualquier error de Gemini se disfrazaba de "esta oportunidad no me sirve"**, y
+solo se escribía en el log. Kyomoto no podía notificar nada sin que se supiera
+por qué. Ahora los errores se reportan a Telegram y `/selftest` diagnostica cada
+API.
 
 ### 3. Other bugs fixed
 
@@ -90,22 +89,41 @@ mira `/puntajes` después de un escaneo.
 
 ## Puesta en marcha
 
-### 1. Consigue una clave de Gemini que sí funcione
+### 2. Una clave de Gemini que Google reconozca
 
-1. Ve a <https://aistudio.google.com/apikey>
-2. **Create API key**
-3. Debe empezar por `AIza`
-4. Verifícala antes de subir nada:
+Ve a <https://aistudio.google.com/apikey> y crea una key.
+
+> **Sobre el prefijo:** desde el **28 de mayo de 2026**, AI Studio crea por
+> defecto *auth keys* ligadas a una service account, y esas **no** empiezan con
+> `AIza`. Un prefijo `AQ.` no es por sí solo una señal de que la clave esté
+> mal. Si ves `401 UNAUTHENTICATED`, el problema es otro:
+
+1. **La clave se copió incompleta.** Son ~53 caracteres y contiene un punto.
+   Cópiala completa, sin espacios.
+2. **Tiene restricción de IP u origen.** Render usa IPs dinámicas: una clave
+   restringida a tu IP local funciona en tu casa y **falla en Render**. Para un
+   bot alojado, no apliques restricción de IP.
+3. **Falta habilitar la API Generative Language** en el proyecto de Google Cloud
+   asociado a la key.
+4. **La clave es de otro producto** de Google, no de AI Studio.
+
+Verifícala antes de subir nada:
 
 ```bash
-curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=TU_CLAVE" \
+curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent" \
   -H "Content-Type: application/json" \
+  -H "x-goog-api-key: TU_CLAVE" \
   -d '{"contents":[{"parts":[{"text":"di OK"}]}],"generationConfig":{"maxOutputTokens":2048}}'
 ```
 
-Si responde `UNAUTHENTICATED`, la clave está mal.
+Debe devolver JSON con el texto. Un `401` significa que Google no reconoce la
+credencial.
 
-### 2. Render
+Ojo también con el modelo: la API de Gemini usa `gemini-2.5-flash`,
+`gemini-3.8-flash` o `gemini-flash-latest`. Si tu clave solo habilita
+algunos modelos, cambia `GEMINI_MODEL` en Render.
+
+### 3. Render
 
 | Campo | Valor |
 |---|---|
@@ -161,7 +179,7 @@ llegan demasiados. Mira `/puntajes` para ver por qué se cayó cada una.
 `render.yaml` ya viene con todo esto. Si lo usas, Render te pregunta si quieres
 importarlo: acepta y solo llenas las 4 claves.
 
-### 3. Habla con Kyomoto
+### 4. Habla con Kyomoto
 
 ```
 /selftest     -> te dice si Telegram, SAM.gov y Gemini responden

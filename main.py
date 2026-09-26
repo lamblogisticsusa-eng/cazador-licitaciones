@@ -200,9 +200,16 @@ async def cmd_selftest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         cuerpo += "\n<b>Que hacer</b>\n"
         if "Gemini" in fallas:
             cuerpo += (
-                "• <b>Gemini</b>: la clave no es valida o no tiene cuota. Las "
-                "claves de AI Studio empiezan con <code>AIza</code>. Crea una en "
-                "https://aistudio.google.com/apikey y reemplazala en Render.\n"
+                "• <b>Gemini</b>: Google devolvio 401, no reconoce la clave. "
+                "Ojo: desde mayo 2026 las claves de AI Studio ya NO empiezan "
+                "con AIza, asi que el prefijo no dice nada. Revisa en este orden:\n"
+                "   1. La clave se copio incompleta.\n"
+                "   2. Tiene restriccion de IP: Render usa IPs dinamicas y una "
+                "clave restringida a tu IP local falla ahi.\n"
+                "   3. Falta habilitar la API Generative Language en el proyecto.\n"
+                "   4. Es una clave de otro producto de Google.\n"
+                "   Crea una auth key nueva sin restriccion en "
+                "https://aistudio.google.com/apikey\n"
             )
         if "SAM.gov" in fallas:
             cuerpo += (
