@@ -3,6 +3,7 @@ import sqlite3
 import logging
 import threading
 import requests
+import asyncio
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask
@@ -110,19 +111,19 @@ def procesar_con_gemini(prompt: str) -> str:
 def obtener_oportunidades_sam():
     sam_api_key = os.environ.get("SAM_API_KEY")
     if not sam_api_key:
-        logger.warning("⚠️ SAM_API_KEY no encontrada. No se realizarán búsquedas reales en SAM.gov.")
+        logger.warning("⚠️ SAM_API_KEY no encontrada.")
         return []
 
     url = "https://api.sam.gov/prod/opportunities/v2/search"
     
-    # Consultamos avisos de las últimas 24 horas (formato MM/dd/yyyy)
+    # Formato estrictamente requerido por SAM.gov v2 API: YYYY-MM-DD
     fecha_hasta = datetime.now(timezone.utc)
-    fecha_desde = fecha_hasta - timedelta(days=1)
+    fecha_desde = fecha_hasta - timedelta(days=2)
     
     params = {
         "api_key": sam_api_key,
-        "postedFrom": fecha_desde.strftime("%m/%d/%Y"),
-        "postedTo": fecha_hasta.strftime("%m/%d/%Y"),
+        "postedFrom": fecha_desde.strftime("%Y-%m-%d"),
+        "postedTo": fecha_hasta.strftime("%Y-%m-%d"),
         "ptype": "o,k,p",  # Solicitations, Combined Synopsis, Presolicitations
         "limit": 25
     }
@@ -131,7 +132,9 @@ def obtener_oportunidades_sam():
         response = requests.get(url, params=params, timeout=20)
         if response.status_code == 200:
             data = response.json()
-            return data.get("opportunitiesData", [])
+            opps = data.get("opportunitiesData", [])
+            logger.info(f"📊 SAM.gov devolvió {len(opps)} registros.")
+            return opps
         else:
             logger.error(f"❌ Error API SAM.gov ({response.status_code}): {response.text}")
             return []
@@ -144,7 +147,7 @@ def obtener_oportunidades_sam():
 # ---------------------------------------------------------------------------
 async def notificar_telegram(bot_app, chat_id: str, mensaje: str):
     try:
-        await bot_app.bot.send_message(chat_id=chat_id, text=mensaje, parse_mode="Markdown", disable_web_page_preview=True)
+        await bot_app.bot.send_message(chat_id=chat_id, text=mensaje, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"Error enviando mensaje a Telegram: {e}")
 
@@ -192,14 +195,13 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
             
             if bot_application and chat_id:
                 mensaje_notif = (
-                    f"🌸 **¡Nueva Oportunidad Detectada en SAM.gov!** 📦✨\n\n"
-                    f"🆔 **ID:** `{notice_id}`\n"
-                    f"🏢 **Agencia:** {agencia}\n"
-                    f"📌 **Título:** {titulo}\n"
-                    f"🔗 **Enlace:** [Ver en SAM.gov]({ui_link})\n\n"
-                    f"💡 **Análisis de Kiyomoto:** Es un suministro o producto tangible listo para cotizar. 🚀"
+                    f"🌸 <b>¡Nueva Oportunidad Detectada en SAM.gov!</b> 📦✨\n\n"
+                    f"🆔 <b>ID:</b> <code>{notice_id}</code>\n"
+                    f"🏢 <b>Agencia:</b> {agencia}\n"
+                    f"📌 <b>Título:</b> {titulo}\n"
+                    f"🔗 <b>Enlace:</b> <a href='{ui_link}'>Ver en SAM.gov</a>\n\n"
+                    f"💡 <b>Análisis de Kiyomoto:</b> Es un suministro o producto tangible listo para cotizar. 🚀"
                 )
-                import asyncio
                 asyncio.run_coroutine_threadsafe(
                     notificar_telegram(bot_application, chat_id, mensaje_notif),
                     bot_application.loop
@@ -213,43 +215,43 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     mensaje = (
-        f"✨ **¡Hola, {user_name}-san!** (⁠✿⁠☉⁠｡⁠☉⁠)\n"
-        f"Soy **Kiyomoto**, tu cazadora de licitaciones de logística. 🌸📦\n\n"
-        f"Vigilo **SAM.gov** en tiempo real para avisarte cuando publiquen contratos de productos físicos. ✨\n\n"
-        f"📜 **Comandos:**\n"
+        f"✨ <b>¡Hola, {user_name}-san!</b> (⁠✿⁠☉⁠｡⁠☉⁠)\n"
+        f"Soy <b>Kiyomoto</b>, tu cazadora de licitaciones de logística. 🌸📦\n\n"
+        f"Vigilo <b>SAM.gov</b> en tiempo real para avisarte cuando publiquen contratos de productos físicos. ✨\n\n"
+        f"📜 <b>Comandos:</b>\n"
         f"• /status - Estado del sistema 📊\n"
         f"• /on - Activar monitoreo 🟢\n"
         f"• /off - Pausar monitoreo 🔴\n"
         f"• /forzar_escaneo - Escaneo manual inmediato 🔍"
     )
-    await update.message.reply_text(mensaje, parse_mode="Markdown")
+    await update.message.reply_text(mensaje, parse_mode="HTML")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     estado_str = "🟢 ACTIVO (¡Radar encendido! ✨)" if MONITOREO_ACTIVO else "🔴 PAUSADO (En descanso... 💤)"
     sam_key_ok = "Configurada ✅" if os.environ.get("SAM_API_KEY") else "No Configurada ⚠️"
     mensaje = (
-        f"📊 **Reporte de Estado de Kiyomoto** (🔒_🔒)✨\n\n"
-        f"• **Servidor Web:** Operativo (Puerto 10000) 🌐\n"
-        f"• **Radar de Monitoreo:** {estado_str}\n"
-        f"• **API SAM.gov:** {sam_key_ok}\n"
-        f"• **Cerebro Gemini IA:** Conectado 🧠"
+        f"📊 <b>Reporte de Estado de Kiyomoto</b> (🔒_🔒)✨\n\n"
+        f"• <b>Servidor Web:</b> Operativo (Puerto 10000) 🌐\n"
+        f"• <b>Radar de Monitoreo:</b> {estado_str}\n"
+        f"• <b>API SAM.gov:</b> {sam_key_ok}\n"
+        f"• <b>Cerebro Gemini IA:</b> Conectado 🧠"
     )
-    await update.message.reply_text(mensaje, parse_mode="Markdown")
+    await update.message.reply_text(mensaje, parse_mode="HTML")
 
 async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MONITOREO_ACTIVO
     MONITOREO_ACTIVO = True
-    await update.message.reply_text("🟢 **¡Entendido!** Radar de SAM.gov activado. (⁠•̀⁠ᴗ⁠•́⁠)⁠و✨")
+    await update.message.reply_text("🟢 <b>¡Entendido!</b> Radar de SAM.gov activado. (⁠•̀⁠ᴗ⁠•́⁠)⁠و✨", parse_mode="HTML")
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MONITOREO_ACTIVO
     MONITOREO_ACTIVO = False
-    await update.message.reply_text("🔴 **¡Monitoreo pausado!** En pausa hasta tu orden. (⁠´⁠ー⁠｀⁠)")
+    await update.message.reply_text("🔴 <b>¡Monitoreo pausado!</b> En pausa hasta tu orden. (⁠´⁠ー⁠｀⁠)", parse_mode="HTML")
 
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 **¡Buscando en SAM.gov ahora mismo!**... (⁠✦⁠‿⁠✦⁠)")
+    await update.message.reply_text("🔍 <b>¡Buscando en SAM.gov ahora mismo!</b>... (⁠✦⁠‿⁠✦⁠)", parse_mode="HTML")
     ejecutar_monitoreo_licitaciones(context.application)
-    await update.message.reply_text("✨ **¡Escaneo completado!** Si hay novedades te las notifiqué arriba. 🌸")
+    await update.message.reply_text("✨ <b>¡Escaneo completado!</b> Si hay novedades te las notifiqué arriba. 🌸", parse_mode="HTML")
 
 # ---------------------------------------------------------------------------
 # 8. PUNTO DE ENTRADA PRINCIPAL
