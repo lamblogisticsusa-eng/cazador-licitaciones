@@ -17,7 +17,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 DB_NAME = "licitaciones.db"
 
-# Inicializar cliente de Gemini con la nueva SDK (google-genai)
+# Inicializar cliente de Gemini con la SDK oficial (google-genai)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # --- BASE DE DATOS LOCAL ---
@@ -153,13 +153,15 @@ def ejecutar_monitoreo_licitaciones(app_telegram):
         analisis = analizar_oportunidad_con_gemini(opp)
         
         if analisis and "NO_VIABLE" not in analisis:
-            # Enviar notificación a Telegram
+            # Enviar notificación a Telegram a través del Bot API
             try:
-                app_telegram.bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID,
-                    text=analisis,
-                    parse_mode="Markdown"
-                )
+                url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                payload = {
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": analisis,
+                    "parse_mode": "Markdown"
+                }
+                requests.post(url_msg, json=payload, timeout=10)
                 count_notificadas += 1
             except Exception as e:
                 print(f"⚠️ Error al enviar mensaje a Telegram: {e}")
@@ -178,15 +180,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧹 **Limpiando historial y reevaluando 100 licitaciones con análisis financiero...** (⁠✦⁠_⁠✦⁠)", parse_mode="Markdown")
+    await update.message.reply_text("🧹 **Limpiando historial y reevaluando licitaciones con análisis financiero...** (⁠✦⁠_⁠✦⁠)", parse_mode="Markdown")
     
-    # 1. Limpiamos la base de datos para forzar la reevaluación completa
+    # 1. Limpiamos la base de datos para reevaluar todo
     limpiar_historial_db()
     
     # 2. Ejecutamos el monitoreo
     ejecutar_monitoreo_licitaciones(context.application)
     
-    await update.message.reply_text("✨ **¡Escaneo completado!** Revisa arriba las oportunidades clasificadas. 🌸", parse_mode="Markdown")
+    await update.message.reply_text("✨ **¡Escaneo completado!** Revisa las oportunidades clasificadas arriba. 🌸", parse_mode="Markdown")
 
 # --- SERVIDOR FLASK (KEEP ALIVE / HEALTH CHECK) ---
 server = Flask(__name__)
@@ -195,26 +197,24 @@ server = Flask(__name__)
 def home():
     return "Kiyomoto Logistics Bot está activo y funcionando.", 200
 
-# --- CONTROLADOR PARA TELEGRAM IN-THREAD ---
-_bot_iniciado = False
-
-def iniciar_polling_bot(telegram_app):
-    global _bot_iniciado
-    if not _bot_iniciado:
-        _bot_iniciado = True
-        telegram_app.run_polling(drop_pending_updates=True, stop_signals=None)
+def ejecutar_flask():
+    port = int(os.environ.get("PORT", 10000))
+    server.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # --- APLICACIÓN PRINCIPAL ---
 def main():
     init_db()
     
-    # Configuración de python-telegram-bot
-    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # 1. Iniciar servidor Flask en un Hilo secundario para cumplir con Render
+    thread_flask = threading.Thread(target=ejecutar_flask, daemon=True)
+    thread_flask.start()
     
+    # 2. Configurar Telegram Bot
+    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CommandHandler("forzar_escaneo", forzar_escaneo_command))
     
-    # Programador en segundo plano (APScheduler)
+    # 3. Configurar Programador APScheduler (cada 4 horas)
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         func=ejecutar_monitoreo_licitaciones,
@@ -226,15 +226,10 @@ def main():
     )
     scheduler.start()
     
-    # Iniciar Polling de Telegram en un Hilo separado
-    thread_bot = threading.Thread(target=iniciar_polling_bot, args=(telegram_app,), daemon=True)
-    thread_bot.start()
-    
     print("✨ Kiyomoto lista y escuchando...")
     
-    # Iniciar servidor Flask para el Health Check de Render
-    port = int(os.environ.get("PORT", 10000))
-    server.run(host="0.0.0.0", port=port)
+    # 4. Iniciar el Polling de Telegram en el HILO PRINCIPAL (bloqueante)
+    telegram_app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
