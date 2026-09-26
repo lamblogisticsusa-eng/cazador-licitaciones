@@ -4,6 +4,8 @@ import logging
 import threading
 import requests
 import asyncio
+import json
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask
@@ -116,7 +118,6 @@ def obtener_oportunidades_sam():
 
     url = "https://api.sam.gov/prod/opportunities/v2/search"
     
-    # Rango extendido a 7 días y hasta 100 registros
     fecha_hasta = datetime.now(timezone.utc)
     fecha_desde = fecha_hasta - timedelta(days=7)
     
@@ -124,7 +125,7 @@ def obtener_oportunidades_sam():
         "api_key": sam_api_key,
         "postedFrom": fecha_desde.strftime("%Y-%m-%d"),
         "postedTo": fecha_hasta.strftime("%Y-%m-%d"),
-        "ptype": "o,k,p",  # Solicitations, Combined Synopsis, Presolicitations
+        "ptype": "o,k,p",
         "limit": 100
     }
 
@@ -143,7 +144,7 @@ def obtener_oportunidades_sam():
         return []
 
 # ---------------------------------------------------------------------------
-# 6. MONITOREO CON NOTIFICACIONES
+# 6. MONITOREO CON NOTIFICACIONES FINANCIERAS DETALLADAS
 # ---------------------------------------------------------------------------
 async def notificar_telegram(bot_app, chat_id: str, mensaje: str):
     try:
@@ -166,6 +167,8 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
         logger.info("No se encontraron nuevas oportunidades en este ciclo.")
         return
 
+    aprobadas = 0
+
     for opp in oportunidades:
         notice_id = opp.get("noticeId") or opp.get("solicitationNumber")
         if not notice_id or esta_procesada(notice_id):
@@ -175,37 +178,74 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
         descripcion = opp.get("description", opp.get("subject", "Sin Descripción"))
         agencia = opp.get("fullParentPathName", "Agencia Federal")
         ui_link = opp.get("uiLink", f"https://sam.gov/opp/{notice_id}/view")
+        type_str = opp.get("type", "Oportunidad")
 
         prompt = f"""
-        Analiza detalladamente esta oportunidad de licitación de SAM.gov para un distribuidor/intermediario de logística.
-
-        CRITERIOS DE APROBACIÓN:
-        1. Requiere la entrega/suministro de PRODUCTOS FÍSICOS O BIENES TANGIBLES (equipos, repuestos, herramientas, insumos, partes COTS, mercancía física).
-        2. El valor estimado o alcance sugiere una compra pequeña/mediana (Simplified Acquisition Threshold <= $250,000 USD, o adquisiciones de contrato directo/SAP). Si es un mega contrato de cientos de millones o servicios de construcción masiva, MARCA FALSO.
-        3. NO debe ser únicamente un servicio puro intangibles (consultoría, soporte de software, mantenimiento de edificios, servicios médicos).
+        Actúa como un analista experto en logística y compras del gobierno federal de EE.UU. (SAM.gov).
+        Evalúa si este aviso requiere la COMPRA/SUMINISTRO DE PRODUCTOS O BIENES FÍSICOS COTS (equipos, partes, repuestos, herramientas, componentes, insumos, suministros) aptos para un distribuidor intermediario.
 
         Título: {titulo}
-        Descripción: {descripcion[:2000]}
+        Tipo de Aviso: {type_str}
+        Descripción/Notas: {descripcion[:1500]}
 
-        Responde en formato JSON estricto:
-        {{"es_producto_fisico": true/false, "cumple_criterio_monto": true/false, "resumen": "Resumen conciso en 2 frases de lo que solicitan comprarde la mercancía"}}
+        Instrucciones:
+        1. Determina si es un producto físico/tangible (Aprobado) o si es un servicio/construcción/mantenimiento (Rechazado).
+        2. Si es un producto físico, estima un valor de compra aproximado (Purchase Value) teniendo en cuenta que el límite objetivo es <= $250,000 USD.
+        3. Calcula un margen estimado de ganancia bruta razonable (ej. 15% - 25%).
+        4. Identifica las palabras clave del producto para buscar distribuidores/fabricantes en EE.UU.
+
+        Responde EXCLUSIVAMENTE en formato JSON plano con la siguiente estructura:
+        {{
+            "es_producto_fisico": true/false,
+            "resumen_producto": "Descripción breve del producto solicitado",
+            "valor_estimado_usd": "$15,000 - $35,000 USD",
+            "ganancia_estimada_usd": "$2,500 - $6,000 USD (Margen ~18%)",
+            "keywords_busqueda": "términos exactos del producto para buscar proveedor"
+        }}
         """
 
-        resultado = procesar_con_gemini(prompt)
-        
-        # Evaluamos la respuesta de Gemini
-        if resultado and '"es_producto_fisico": true' in resultado.lower() and '"cumple_criterio_monto": true' in resultado.lower():
-            registrar_licitacion(notice_id, titulo, True)
-            logger.info(f"✨ Licitación {notice_id} aprobada por Kiyomoto!")
+        resultado_raw = procesar_con_gemini(prompt)
+        if not resultado_raw:
+            continue
+
+        try:
+            # Limpiar posible formato markdown en el JSON generado
+            json_text = resultado_raw.strip()
+            if json_text.startswith("```json"):
+                json_text = json_text[7:]
+            if json_text.endswith("```"):
+                json_text = json_text[:-3]
             
+            data = json.loads(json_text.strip())
+        except Exception:
+            # Fallback en caso de que no retorne JSON estricto
+            data = {"es_producto_fisico": False}
+
+        if data.get("es_producto_fisico") is True:
+            registrar_licitacion(notice_id, titulo, True)
+            aprobadas += 1
+            logger.info(f"✨ APROBADA CON ANÁLISIS: [{notice_id}] {titulo}")
+
+            keywords = data.get("keywords_busqueda", titulo)
+            query_encoded = urllib.parse.quote(f"{keywords} distributor wholesale USA")
+            link_google_distribuidor = f"https://www.google.com/search?q={query_encoded}"
+            
+            resumen = data.get("resumen_producto", "Suministro de productos tangibles.")
+            valor = data.get("valor_estimado_usd", "Por determinar (< $250,000 USD)")
+            ganancia = data.get("ganancia_estimada_usd", "Margen proyectado 15-25%")
+
             if bot_application and chat_id:
                 mensaje_notif = (
-                    f"🌸 <b>¡Nueva Oportunidad Calificada Detectada!</b> 📦✨\n\n"
+                    f"🌸 <b>¡Oportunidad Calificada Detectada!</b> 📦✨\n\n"
                     f"🆔 <b>ID:</b> <code>{notice_id}</code>\n"
                     f"🏢 <b>Agencia:</b> {agencia}\n"
-                    f"📌 <b>Título:</b> {titulo}\n"
-                    f"🔗 <b>Enlace:</b> <a href='{ui_link}'>Ver en SAM.gov</a>\n\n"
-                    f"💡 <b>Análisis de Kiyomoto:</b> Producto físico/suministro dentro del rango viable (&lt;=$250k). 🚀"
+                    f"📌 <b>Título:</b> {titulo}\n\n"
+                    f"📝 <b>Producto:</b> {resumen}\n"
+                    f"💰 <b>Valor Estimado Contrato:</b> {valor}\n"
+                    f"💵 <b>Ganancia Proyectada:</b> {ganancia}\n\n"
+                    f"🔗 <a href='{ui_link}'>Ver Licitación en SAM.gov</a>\n"
+                    f"🔍 <a href='{link_google_distribuidor}'>Buscar Distribuidores en Google</a>\n\n"
+                    f"💡 <b>Kiyomoto:</b> Licitación de bienes físicos lista para cotizar con proveedor. 🚀"
                 )
                 asyncio.run_coroutine_threadsafe(
                     notificar_telegram(bot_application, chat_id, mensaje_notif),
@@ -213,6 +253,8 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
                 )
         else:
             registrar_licitacion(notice_id, titulo, False)
+
+    logger.info(f"🏁 Escaneo finalizado. Licitaciones notificadas: {aprobadas}")
 
 # ---------------------------------------------------------------------------
 # 7. HANDLERS ASÍNCRONOS KIYOMOTO KAWAII ✨
@@ -254,9 +296,9 @@ async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔴 <b>¡Monitoreo pausado!</b> En pausa hasta tu orden. (⁠´⁠ー⁠｀⁠)", parse_mode="HTML")
 
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 <b>¡Escaneando SAM.gov (últimos 7 días / 100 registros)!</b>... (⁠✦⁠‿⁠✦⁠)", parse_mode="HTML")
+    await update.message.reply_text("🔍 <b>¡Escaneando SAM.gov (con análisis financiero)!</b>... (⁠✦⁠‿⁠✦⁠)", parse_mode="HTML")
     ejecutar_monitoreo_licitaciones(context.application)
-    await update.message.reply_text("✨ <b>¡Escaneo completado!</b> Si hay oportunidades que cumplan tus criterios, te las envié arriba. 🌸", parse_mode="HTML")
+    await update.message.reply_text("✨ <b>¡Escaneo completado!</b> Revisa arriba los desgloses financieros enviados. 🌸", parse_mode="HTML")
 
 # ---------------------------------------------------------------------------
 # 8. PUNTO DE ENTRADA PRINCIPAL
