@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -25,16 +26,16 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------
-# CONFIGURACIÓN DE LOGGING
+# LOGGING
 # ---------------------------------------------------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("Kiyomoto_Logistics_Bot")
+logger = logging.getLogger("Kiyomoto_Logistics")
 
 # ---------------------------------------------------------
-# SERVIDOR FLASK (Health Check para Render y UptimeRobot)
+# SERVIDOR FLASK (Health Check para Render)
 # ---------------------------------------------------------
 flask_app = Flask(__name__)
 
@@ -42,8 +43,8 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def health_check():
     return (
-        "<h3>Bot Cazador de Licitaciones - Kiyomoto (L.A.M.B. Logistics LLC)</h3>"
-        "<p>Estado: Activo, Operativo y Monitoreando SAM.gov 24/7</p>",
+        "<h2>(✿◠‿◠) Kiyomoto Helper - L.A.M.B. Logistics LLC</h2>"
+        "<p>Estado: Activa y rastreando SAM.gov 24/7</p>",
         200,
     )
 
@@ -54,53 +55,126 @@ def run_flask():
 
 
 # ---------------------------------------------------------
-# VARIABLES DE ENTORNO Y ESTADO GLOBAL
+# BASE DE DATOS SQLITE (Persistencia)
+# ---------------------------------------------------------
+DB_FILE = "kiyomoto_memory.db"
+
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notificadas (
+            notice_id TEXT PRIMARY KEY,
+            fecha TIMESTAMP
+        )
+    """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS postuladas (
+            solicitation_number TEXT PRIMARY KEY,
+            fecha TIMESTAMP
+        )
+    """
+    )
+    conn.commit()
+    conn.close()
+
+
+def es_notificada(notice_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM notificadas WHERE notice_id = ?", (notice_id,))
+    res = c.fetchone()
+    conn.close()
+    return res is not None
+
+
+def marcar_notificada(notice_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO notificadas VALUES (?, ?)",
+        (notice_id, datetime.now(timezone.utc)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def registrar_postulacion(sol_num):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO postuladas VALUES (?, ?)",
+        (sol_num, datetime.now(timezone.utc)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def obtener_postuladas():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT solicitation_number FROM postuladas")
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def eliminar_postulacion(sol_num):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM postuladas WHERE solicitation_number = ?", (sol_num,))
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+# ---------------------------------------------------------
+# VARIABLES DE ENTORNO Y IA
 # ---------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SAM_API_KEY = os.getenv("SAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-LICITACIONES_NOTIFICADAS = set()
-LICITACIONES_POSTULADAS = set()
-MEMORIA_LICITACIONES = {}
+MEMORIA_TEMPORAL = {}
 
-# Inicialización del cliente de IA (Google Gemini API)
 ai_client = None
 if GEMINI_API_KEY:
     try:
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
-        logger.info("Cliente de Gemini API inicializado correctamente.")
+        logger.info("Gemini API conectada con éxito (✿◠‿◠)")
     except Exception as e:
-        logger.error(f"Error al inicializar Gemini API: {e}")
-else:
-    logger.warning("GEMINI_API_KEY no detectada. Análisis de IA desactivado.")
+        logger.error(f"Error conectando Gemini API: {e}")
 
 
-# ---------------------------------------------------------
-# HELPER DE LIMPIEZA DE TEXTO
-# ---------------------------------------------------------
 def escapar_markdown(texto: str) -> str:
     if not texto:
         return ""
-    return str(texto).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+    return (
+        str(texto)
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("`", "\\`")
+        .replace("[", "\\[")         .replace("]", "\\]")
+    )
 
 
 # ---------------------------------------------------------
-# GENERADOR DE DOCUMENTOS DOCX
+# GENERACIÓN DE DOCUMENTOS (DOCX & PDF)
 # ---------------------------------------------------------
 def generar_docx_rfq(lic_data):
     doc = Document()
-
-    # Configuración de márgenes (1 pulgada)
-    sections = doc.sections
-    for section in sections:
+    for section in doc.sections:
         section.top_margin = Inches(1)
         section.bottom_margin = Inches(1)
         section.left_margin = Inches(1)
         section.right_margin = Inches(1)
 
-    # Encabezado Empresa
     title_p = doc.add_paragraph()
     title_run = title_p.add_run("L.A.M.B. LOGISTICS LLC")
     title_run.bold = True
@@ -117,340 +191,270 @@ def generar_docx_rfq(lic_data):
 
     doc.add_paragraph("―" * 55)
 
-    # Título Documento
+    sol_num = lic_data.get("solicitation_number", "N/A")
+    producto = lic_data.get("producto", "Commercial Product Specification")
+    cantidad = lic_data.get("cantidad", 1)
+    unidad = lic_data.get("unidad", "Units")
+    zip_code = lic_data.get("zip_code", "USA")
+
     head_p = doc.add_paragraph()
     head_run = head_p.add_run("OFFICIAL REQUEST FOR QUOTATION (RFQ)")
     head_run.bold = True
     head_run.font.size = Pt(14)
     head_run.font.color.rgb = RGBColor(0x2B, 0x6C, 0xB0)
 
-    # Contenido de la Solicitud
-    sol_num = lic_data.get("solicitation_number", "N/A")
-    producto = lic_data.get("producto", "Product Specification")
-    cantidad = lic_data.get("cantidad", 1)
-    unidad = lic_data.get("unidad", "Units")
-    zip_code = lic_data.get("zip_code", "Destination ZIP")
+    doc.add_paragraph(f"Date: {datetime.now().strftime('%B %d, %Y')}")
+    doc.add_paragraph(f"Solicitation Ref: {sol_num}\n")
 
-    p1 = doc.add_paragraph()
-    p1.add_run(f"Date: {datetime.now().strftime('%B %d, %Y')}\n").bold = True
-    p1.add_run(f"Solicitation Ref: {sol_num}\n").bold = True
-
-    p2 = doc.add_paragraph(
-        "\nDear Sales / Commercial Quotations Department,\n\n"
-        "L.A.M.B. Logistics LLC is currently finalizing a formal proposal response for "
-        f"U.S. Federal Government Procurement Ref #{sol_num}. We invite your company to provide "
-        "your best wholesale pricing and lead time for the following commercial item(s):\n"
+    doc.add_paragraph(
+        "Dear Commercial Quotations Department,\n\n"
+        f"L.A.M.B. Logistics LLC is submitting a formal bid response for U.S. Federal Procurement Ref #{sol_num}. "
+        "We kindly request your best wholesale unit pricing, availability, and lead time for the following items:\n"
     )
 
-    # Detalle de Producto en Tabla
     table = doc.add_table(rows=1, cols=3)
     table.style = "Table Grid"
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = "Item Description"
-    hdr_cells[1].text = "Quantity"
-    hdr_cells[2].text = "Destination ZIP"
+    hdr = table.rows[0].cells
+    hdr[0].text = "Item Description"
+    hdr[1].text = "Quantity"
+    hdr[2].text = "Destination ZIP"
 
-    for cell in hdr_cells:
-        for p in cell.paragraphs:
-            for r in p.runs:
-                r.bold = True
+    row = table.add_row().cells
+    row[0].text = str(producto)
+    row[1].text = f"{cantidad:,} {unidad}"
+    row[2].text = str(zip_code)
 
-    row_cells = table.add_row().cells
-    row_cells[0].text = str(producto)
-    row_cells[1].text = f"{cantidad:,} {unidad}"
-    row_cells[2].text = str(zip_code)
-
-    p3 = doc.add_paragraph(
-        "\nRequirements & Terms:\n"
-        "1. Freight: Drop-shipment to specified destination ZIP.\n"
+    doc.add_paragraph(
+        "\nTerms & Requirements:\n"
+        "1. Freight: Direct drop-shipment to specified destination ZIP.\n"
         "2. Payment Terms: Credit Card / Net 30.\n"
-        "3. Packaging: Must include L.A.M.B. Logistics Packing Slip on outer cartons.\n\n"
-        "Please submit your formal quotation as soon as possible to logistics@lamblogistics.com."
+        "3. Outer Packaging: Must reference Solicitation Ref Number on packing slips.\n\n"
+        "Please transmit your quote to logistics@lamblogistics.com at your earliest convenience."
     )
 
-    p4 = doc.add_paragraph("\nSincerely,\n\nPurchasing Department\nL.A.M.B. Logistics LLC")
-    p4.runs[0].bold = True
+    p_sign = doc.add_paragraph(
+        "\nSincerely,\n\nPurchasing & Procurement Team\nL.A.M.B. Logistics LLC"
+    )
+    p_sign.runs[0].bold = True
 
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    buffer.name = f"RFQ_Vendor_{sol_num}.docx"
-    return buffer
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    buf.name = f"RFQ_Vendor_{sol_num}.docx"
+    return buf
 
 
-# ---------------------------------------------------------
-# GENERADOR DE DOCUMENTOS PDF
-# ---------------------------------------------------------
 def generar_pdf_po(lic_data):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    w, h = letter
 
     c.setFont("Helvetica-Bold", 16)
     c.setFillColor(colors.HexColor("#1A365D"))
-    c.drawString(50, height - 50, "L.A.M.B. LOGISTICS LLC")
+    c.drawString(50, h - 50, "L.A.M.B. LOGISTICS LLC")
 
     c.setFont("Helvetica", 9)
     c.setFillColor(colors.black)
-    c.drawString(50, height - 65, "Government Contracting & Supply Chain Division")
-    c.drawString(50, height - 77, "Email: logistics@lamblogistics.com")
+    c.drawString(50, h - 65, "Government Contracting & Supply Chain Division")
+    c.drawString(50, h - 77, "Email: logistics@lamblogistics.com")
 
     c.setFont("Helvetica-Bold", 14)
     c.setFillColor(colors.HexColor("#2B6CB0"))
-    c.drawString(380, height - 50, "PURCHASE ORDER")
+    c.drawString(380, h - 50, "PURCHASE ORDER")
 
     c.setFont("Helvetica", 10)
     c.setFillColor(colors.black)
-    c.drawString(380, height - 67, f"PO Date: {datetime.now().strftime('%Y-%m-%d')}")
+    c.drawString(380, h - 67, f"PO Date: {datetime.now().strftime('%Y-%m-%d')}")
     c.drawString(
         380,
-        height - 80,
+        h - 80,
         f"Solicitation Ref: {lic_data.get('solicitation_number', 'N/A')}",
     )
 
     c.setStrokeColor(colors.HexColor("#CBD5E0"))
     c.setLineWidth(1)
-    c.line(50, height - 95, width - 50, height - 95)
+    c.line(50, h - 95, w - 50, h - 95)
 
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(50, height - 120, "1. Specification & Quantities:")
+    c.drawString(50, h - 120, "1. Item Specifications:")
 
     c.setFont("Helvetica", 10)
-    y_pos = height - 140
-    c.drawString(65, y_pos, f"• Item Description: {lic_data.get('producto', 'N/A')}")
-    y_pos -= 18
+    y = h - 140
+    c.drawString(65, y, f"• Product: {lic_data.get('producto', 'N/A')}")
+    y -= 18
     c.drawString(
         65,
-        y_pos,
-        f"• Total Quantity: {lic_data.get('cantidad', 1):,} {lic_data.get('unidad', 'Units')}",
+        y,
+        f"• Quantity: {lic_data.get('cantidad', 1):,} {lic_data.get('unidad', 'Units')}",
     )
-    y_pos -= 18
+    y -= 18
     c.drawString(
-        65,
-        y_pos,
-        f"• Target Unit Cost: ${lic_data.get('target_cost', 0):,.2f} USD",
+        65, y, f"• Target Unit Cost Limit: ${lic_data.get('target_cost', 0):,.2f} USD"
     )
-    y_pos -= 18
-    c.drawString(
-        65,
-        y_pos,
-        f"• Delivery ZIP Code: {lic_data.get('zip_code', 'Destination Point')}",
-    )
+    y -= 18
+    c.drawString(65, y, f"• Delivery Destination ZIP: {lic_data.get('zip_code', 'USA')}")
 
-    y_pos -= 35
+    y -= 35
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(50, y_pos, "2. Logistics & Delivery Instructions:")
-
+    c.drawString(50, y, "2. Fulfillment Terms:")
     c.setFont("Helvetica", 9)
-    y_pos -= 20
-    instructions = [
-        "a. Direct drop-shipment required to final Government delivery point specified in RFQ.",
-        "b. Vendor must include L.A.M.B. Logistics Packing Slip with shipment (No pricing disclosure).",
-        "c. Outer packaging must clearly reference the Solicitation Number listed above.",
-        "d. Notify tracking details immediately upon dispatch to logistics@lamblogistics.com.",
-    ]
-    for line in instructions:
-        c.drawString(65, y_pos, line)
-        y_pos -= 15
-
-    c.setFont("Helvetica-Oblique", 8)
-    c.setFillColor(colors.gray)
-    c.drawString(
-        50, 40, "L.A.M.B. Logistics LLC — Proprietary & Confidential Document"
-    )
+    y -= 20
+    for term in [
+        "a. Direct drop-shipment required to final destination point.",
+        "b. Packing slip must be attached without pricing references.",
+        "c. Outer cartons must clearly display the Solicitation Number.",
+        "d. Send tracking updates immediately to logistics@lamblogistics.com.",
+    ]:
+        c.drawString(65, y, term)
+        y -= 15
 
     c.showPage()
     c.save()
-    buffer.seek(0)
-    buffer.name = f"Vendor_PO_{lic_data.get('solicitation_number', 'Doc')}.pdf"
-    return buffer
+    buf.seek(0)
+    buf.name = f"Vendor_PO_{lic_data.get('solicitation_number', 'Doc')}.pdf"
+    return buf
 
 
 def generar_pdf_packing_list(lic_data):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    w, h = letter
 
     c.setFont("Helvetica-Bold", 16)
     c.setFillColor(colors.HexColor("#1A365D"))
-    c.drawString(50, height - 50, "PACKING LIST / SLIP")
+    c.drawString(50, h - 50, "PACKING LIST / SLIP")
 
     c.setFont("Helvetica", 10)
     c.setFillColor(colors.black)
-    c.drawString(50, height - 67, "Prime Contractor: L.A.M.B. LOGISTICS LLC")
-    c.drawString(50, height - 80, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+    c.drawString(50, h - 67, "Prime Contractor: L.A.M.B. LOGISTICS LLC")
+    c.drawString(50, h - 80, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
 
     c.setStrokeColor(colors.HexColor("#CBD5E0"))
-    c.setLineWidth(1)
-    c.line(50, height - 95, width - 50, height - 95)
+    c.line(50, h - 95, w - 50, h - 95)
 
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(50, height - 120, "Shipment Details:")
+    c.drawString(50, h - 120, "Shipment Details:")
 
     c.setFont("Helvetica", 10)
-    y_pos = height - 140
+    y = h - 140
     c.drawString(
-        65,
-        y_pos,
-        f"Solicitation Ref: {lic_data.get('solicitation_number', 'N/A')}",
+        65, y, f"Solicitation Ref: {lic_data.get('solicitation_number', 'N/A')}"
     )
-    y_pos -= 18
-    c.drawString(65, y_pos, f"Item Description: {lic_data.get('producto', 'N/A')}")
-    y_pos -= 18
+    y -= 18
+    c.drawString(65, y, f"Item Description: {lic_data.get('producto', 'N/A')}")
+    y -= 18
     c.drawString(
         65,
-        y_pos,
+        y,
         f"Total Quantity: {lic_data.get('cantidad', 1):,} {lic_data.get('unidad', 'Units')}",
     )
-    y_pos -= 18
-    c.drawString(
-        65,
-        y_pos,
-        f"Destination Zip Code: {lic_data.get('zip_code', 'N/A')}",
-    )
-
-    y_pos -= 35
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(50, y_pos, "Receiving Inspection:")
-    c.setFont("Helvetica-Oblique", 9)
-    y_pos -= 18
-    c.drawString(
-        65,
-        y_pos,
-        "Inspection & Final Acceptance: Destination by Authorized Government Personnel.",
-    )
+    y -= 18
+    c.drawString(65, y, f"Destination ZIP: {lic_data.get('zip_code', 'N/A')}")
 
     c.showPage()
     c.save()
-    buffer.seek(0)
-    buffer.name = f"Packing_List_{lic_data.get('solicitation_number', 'Doc')}.pdf"
-    return buffer
+    buf.seek(0)
+    buf.name = f"Packing_List_{lic_data.get('solicitation_number', 'Doc')}.pdf"
+    return buf
 
 
 # ---------------------------------------------------------
-# IA Y ANÁLISIS COTS
+# ANÁLISIS DE IA CON GEMINI
 # ---------------------------------------------------------
-def limpiar_json_respuesta(texto_raw):
-    texto_limpio = re.sub(r"```json\s*", "", texto_raw, flags=re.IGNORECASE)
-    texto_limpio = re.sub(r"```\s*", "", texto_limpio)
-    return texto_limpio.strip()
-
-
-def analizar_licitacion_con_ia(titulo, descripcion):
+def analizar_licitacion_ia(titulo, descripcion):
     if not ai_client:
         return {
             "producto": titulo,
             "cantidad": 1,
             "unidad": "Unidades",
-            "detalles": "Análisis de IA no disponible.",
+            "detalles": "Sin IA disponible.",
         }
 
     prompt = f"""
-    Analiza esta oportunidad de contratación del gobierno federal de EE. UU. orientada a compras COTS.
+    Analiza esta licitación pública de compras COTS de EE. UU.:
     Título: {titulo}
     Descripción: {descripcion}
 
-    Extrae en formato JSON estricto únicamente:
-    1. "producto": Nombre claro del producto en español.
-    2. "cantidad": Cantidad numérica total requerida (por defecto 1).
-    3. "unidad": Unidad de medida (Cajas, Unidades, Paquetes, Kits).
-    4. "detalles": Resumen corto de especificaciones.
+    Responde ÚNICAMENTE en JSON con esta estructura:
+    {{
+        "producto": "Nombre claro del producto en español",
+        "cantidad": 100,
+        "unidad": "Unidades/Cajas/Kits",
+        "detalles": "Resumen rápido"
+    }}
     """
-
     try:
-        response = ai_client.models.generate_content(
+        resp = ai_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
-        data = json.loads(limpiar_json_respuesta(response.text))
-        try:
-            cant = int(data.get("cantidad", 1))
-            data["cantidad"] = cant if cant > 0 else 1
-        except (ValueError, TypeError):
-            data["cantidad"] = 1
+        text_clean = re.sub(
+            r"```json\s*", "", resp.text, flags=re.IGNORECASE
+        ).replace("```", "").strip()
+        data = json.loads(text_clean)
+        data["cantidad"] = max(1, int(data.get("cantidad", 1)))
         return data
     except Exception as e:
-        logger.warning(f"Error procesando análisis de IA: {e}")
+        logger.warning(f"Error parseando Gemini: {e}")
         return {
             "producto": titulo,
             "cantidad": 1,
             "unidad": "Unidades",
-            "detalles": "No se pudieron extraer detalles.",
+            "detalles": "Resumen no disponible.",
         }
 
 
-def buscar_distribuidores_locales(producto, zip_code):
+def buscar_distribuidores_ia(producto, zip_code):
     if not ai_client:
         return [
             {
-                "nombre": "Grainger Industrial Supply",
+                "nombre": "Grainger Industrial",
                 "tel": "(800) 472-4643",
                 "web": "grainger.com",
             },
             {
-                "nombre": "Fastenal Company",
+                "nombre": "Fastenal Supply",
                 "tel": "(800) 416-9400",
                 "web": "fastenal.com",
             },
         ]
 
     prompt = f"""
-    Sugiéreme 2 distribuidores o mayoristas principales en EE. UU. para el producto '{producto}' hacia el ZIP '{zip_code}'.
-    Responde ÚNICAMENTE en formato JSON con la lista de objetos conteniendo: "nombre", "tel", "web".
+    Menciona 2 distribuidores o mayoristas principales en EE. UU. que vendan '{producto}' y envíen al ZIP '{zip_code}'.
+    Responde ÚNICAMENTE en JSON con una lista de 2 objetos conteniendo: "nombre", "tel", "web".
     """
-
     try:
-        response = ai_client.models.generate_content(
+        resp = ai_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
-        data = json.loads(limpiar_json_respuesta(response.text))
-        if isinstance(data, list):
-            return data[:2]
-        return data.get("distribuidores", [])[:2]
-    except Exception as e:
-        logger.warning(f"Error buscando distribuidores con IA: {e}")
+        text_clean = re.sub(
+            r"```json\s*", "", resp.text, flags=re.IGNORECASE
+        ).replace("```", "").strip()
+        data = json.loads(text_clean)
+        return data if isinstance(data, list) else data.get("distribuidores", [])
+    except Exception:
         return [
-            {
-                "nombre": "Grainger Industrial Supply",
-                "tel": "Ver Sitio Web",
-                "web": "grainger.com",
-            },
-            {
-                "nombre": "MSC Industrial Supply",
-                "tel": "Ver Sitio Web",
-                "web": "mscdirect.com",
-            },
+            {"nombre": "Grainger", "tel": "Consulte Web", "web": "grainger.com"},
+            {"nombre": "MSC Industrial", "tel": "Consulte Web", "web": "mscdirect.com"},
         ]
 
 
 # ---------------------------------------------------------
-# CONEXIÓN A SAM.GOV
+# CONEXIÓN SAM.GOV
 # ---------------------------------------------------------
-def consultar_api_sam(params):
-    url = "https://api.sam.gov/prod/opportunities/v2/search"
-    try:
-        response = requests.get(url, params=params, timeout=25)
-        if response.status_code == 200:
-            return response.json().get("opportunitiesData", [])
-        logger.error(f"Error en API SAM.gov: Código HTTP {response.status_code}")
-    except Exception as e:
-        logger.error(f"Excepción al conectar con SAM.gov: {e}")
-    return []
-
-
-def obtener_mejores_licitaciones_sam():
+def consultar_sam():
     if not SAM_API_KEY:
-        logger.error("SAM_API_KEY no configurada.")
         return []
 
     hoy = datetime.now(timezone.utc)
-    fecha_desde = (hoy - timedelta(days=14)).strftime("%m/%d/%Y")
+    fecha_desde = (hoy - timedelta(days=10)).strftime("%m/%d/%Y")
     fecha_hasta = hoy.strftime("%m/%d/%Y")
 
-    params_estrictos = {
+    url = "https://api.sam.gov/prod/opportunities/v2/search"
+    params = {
         "api_key": SAM_API_KEY,
         "postedFrom": fecha_desde,
         "postedTo": fecha_hasta,
@@ -459,89 +463,79 @@ def obtener_mejores_licitaciones_sam():
         "is_active": "true",
     }
 
-    logger.info(f"Escaneando SAM.gov ({fecha_desde} - {fecha_hasta})...")
-    opps = consultar_api_sam(params_estrictos)
+    try:
+        r = requests.get(url, params=params, timeout=25)
+        if r.status_code == 200:
+            opps = r.json().get("opportunitiesData", [])
+        else:
+            return []
+    except Exception as e:
+        logger.error(f"Error consultando SAM.gov: {e}")
+        return []
 
-    if not opps:
-        params_fallback = {
-            "api_key": SAM_API_KEY,
-            "postedFrom": fecha_desde,
-            "postedTo": fecha_hasta,
-            "limit": 100,
-            "q": "supplies equipment parts",
-            "is_active": "true",
-        }
-        opps = consultar_api_sam(params_fallback)
-
-    candidatas = []
-    excluir_keywords = [
+    excluir = [
         "construction",
-        "installation required",
-        "on-site service",
+        "service",
+        "maintenance",
+        "repair",
         "janitorial",
-        "repair service",
-        "maintenance contract",
-        "paving",
-        "demolition",
+        "installation required",
     ]
+    candidatas = []
 
     for opp in opps:
         opp_id = opp.get("noticeId")
-        if not opp_id or opp_id in LICITACIONES_NOTIFICADAS:
+        if not opp_id or es_notificada(opp_id):
             continue
 
         titulo = opp.get("title", "")
-        descripcion = opp.get("description", "")
-        texto_completo = f"{titulo} {descripcion}".lower()
+        desc = opp.get("description", "")
+        texto = f"{titulo} {desc}".lower()
 
-        if any(kw in texto_completo for kw in excluir_keywords):
+        if any(kw in texto for kw in excluir):
             continue
 
-        response_date_str = opp.get("responseDeadLine")
+        # Fechas y Cierre
         dias_restantes = 15
         cierre_str = "A la brevedad"
-
-        if response_date_str:
+        deadline = opp.get("responseDeadLine")
+        if deadline:
             try:
-                fecha_cierre = datetime.fromisoformat(
-                    response_date_str.replace("Z", "+00:00")
-                )
-                dias_restantes = (fecha_cierre - hoy).days
-                cierre_str = fecha_cierre.strftime("%d/%m/%Y")
+                dt_cierre = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+                dias_restantes = (dt_cierre - hoy).days
+                cierre_str = dt_cierre.strftime("%d/%m/%Y")
             except Exception:
                 pass
 
-        if dias_restantes < 1 or dias_restantes > 60:
+        if dias_restantes < 1 or dias_restantes > 45:
             continue
 
-        raw_amount = opp.get("award", {}).get("amount")
-        if raw_amount:
+        # Monto Estimado
+        monto_est = 35000.0
+        raw_amt = opp.get("award", {}).get("amount")
+        if raw_amt:
             try:
-                monto_estimado = float(raw_amount)
+                monto_est = float(raw_amt)
             except ValueError:
-                monto_estimado = 35000.0
-        else:
-            monto_estimado = 35000.0
+                pass
 
-        if monto_estimado > 250000.0:
+        if monto_est > 250000.0:
             continue
 
-        zip_code = opp.get("placeOfPerformance", {}).get("zip", "EE. UU.")
+        zip_code = opp.get("placeOfPerformance", {}).get("zip", "USA")
 
         candidatas.append(
             {
                 "id": opp_id,
-                "titulo": titulo or "Sin título disponible",
-                "descripcion": descripcion or "Sin descripción proporcionada",
+                "titulo": titulo or "Oportunidad COTS",
+                "descripcion": desc,
                 "solicitation_number": opp.get("solicitationNumber", "N/A"),
                 "agencia": opp.get("department", "Agencia Federal"),
                 "cierre_str": cierre_str,
                 "dias_restantes": dias_restantes,
-                "monto_est": monto_estimado,
+                "monto_est": monto_est,
                 "zip_code": zip_code,
-                "link": opp.get(
-                    "uiLink", f"https://sam.gov/opp/{opp_id}/view"
-                ),
+                "link": opp.get("uiLink", f"https://sam.gov/opp/{opp_id}/view"),
             }
         )
 
@@ -549,13 +543,15 @@ def obtener_mejores_licitaciones_sam():
     return candidatas[:5]
 
 
-def verificar_adjudicaciones_sam():
-    if not SAM_API_KEY or not LICITACIONES_POSTULADAS:
+def verificar_adjudicaciones():
+    postuladas = obtener_postuladas()
+    if not SAM_API_KEY or not postuladas:
         return []
 
     hoy = datetime.now(timezone.utc)
     fecha_desde = (hoy - timedelta(days=14)).strftime("%m/%d/%Y")
 
+    url = "https://api.sam.gov/prod/opportunities/v2/search"
     params = {
         "api_key": SAM_API_KEY,
         "postedFrom": fecha_desde,
@@ -564,24 +560,27 @@ def verificar_adjudicaciones_sam():
         "ptype": "a",
     }
 
-    adjudicadas = []
-    opps = consultar_api_sam(params)
+    try:
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code != 200:
+            return []
+        opps = r.json().get("opportunitiesData", [])
+    except Exception:
+        return []
 
+    adjudicadas = []
     for opp in opps:
         sol_num = opp.get("solicitationNumber", "")
-        if sol_num in LICITACIONES_POSTULADAS:
-            award_data = opp.get("award", {})
+        if sol_num in postuladas:
+            award = opp.get("award", {})
             adjudicadas.append(
                 {
                     "solicitation_number": sol_num,
-                    "titulo": opp.get("title", "Sin título"),
-                    "monto_adjudicado": award_data.get("amount", "N/A"),
-                    "adjudicatario": award_data.get("awardee", {}).get(
-                        "name", "Contratista Ganador"
-                    ),
+                    "titulo": opp.get("title", "Licitación"),
+                    "monto": award.get("amount", "N/A"),
+                    "ganador": award.get("awardee", {}).get("name", "Desconocido"),
                     "link": opp.get(
-                        "uiLink",
-                        f"https://sam.gov/opp/{opp.get('noticeId')}/view",
+                        "uiLink", f"https://sam.gov/opp/{opp.get('noticeId')}/view"
                     ),
                 }
             )
@@ -589,156 +588,146 @@ def verificar_adjudicaciones_sam():
 
 
 # ---------------------------------------------------------
-# NOTIFICACIONES DE TELEGRAM
+# RASTREO Y NOTIFICACIÓN
 # ---------------------------------------------------------
 async def buscar_y_notificar(context: ContextTypes.DEFAULT_TYPE, target_chat_id=None):
-    chat_id = target_chat_id
-    if not chat_id and context.job:
-        chat_id = context.job.chat_id
+    chat_id = target_chat_id or (context.job.chat_id if context.job else TELEGRAM_CHAT_ID)
     if not chat_id:
-        chat_id = TELEGRAM_CHAT_ID
-
-    if not chat_id:
-        logger.warning("TELEGRAM_CHAT_ID no configurado.")
         return 0
 
     if isinstance(chat_id, str) and (chat_id.isdigit() or chat_id.startswith("-")):
         chat_id = int(chat_id)
 
-    # Verificación de Adjudicaciones
-    adjudicaciones = verificar_adjudicaciones_sam()
-    for adj in adjudicaciones:
+    # 1. Notificar Adjudicaciones
+    adjudicadas = verificar_adjudicaciones()
+    for adj in adjudicadas:
         sol_num = adj["solicitation_number"]
-        mensaje_adj = (
-            "🏆 **RESULTADO DE ADJUDICACIÓN PUBLICADO** 🏆\n\n"
+        msg_adj = (
+            "🏆 **¡RESULTADO DE ADJUDICACIÓN PUBLICADO!** 🏆\n\n"
             f"📋 **Solicitation #:** `{escapar_markdown(sol_num)}`\n"
             f"📌 **Título:** {escapar_markdown(adj['titulo'])}\n"
-            f"💰 **Monto Adjudicado:** ${adj['monto_adjudicado']}\n"
-            f"🏢 **Ganador:** {escapar_markdown(adj['adjudicatario'])}\n\n"
-            f"🔗 [Ver Registro Oficial en SAM.gov]({adj['link']})"
+            f"💰 **Monto Adjudicado:** ${adj['monto']}\n"
+            f"🏢 **Ganador:** {escapar_markdown(adj['ganador'])}\n\n"
+            f"🔗 [Ver Registro en SAM.gov]({adj['link']})"
         )
         await context.bot.send_message(
-            chat_id=chat_id, text=mensaje_adj, parse_mode="Markdown"
+            chat_id=chat_id, text=msg_adj, parse_mode="Markdown"
         )
-        LICITACIONES_POSTULADAS.discard(sol_num)
+        eliminar_postulacion(sol_num)
 
-    # Búsqueda de Oportunidades Nuevas
-    licitaciones = obtener_mejores_licitaciones_sam()
+    # 2. Nuevas Licitaciones
+    licitaciones = consultar_sam()
 
     for lic in licitaciones:
-        LICITACIONES_NOTIFICADAS.add(lic["id"])
+        marcar_notificada(lic["id"])
 
-        ia_data = analizar_licitacion_con_ia(lic["titulo"], lic["descripcion"])
-        cantidad = max(1, int(ia_data.get("cantidad", 1)))
-        producto = ia_data.get("producto", lic["titulo"])
-        unidad = ia_data.get("unidad", "Unidades")
+        ia_res = analizar_licitacion_ia(lic["titulo"], lic["descripcion"])
+        cantidad = max(1, int(ia_res.get("cantidad", 1)))
+        producto = ia_res.get("producto", lic["titulo"])
+        unidad = ia_res.get("unidad", "Unidades")
 
-        distribuidores = buscar_distribuidores_locales(producto, lic["zip_code"])
+        distribuidores = buscar_distribuidores_ia(producto, lic["zip_code"])
 
-        monto_total = lic["monto_est"]
-        precio_unitario_bid = monto_total / cantidad
-        target_cost_unitario = (monto_total * 0.70) / cantidad
+        monto_est = lic["monto_est"]
+        precio_bid_unit = monto_est / cantidad
+        costo_target_unit = (monto_est * 0.70) / cantidad
 
-        costo_proveedor = monto_total * 0.70
-        flete = 400.00
-        factoring = monto_total * 0.03
-        ganancia_neta = monto_total - (costo_proveedor + flete + factoring)
+        flete = 400.0
+        factoring = monto_est * 0.03
+        costo_prov_total = monto_est * 0.70
+        ganancia_est = monto_est - (costo_prov_total + flete + factoring)
 
-        MEMORIA_LICITACIONES[lic["id"]] = {
+        MEMORIA_TEMPORAL[lic["id"]] = {
             "solicitation_number": lic["solicitation_number"],
             "producto": producto,
             "cantidad": cantidad,
             "unidad": unidad,
             "zip_code": lic["zip_code"],
-            "target_cost": target_cost_unitario,
+            "target_cost": costo_target_unit,
         }
 
-        distrib_str = ""
-        for idx, dist in enumerate(distribuidores, 1):
-            nombre_dist = escapar_markdown(dist.get("nombre", "Mayorista"))
-            distrib_str += f"{idx}. *{nombre_dist}* | Tel: {dist.get('tel')} | Web: {dist.get('web')}\n"
-
-        sol_num_escapada = escapar_markdown(lic["solicitation_number"])
-        producto_escapado = escapar_markdown(producto)
-        agencia_escapada = escapar_markdown(lic["agencia"])
+        distrib_text = ""
+        for idx, d in enumerate(distribuidores, 1):
+            distrib_text += f"{idx}. *{escapar_markdown(d.get('nombre'))}* | Tel: {d.get('tel')} | Web: {d.get('web')}\n"
 
         mensaje = (
-            "🚨 **NUEVA LICITACIÓN DE PRODUCTOS (<$250k)** 🚨\n\n"
-            f"📦 **Producto:** {producto_escapado}\n"
+            "🚨 **NUEVA OPORTUNIDAD COTS DETECTADA** (✿◠‿◠)\n\n"
+            f"📦 **Producto:** {escapar_markdown(producto)}\n"
             f"🔢 **Cantidad:** {cantidad:,} {unidad}\n"
-            f"🏛 **Agencia:** {agencia_escapada}\n"
-            f"📍 **Entrega (ZIP):** {lic['zip_code']}\n"
-            f"📋 **Solicitation #:** `{sol_num_escapada}`\n"
-            f"⏳ **Cierre:** {lic['cierre_str']} (En {lic['dias_restantes']} días)\n\n"
-            "💵 **ANÁLISIS FINANCIERO & TARGET BID**\n"
-            f"• Presupuesto Est.: ${monto_total:,.2f} USD\n"
-            f"• Precio Bid Unitario Sugerido: **${precio_unitario_bid:,.2f} / unid.**\n"
-            f"• Costo Máx. Compra Objetivo: **<=${target_cost_unitario:,.2f} / unid.**\n"
-            f"📈 **Ganancia Neta Est.:** `${ganancia_neta:,.2f} USD`\n\n"
-            f"🏭 **DISTRIBUIDORES SUGERIDOS:**\n"
-            f"{distrib_str}"
+            f"🏛 **Agencia:** {escapar_markdown(lic['agencia'])}\n"
+            f"📍 **ZIP Entrega:** {lic['zip_code']}\n"
+            f"📋 **Solicitation #:** `{escapar_markdown(lic['solicitation_number'])}`\n"
+            f"⏳ **Cierre:** {lic['cierre_str']} ({lic['dias_restantes']} días restantes)\n\n"
+            "💵 **ESTRATEGIA & MARGEN ESTIMADO**\n"
+            f"• Presupuesto Est.: ${monto_est:,.2f} USD\n"
+            f"• Precio Bid Sugerido: **${precio_bid_unit:,.2f} / unid.**\n"
+            f"• Costo Máx. Compra Target: **<=${costo_target_unit:,.2f} / unid.**\n"
+            f"📈 **Ganancia Neta Est.:** `${ganancia_est:,.2f} USD`\n\n"
+            f"🏭 **PROVEEDORES POTENCIALES:**\n"
+            f"{distrib_text}"
         )
 
-        keyboard = [
+        keyboard = InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("🔗 Ver en SAM.gov", url=lic["link"]),
-                InlineKeyboardButton(
-                    "📄 Packing List (PDF)", callback_data=f"pkg_{lic['id']}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "📝 Generar Vendor PO (PDF)", callback_data=f"po_{lic['id']}"
-                ),
-                InlineKeyboardButton(
-                    "✉️ Generar RFQ (DOCX)", callback_data=f"docx_{lic['id']}"
-                ),
-            ],
-        ]
+                [
+                    InlineKeyboardButton("🔗 Abrir SAM.gov", url=lic["link"]),
+                    InlineKeyboardButton(
+                        "📄 Packing List", callback_data=f"pkg_{lic['id']}"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📝 Generar PO (PDF)", callback_data=f"po_{lic['id']}"
+                    ),
+                    InlineKeyboardButton(
+                        "✉️ Generar RFQ (DOCX)", callback_data=f"docx_{lic['id']}"
+                    ),
+                ],
+            ]
+        )
 
         await context.bot.send_message(
             chat_id=chat_id,
             text=mensaje,
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=keyboard,
         )
-        logger.info(f"Notificación enviada: {lic['id']}")
 
     return len(licitaciones)
 
 
 # ---------------------------------------------------------
-# COMANDOS Y CALLBACKS
+# MANEJO DE COMANDOS Y BOTONES
 # ---------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Definición de botones interactivos para el menú desplegable
-    keyboard = [
+    keyboard = InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("🔎 Escanear Ahora", callback_data="btn_scan"),
-            InlineKeyboardButton("🚀 Activar Auto (/on)", callback_data="btn_on"),
-        ],
-        [
-            InlineKeyboardButton("⏸ Pausar Auto (/off)", callback_data="btn_off"),
-            InlineKeyboardButton("📋 Mis Postulaciones", callback_data="btn_postulaciones"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+            [
+                InlineKeyboardButton("🔎 Buscar Licitaciones", callback_data="btn_scan"),
+                InlineKeyboardButton("🚀 Activar Monitoreo", callback_data="btn_on"),
+            ],
+            [
+                InlineKeyboardButton("⏸ Pausar Monitoreo", callback_data="btn_off"),
+                InlineKeyboardButton("📋 Mis Ofertas", callback_data="btn_postulaciones"),
+            ],
+        ]
+    )
 
     saludo = (
-        "Hola Bastian, es hora de facturar! (´◡`) (⺣◡⺣)♡*\n\n"
-        "🤖 **Soy Kiyomoto**, tu asistente de inteligencia para oportunidades SAM.gov.\n\n"
-        "Selecciona una opción del menú o interactúa mediante comandos:\n"
-        "• `/scan` - Escaneo manual inmediato\n"
-        "• `/on` - Activar monitoreo automático cada hora\n"
-        "• `/off` - Pausar monitoreo automático\n"
-        "• `/postulado <solicitation_num>` - Registrar oferta\n"
-        "• `/rfq <solicitation_num>` - Generar plantilla RFQ\n"
-        "• `/mis_postulaciones` - Ver ofertas en seguimiento"
+        "¡Hola Bastian! (⺣◡⺣)♡*\n"
+        "Soy **Kiyomoto**, lista para cazar las mejores oportunidades en SAM.gov para **L.A.M.B. Logistics LLC**.\n\n"
+        "Presiona un botón abajo o usa los comandos rápidos:\n"
+        "• `/scan` - Escanear oportunidades ahora mismo\n"
+        "• `/on` - Activar rastreo automático cada hora\n"
+        "• `/off` - Pausar rastreo automático\n"
+        "• `/postulado <solicitation_num>` - Registrar oferta enviada\n"
+        "• `/rfq <solicitation_num>` - Ver borrador rápido de correo\n"
+        "• `/mis_postulaciones` - Ver licitaciones en seguimiento"
     )
 
     if update.message:
         await update.message.reply_text(
-            saludo, reply_markup=reply_markup, parse_mode="Markdown"
+            saludo, reply_markup=keyboard, parse_mode="Markdown"
         )
 
 
@@ -746,135 +735,114 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="🔎 **Kiyomoto iniciando escaneo en SAM.gov...**",
+        text="🔎 **Kiyomoto escaneando SAM.gov en tiempo real...** (✿◠‿◠)",
         parse_mode="Markdown",
     )
-    total = await buscar_y_notificar(context, target_chat_id=chat_id)
-    if total == 0:
+    encontradas = await buscar_y_notificar(context, target_chat_id=chat_id)
+    if encontradas == 0:
         await context.bot.send_message(
             chat_id=chat_id,
-            text="ℹ️ **Sin novedades:** No se encontraron nuevas licitaciones en este momento.",
+            text="ℹ️ **Sin novedades:** No se encontraron licitaciones nuevas en este momento.",
             parse_mode="Markdown",
         )
 
 
-async def cmd_rfq(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text(
-            "⚠️ **Uso correcto:** `/rfq <solicitation_number>`", parse_mode="Markdown"
-        )
-        return
-
-    sol_num = context.args[0].strip()
-    mensaje_rfq = (
-        "📧 **BORRADOR DE SOLICITUD DE COTIZACIÓN (RFQ)**\n\n"
-        "```text\n"
-        f"Subject: Urgent RFQ / Price Quote Request - L.A.M.B. Logistics LLC (Ref: {sol_num})\n\n"
-        "Dear Sales Department,\n\n"
-        f"L.A.M.B. Logistics LLC is currently preparing a formal proposal for U.S. Federal Solicitation {sol_num}.\n\n"
-        "Could you please provide us with your best wholesale pricing, product availability, and lead time for the required items?\n\n"
-        "Key Delivery Requirements:\n"
-        "• Freight Destination: Specified Drop-shipment Zip Code\n"
-        "• Terms: Net 30 / Credit Card\n"
-        "• Packing Slip: Must reference Solicitation Number on outer packaging\n\n"
-        "Please send your formal quote back at your earliest convenience.\n\n"
-        "Best Regards,\n"
-        "Purchasing Department\n"
-        "L.A.M.B. Logistics LLC\n"
-        "logistics@lamblogistics.com\n"
-        "```"
-    )
-    await update.message.reply_text(mensaje_rfq, parse_mode="Markdown")
-
-
-async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text(
-            "⚠️ **Uso correcto:** `/postulado SPE8E6-26-U-0012`", parse_mode="Markdown"
-        )
-        return
-
-    sol_num = context.args[0].strip()
-    LICITACIONES_POSTULADAS.add(sol_num)
-    sol_num_escapada = escapar_markdown(sol_num)
-    await update.message.reply_text(
-        f"✅ **Licitación registrada:** `{sol_num_escapada}`\nTe notificaré cuando SAM.gov publique el resultado.",
-        parse_mode="Markdown",
-    )
-
-
-async def cmd_mis_postulaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not LICITACIONES_POSTULADAS:
-        await update.message.reply_text(
-            "ℹ️ No hay licitaciones bajo seguimiento activo actualmente."
-        )
-        return
-
-    lista_str = "\n".join([f"• `{escapar_markdown(num)}`" for num in LICITACIONES_POSTULADAS])
-    await update.message.reply_text(
-        f"📋 **Licitaciones bajo monitoreo activo:**\n\n{lista_str}",
-        parse_mode="Markdown",
-    )
-
-
-def nombre_job(chat_id):
-    return f"monitor_{chat_id}"
-
-
 async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else update.callback_query.message.chat_id
-    job_name = nombre_job(chat_id)
+    job_name = f"job_monitor_{chat_id}"
 
-    if context.job_queue is None:
-        msg = "❌ **Error:** Sistema JobQueue no disponible. Verifica que la librería 'APScheduler' esté instalada correctamente."
-        if update.message:
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
+    if not context.job_queue:
+        msg = "❌ Error: APScheduler no configurado correctamente."
+        await context.bot.send_message(chat_id=chat_id, text=msg)
         return
 
     if context.job_queue.get_jobs_by_name(job_name):
-        msg = "🟢 El monitoreo automático ya está **ACTIVO**."
-        if update.message:
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🟢 El monitoreo automático **ya está activo**.",
+            parse_mode="Markdown",
+        )
         return
 
     context.job_queue.run_repeating(
         buscar_y_notificar, interval=3600, first=1, chat_id=chat_id, name=job_name
     )
-    msg = "🚀 **Kiyomoto activado:** Escaneando SAM.gov cada 60 minutos."
-    if update.message:
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    elif update.callback_query:
-        await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="🚀 **Monitoreo Automático ACTIVADO:** Rastreo cada 60 minutos (⺣◡⺣)♡*",
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else update.callback_query.message.chat_id
-    job_name = nombre_job(chat_id)
+    job_name = f"job_monitor_{chat_id}"
 
-    if context.job_queue is None:
+    if context.job_queue:
+        jobs = context.job_queue.get_jobs_by_name(job_name)
+        for j in jobs:
+            j.schedule_removal()
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="⏸ **Monitoreo PAUSADO:** Kiyomoto descansará por ahora.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_postulado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ **Uso:** `/postulado SPE8E6-26-U-0012`", parse_mode="Markdown"
+        )
         return
 
-    jobs = context.job_queue.get_jobs_by_name(job_name)
-    if not jobs:
-        msg = "🔴 El monitoreo automático está **DESACTIVADO**."
-        if update.message:
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
+    sol_num = context.args[0].strip()
+    registrar_postulacion(sol_num)
+    await update.message.reply_text(
+        f"✅ **Licitación registrada:** `{escapar_markdown(sol_num)}`\nTe avisaré en cuanto SAM.gov publique la adjudicación.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_mis_postulaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    postuladas = obtener_postuladas()
+    if not postuladas:
+        await update.message.reply_text(
+            "ℹ️ No tienes licitaciones registradas bajo seguimiento."
+        )
         return
 
-    for job in jobs:
-        job.schedule_removal()
+    lista = "\n".join([f"• `{escapar_markdown(num)}`" for num in postuladas])
+    await update.message.reply_text(
+        f"📋 **Licitaciones Bajo Monitoreo:**\n\n{lista}", parse_mode="Markdown"
+    )
 
-    msg = "⏸ **Kiyomoto en pausa:** Monitoreo automático desactivado."
-    if update.message:
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    elif update.callback_query:
-        await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
+
+async def cmd_rfq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ **Uso:** `/rfq <solicitation_number>`")
+        return
+
+    sol_num = context.args[0].strip()
+    mensaje_rfq = (
+        "📧 **TEMPLATE DE CORREO RFQ**\n\n"
+        "```text\n"
+        f"Subject: Urgent RFQ Quote Request - L.A.M.B. Logistics LLC (Ref: {sol_num})\n\n"
+        "Dear Sales Department,\n\n"
+        f"L.A.M.B. Logistics LLC is preparing a formal offer for U.S. Federal Solicitation {sol_num}.\n\n"
+        "Could you please share your wholesale unit price, availability, and delivery lead time?\n\n"
+        "Key Delivery Terms:\n"
+        "• Direct Freight: Destination ZIP specified in purchase order\n"
+        "• Payment: Credit Card / Net 30\n"
+        "• Reference: Include Solicitation Number on shipping paperwork\n\n"
+        "Please transmit your quote to logistics@lamblogistics.com.\n\n"
+        "Best Regards,\n"
+        "Purchasing Team\n"
+        "L.A.M.B. Logistics LLC\n"
+        "```"
+    )
+    await update.message.reply_text(mensaje_rfq, parse_mode="Markdown")
 
 
 async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -882,7 +850,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # Acciones del Menú Interactivo
     if data == "btn_scan":
         await cmd_scan(update, context)
 
@@ -895,47 +862,43 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "btn_postulaciones":
         await cmd_mis_postulaciones(update, context)
 
-    # Descarga de Documentos PDF y DOCX
     elif data.startswith("pkg_"):
         lic_id = data.replace("pkg_", "")
-        lic_data = MEMORIA_LICITACIONES.get(
+        lic_data = MEMORIA_TEMPORAL.get(
             lic_id,
             {"solicitation_number": lic_id, "producto": "Producto COTS", "cantidad": 1},
         )
-        pdf_file = generar_pdf_packing_list(lic_data)
+        pdf = generar_pdf_packing_list(lic_data)
         await context.bot.send_document(
             chat_id=query.message.chat_id,
-            document=pdf_file,
-            caption="📄 **Packing List Generado por Kiyomoto**",
-            parse_mode="Markdown",
+            document=pdf,
+            caption="📄 **Packing List (PDF)**",
         )
 
     elif data.startswith("po_"):
         lic_id = data.replace("po_", "")
-        lic_data = MEMORIA_LICITACIONES.get(
+        lic_data = MEMORIA_TEMPORAL.get(
             lic_id,
             {"solicitation_number": lic_id, "producto": "Producto COTS", "cantidad": 1},
         )
-        pdf_file = generar_pdf_po(lic_data)
+        pdf = generar_pdf_po(lic_data)
         await context.bot.send_document(
             chat_id=query.message.chat_id,
-            document=pdf_file,
-            caption="📝 **Purchase Order (PO) Generada por Kiyomoto**",
-            parse_mode="Markdown",
+            document=pdf,
+            caption="📝 **Vendor Purchase Order (PDF)**",
         )
 
     elif data.startswith("docx_"):
         lic_id = data.replace("docx_", "")
-        lic_data = MEMORIA_LICITACIONES.get(
+        lic_data = MEMORIA_TEMPORAL.get(
             lic_id,
             {"solicitation_number": lic_id, "producto": "Producto COTS", "cantidad": 1},
         )
-        docx_file = generar_docx_rfq(lic_data)
+        docx = generar_docx_rfq(lic_data)
         await context.bot.send_document(
             chat_id=query.message.chat_id,
-            document=docx_file,
-            caption="✉️ **RFQ Document (DOCX) Generado por Kiyomoto**",
-            parse_mode="Markdown",
+            document=docx,
+            caption="✉️ **Official RFQ Document (DOCX)**",
         )
 
 
@@ -943,58 +906,47 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PUNTO DE ENTRADA PRINCIPAL
 # ---------------------------------------------------------
 def main():
-    # Servidor web en hilo secundario daemon para UptimeRobot / Render
+    # Iniciar servidor Flask en hilo secundario para mantener activo Render
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN no configurado en variables de entorno.")
+        logger.error("TELEGRAM_BOT_TOKEN no configurado.")
         return
 
-    # Iniciar aplicación de Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Registros de Comandos y Callbacks
+    # Comandos
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("on", cmd_on))
     app.add_handler(CommandHandler("off", cmd_off))
-    app.add_handler(CommandHandler("rfq", cmd_rfq))
     app.add_handler(CommandHandler("postulado", cmd_postulado))
     app.add_handler(CommandHandler("mis_postulaciones", cmd_mis_postulaciones))
+    app.add_handler(CommandHandler("rfq", cmd_rfq))
     app.add_handler(CallbackQueryHandler(boton_callback))
 
-    # Tarea automática si existe TELEGRAM_CHAT_ID y el JobQueue está habilitado
-    if TELEGRAM_CHAT_ID:
-        if app.job_queue:
-            try:
-                target_chat = (
-                    int(TELEGRAM_CHAT_ID)
-                    if str(TELEGRAM_CHAT_ID).lstrip("-").isdigit()
-                    else TELEGRAM_CHAT_ID
-                )
-                job_name = nombre_job(target_chat)
-                app.job_queue.run_repeating(
-                    buscar_y_notificar,
-                    interval=3600,
-                    first=10,
-                    chat_id=target_chat,
-                    name=job_name,
-                )
-                logger.info("Tarea de escaneo programada correctamente.")
-            except Exception as e:
-                logger.error(f"Error programando tarea automática: {e}")
-        else:
-            logger.error(
-                "JobQueue no está disponible. Revisa que APScheduler esté instalado."
+    # Tarea automática si existe CHAT_ID
+    if TELEGRAM_CHAT_ID and app.job_queue:
+        try:
+            chat_target = (
+                int(TELEGRAM_CHAT_ID)
+                if str(TELEGRAM_CHAT_ID).lstrip("-").isdigit()
+                else TELEGRAM_CHAT_ID
             )
+            app.job_queue.run_repeating(
+                buscar_y_notificar,
+                interval=3600,
+                first=10,
+                chat_id=chat_target,
+                name=f"job_monitor_{chat_target}",
+            )
+            logger.info("Programador de tareas listo (✿◠‿◠)")
+        except Exception as e:
+            logger.error(f"Error en programador de tareas: {e}")
 
-    logger.info("Servidor iniciado y bot listo...")
-
-    # Limpieza de webhooks previos para evitar interferencias
+    logger.info("Kiyomoto Helper iniciada y lista.")
     app.bot.delete_webhook(drop_pending_updates=True)
-
-    # Iniciar Polling
     app.run_polling(drop_pending_updates=True)
 
 
