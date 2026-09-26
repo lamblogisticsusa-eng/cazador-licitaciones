@@ -1,6 +1,6 @@
 import os
 import sqlite3
-import threading
+import asyncio
 import requests
 from datetime import datetime, timedelta
 from flask import Flask
@@ -16,8 +16,9 @@ SAM_API_KEY = os.getenv("SAM_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 DB_NAME = "licitaciones.db"
+BOT_ACTIVO = True  # Estado global del bot
 
-# Inicializar cliente de Gemini con la SDK oficial (google-genai)
+# Inicializar cliente de Gemini con SDK oficial
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # --- BASE DE DATOS LOCAL ---
@@ -57,13 +58,41 @@ def limpiar_historial_db():
     conn.commit()
     conn.close()
 
-# --- BÚSQUEDA Y EVALUACIÓN DE LICITACIONES (SAM.GOV + GEMINI) ---
+# --- ENVÍO SEGURO DE MENSAJES (PREVIENE ERRORES DE MARKDOWN) ---
+def enviar_mensaje_telegram(texto, chat_id=None):
+    if not TELEGRAM_BOT_TOKEN:
+        print("⚠️ TELEGRAM_BOT_TOKEN no configurado.")
+        return
+    
+    target_chat = chat_id or TELEGRAM_CHAT_ID
+    if not target_chat:
+        print("⚠️ TELEGRAM_CHAT_ID no configurado.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Intento 1: Enviar con formato Markdown
+    payload = {
+        "chat_id": target_chat,
+        "text": texto,
+        "parse_mode": "Markdown"
+    }
+    
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        # Intento 2: Si Telegram rebota el formato, enviar como texto plano limpio
+        if res.status_code != 200:
+            payload.pop("parse_mode")
+            requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Error al enviar mensaje a Telegram: {e}")
+
+# --- BÚSQUEDA Y EVALUACIÓN DE LICITACIONES ---
 def buscar_licitaciones_sam():
     if not SAM_API_KEY:
         print("⚠️ SAM_API_KEY no configurada.")
         return []
     
-    # Rango de fechas: últimos 2 días
     hoy = datetime.now()
     hace_dos_dias = hoy - timedelta(days=2)
     
@@ -111,25 +140,25 @@ def analizar_oportunidad_con_gemini(opp):
     3. Sugiere términos de búsqueda en inglés para encontrar proveedores/distribuidores clave en EE. UU.
 
     FORMATO DE RESPUESTA:
-    Si la oportunidad NO cumple con los parámetros (ej. es solo servicios o no es adecuada), responde únicamente: "NO_VIABLE".
+    Si la oportunidad NO cumple con los parámetros, responde únicamente: "NO_VIABLE".
 
-    Si la oportunidad SÍ CUMPLE con los parámetros de productos físicos, responde en el siguiente formato exacto en español y estructurado para Telegram:
+    Si la oportunidad SÍ CUMPLE con los parámetros de productos físicos, responde en el siguiente formato exacto en español:
 
-    📦 **{title}**
-    🔢 **Solicitud:** {solicitation_number}
+    📦 {title}
+    🔢 Solicitud: {solicitation_number}
     
-    📝 **Descripción del Producto:**
+    📝 Descripción del Producto:
     [Breve resumen claro del producto o bien requerido]
 
-    💰 **Análisis Financiero Proyectado:**
-    • **Valor Est. Contrato:** [Monto aproximado en USD]
-    • **Costo Est. Proveedor:** [Monto aproximado en USD]
-    • **Ganancia Neta Est.:** [Monto aproximado en USD] ([Porcentaje]% de margen)
+    💰 Análisis Financiero Proyectado:
+    • Valor Est. Contrato: [Monto aprox. USD]
+    • Costo Est. Proveedor: [Monto aprox. USD]
+    • Ganancia Neta Est.: [Monto aprox. USD] ([Porcentaje]% de margen)
 
-    🔍 **Distribuidores Sugeridos:**
-    Buscar en EE. UU.: `[Términos de búsqueda sugeridos]`
+    🔍 Distribuidores Sugeridos:
+    Buscar en EE. UU.: [Términos de búsqueda sugeridos]
 
-    🔗 **Enlace SAM.gov:** {ui_link}
+    🔗 Enlace SAM.gov: {ui_link}
     """
 
     try:
@@ -142,29 +171,12 @@ def analizar_oportunidad_con_gemini(opp):
         print(f"⚠️ Error al invocar Gemini API: {e}")
         return "NO_VIABLE"
 
-# --- LÓGICA PRINCIPAL DE ESCANEO ---
-def enviar_mensaje_telegram(texto):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Variables de Telegram no configuradas.")
-        return
-    
-    url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": texto,
-        "parse_mode": "Markdown"
-    }
-    
-    try:
-        res = requests.post(url_msg, json=payload, timeout=10)
-        # Reintento sin formato si Markdown falla por caracteres especiales
-        if res.status_code != 200:
-            payload.pop("parse_mode")
-            requests.post(url_msg, json=payload, timeout=10)
-    except Exception as e:
-        print(f"⚠️ Error al enviar mensaje a Telegram: {e}")
+def ejecutar_monitoreo_licitaciones(chat_id_target=None):
+    global BOT_ACTIVO
+    if not BOT_ACTIVO:
+        print("⏸️ Monitoreo pausado por comando /off.")
+        return 0
 
-def ejecutar_monitoreo_licitaciones(app_telegram=None):
     print("🔍 Iniciando rastreo en SAM.gov...")
     oportunidades = buscar_licitaciones_sam()
     
@@ -174,11 +186,10 @@ def ejecutar_monitoreo_licitaciones(app_telegram=None):
         if not notice_id or esta_procesada(notice_id):
             continue
         
-        # Evaluar con Gemini
         analisis = analizar_oportunidad_con_gemini(opp)
         
         if analisis and "NO_VIABLE" not in analisis:
-            enviar_mensaje_telegram(analisis)
+            enviar_mensaje_telegram(analisis, chat_id=chat_id_target)
             count_notificadas += 1
         
         marcar_como_procesada(notice_id)
@@ -186,32 +197,46 @@ def ejecutar_monitoreo_licitaciones(app_telegram=None):
     print(f"✅ Rastreo completado. Notificaciones enviadas: {count_notificadas}")
     return count_notificadas
 
-# --- COMANDOS Y HANDLERS DE TELEGRAM ---
+# --- HANDLERS DE TELEGRAM ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "✨ **Kiyomoto Logistics Bot** está activa y lista.\n\n"
+        "✨ Kiyomoto Logistics Bot está activa y lista.\n\n"
         "Comandos disponibles:\n"
-        "• `/forzar_escaneo` - Limpia la base de datos y reevalúa el lote actual de SAM.gov.",
-        parse_mode="Markdown"
+        "• /forzar_escaneo - Limpia el historial y realiza un escaneo inmediato.\n"
+        "• /off - Pausa el monitoreo automático.\n"
+        "• /on - Reactiva el monitoreo automático."
     )
 
+async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_ACTIVO
+    BOT_ACTIVO = False
+    await update.message.reply_text("⏸️ Monitoreo automático pausado.")
+
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_ACTIVO
+    BOT_ACTIVO = True
+    await update.message.reply_text("▶️ Monitoreo automático reactivado.")
+
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧹 **Limpiando historial e iniciando escaneo en segundo plano...** (⁠✦⁠_⁠✦⁠)", parse_mode="Markdown")
+    chat_id = str(update.effective_chat.id)
+    await update.message.reply_text("🧹 Limpiando historial e iniciando escaneo en SAM.gov...")
     
-    def tarea_escaneo():
+    # Ejecutar la búsqueda de forma no bloqueante
+    loop = asyncio.get_running_loop()
+    
+    def tarea():
         limpiar_historial_db()
-        total = ejecutar_monitoreo_licitaciones()
-        enviar_mensaje_telegram(f"✨ **¡Escaneo completado!** Se notificaron {total} oportunidades viables. 🌸")
+        return ejecutar_monitoreo_licitaciones(chat_id_target=chat_id)
 
-    # Ejecutar en hilo secundario para no bloquear a Telegram
-    threading.Thread(target=tarea_escaneo, daemon=True).start()
+    total = await loop.run_in_executor(None, tarea)
+    await context.bot.send_message(chat_id=chat_id, text=f"✨ ¡Escaneo completado! Se notificaron {total} oportunidades viables.")
 
-# --- SERVIDOR FLASK (KEEP ALIVE / HEALTH CHECK) ---
+# --- SERVIDOR FLASK (HEALTH CHECK) ---
 server = Flask(__name__)
 
 @server.route("/")
 def home():
-    return "Kiyomoto Logistics Bot está activo y funcionando.", 200
+    return "Kiyomoto Logistics Bot está activo.", 200
 
 def ejecutar_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -221,16 +246,19 @@ def ejecutar_flask():
 def main():
     init_db()
     
-    # 1. Servidor Flask secundario para el Health Check de Render
+    # Servidor Flask para Render
+    import threading
     thread_flask = threading.Thread(target=ejecutar_flask, daemon=True)
     thread_flask.start()
     
-    # 2. Configurar Telegram Bot
+    # Configurar Telegram Bot
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(CommandHandler("on", on_command))
+    telegram_app.add_handler(CommandHandler("off", off_command))
     telegram_app.add_handler(CommandHandler("forzar_escaneo", forzar_escaneo_command))
     
-    # 3. Configurar Programador APScheduler (cada 4 horas)
+    # Configurar Scheduler (Monitoreo cada 4 horas)
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         func=ejecutar_monitoreo_licitaciones,
@@ -242,8 +270,6 @@ def main():
     scheduler.start()
     
     print("✨ Kiyomoto lista y escuchando...")
-    
-    # 4. Iniciar Polling de Telegram en el HILO PRINCIPAL
     telegram_app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
