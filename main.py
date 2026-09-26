@@ -23,7 +23,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Kiyomoto_Logistics")
 
-# Variable global para controlar el estado del monitoreo activo
 MONITOREO_ACTIVO = True
 
 # ---------------------------------------------------------------------------
@@ -33,14 +32,14 @@ web_app = Flask(__name__)
 
 @web_app.route("/")
 def health_check():
-    return "Servicio Kiyomoto Logistics Activo y Operativo", 200
+    return "¡Servicio Kiyomoto Logistics Activo y Vigilando! ✨(🔒_🔒)✨", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # ---------------------------------------------------------------------------
-# 3. BASE DE DATOS SQLITE (COMPATIBLE CON PYTHON 3.14+)
+# 3. BASE DE DATOS SQLITE
 # ---------------------------------------------------------------------------
 DB_NAME = "licitaciones.db"
 
@@ -78,12 +77,12 @@ def registrar_licitacion(licitacion_id: str, titulo: str, filtro_pasado: bool):
     conn.close()
 
 # ---------------------------------------------------------------------------
-# 4. INTEGRACIÓN DE GOOGLE GEMINI (MODELOS VIGENTES Y FALLBACK)
+# 4. INTEGRACIÓN DE GOOGLE GEMINI (SENSEI DE INTELIGENCIA)
 # ---------------------------------------------------------------------------
 def procesar_con_gemini(prompt: str) -> str:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.error("GEMINI_API_KEY no está configurada.")
+        logger.error("❌ GEMINI_API_KEY no configurada.")
         return None
 
     client = genai.Client(api_key=api_key)
@@ -98,27 +97,35 @@ def procesar_con_gemini(prompt: str) -> str:
             if response and response.text:
                 return response.text
         except Exception as e:
-            logger.warning(f"Error parseando Gemini con {modelo}: {e}")
+            logger.warning(f"⚠️ Error consultando Gemini ({modelo}): {e}")
             continue
 
-    logger.error("Ningún modelo de Gemini pudo procesar la solicitud.")
+    logger.error("❌ Ningún modelo de Gemini estuvo disponible.")
     return None
 
 # ---------------------------------------------------------------------------
-# 5. TAREA PROGRAMADA DE MONITOREO
+# 5. TAREA PROGRAMADA DE MONITOREO CON NOTIFICACIONES
 # ---------------------------------------------------------------------------
+async def notificar_telegram(bot_app, chat_id: str, mensaje: str):
+    try:
+        await bot_app.bot.send_message(chat_id=chat_id, text=mensaje, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error enviando mensaje a Telegram: {e}")
+
 def ejecutar_monitoreo_licitaciones(bot_application=None):
     global MONITOREO_ACTIVO
     if not MONITOREO_ACTIVO:
-        logger.info("El monitoreo automático se encuentra pausado (/off).")
+        logger.info("Monitoreo pausado por órdenes del usuario (/off).~")
         return
 
-    logger.info("Iniciando ciclo de monitoreo de licitaciones...")
+    logger.info("🔍 Kiyomoto rastreando nuevas oportunidades...")
     
-    # Lógica de escaneo de licitaciones
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    # Muestra de Licitaciones (Aquí se conectará el feed de SAM.gov)
     licitaciones_ejemplo = [
-        {"id": "LIC-2026-001", "titulo": "Suministro de Filtros Industriales y Repuestos Motor GMC", "descripcion": "Provisión de insumos mecánicos y repuestos."},
-        {"id": "LIC-2026-002", "titulo": "Servicio de Consultoría en Software y Mantenimiento Web", "descripcion": "Desarrollo de plataforma cloud y consultoría."}
+        {"id": "LIC-2026-001", "titulo": "Suministro de Filtros Industriales y Repuestos Motor GMC", "descripcion": "Provisión de insumos mecánicos y repuestos físicos COTS."},
+        {"id": "LIC-2026-002", "titulo": "Servicio de Consultoría en Software y Mantenimiento Web", "descripcion": "Desarrollo de plataforma cloud y consultoría intangibles."}
     ]
 
     for lic in licitaciones_ejemplo:
@@ -127,62 +134,80 @@ def ejecutar_monitoreo_licitaciones(bot_application=None):
             continue
 
         prompt = f"""
-        Analiza la siguiente oportunidad de licitación. Determina si se refiere a un PRODUCTO FÍSICO TANGIBLE / LOGÍSTICO 
-        o si es un servicio intangible.
+        Analiza esta licitación. Determina si busca comprar PRODUCTOS FÍSICOS/TANGIBLES COTS o si es un servicio intangible.
         
         Título: {lic['titulo']}
         Descripción: {lic['descripcion']}
         
-        Responde en formato JSON simple:
-        {{"es_producto_fisico": true/false, "resumen": "Breve resumen en 2 oraciones"}}
+        Responde exclusivamente en formato JSON:
+        {{"es_producto_fisico": true, "resumen": "Resumen conciso en 2 frases"}}
         """
 
         resultado = procesar_con_gemini(prompt)
-        if resultado:
+        
+        # Simulamos que aprueba si es producto físico
+        if resultado and "true" in resultado.lower():
             registrar_licitacion(lic_id, lic['titulo'], True)
-            logger.info(f"Licitación {lic_id} aprobada y procesada.")
+            logger.info(f"✨ Licitación {lic_id} aprobada por Kiyomoto!")
+            
+            if bot_application and chat_id:
+                mensaje_notif = (
+                    f"🌸 **¡Nueva Oportunidad Detectada por Kiyomoto!** 📦✨\n\n"
+                    f"🆔 **ID:** `{lic_id}`\n"
+                    f"📌 **Título:** {lic['titulo']}\n"
+                    f"💡 **Análisis de IA:** ¡Es un producto físico tangible!\n\n"
+                    f"¡Lista para preparar la propuesta! 🚀"
+                )
+                import asyncio
+                asyncio.run_coroutine_threadsafe(
+                    notificar_telegram(bot_application, chat_id, mensaje_notif),
+                    bot_application.loop
+                )
         else:
             registrar_licitacion(lic_id, lic['titulo'], False)
 
 # ---------------------------------------------------------------------------
-# 6. HANDLERS ASÍNCRONOS PARA EL BOT DE TELEGRAM
+# 6. HANDLERS ASÍNCRONOS CON PERSONALIDAD KIYOMOTO KAWAII ✨
 # ---------------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     mensaje = (
-        f"🤖 **Kiyomoto Logistics Bot** iniciado correctamente.\n\n"
-        f"Hola {user_name}, los comandos disponibles son:\n"
-        "• /status - Ver estado del sistema y monitoreo\n"
-        "• /on - Activar el monitoreo automático de SAM.gov\n"
-        "• /off - Pausar el monitoreo automático\n"
-        "• /forzar_escaneo - Ejecutar escaneo manual ahora"
+        f"✨ **¡Hola, {user_name}-san!** (⁠✿⁠☉⁠｡⁠☉⁠)\n"
+        f"Soy **Kiyomoto**, tu asistente ejecutiva de logística y cazadora de licitaciones. 🌸📦\n\n"
+        f"Estoy aquí para vigilar **SAM.gov** las 24 horas y avisarte solo cuando aparezcan contratos de productos físicos geniales. ✨\n\n"
+        f"📜 **Mis comandos de control:**\n"
+        f"• /status - Ver mi estado operativo y salud del sistema 📊\n"
+        f"• /on - Activar mi radar de monitoreo automático 🟢\n"
+        f"• /off - Poner el monitoreo en pausa temporal 🔴\n"
+        f"• /forzar_escaneo - Pedirme un rastreo manual inmediato 🔍"
     )
     await update.message.reply_text(mensaje, parse_mode="Markdown")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    estado_str = "🟢 ACTIVO" if MONITOREO_ACTIVO else "🔴 PAUSADO"
+    estado_str = "🟢 ACTIVO (¡Radar encendido! ✨)" if MONITOREO_ACTIVO else "🔴 PAUSADO (En descanso... 💤)"
     mensaje = (
-        f"📊 **Estado del Sistema**\n"
-        f"• Servidor Web: Operativo (Port 10000)\n"
-        f"• Monitoreo Automático: {estado_str}\n"
-        f"• Base de Datos: Conectada"
+        f"📊 **Reporte de Estado de Kiyomoto** (🔒_🔒)✨\n\n"
+        f"• **Servidor Web:** Operativo en Render (Puerto 10000) 🌐\n"
+        f"• **Radar de Monitoreo:** {estado_str}\n"
+        f"• **Base de Datos:** SQLite Conectada y Lista 💾\n"
+        f"• **Cerebro de IA:** Google Gemini Configurado 🧠"
     )
     await update.message.reply_text(mensaje, parse_mode="Markdown")
 
 async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MONITOREO_ACTIVO
     MONITOREO_ACTIVO = True
-    await update.message.reply_text("🟢 Monitoreo automático ACTIVADO. El bot buscará licitaciones periódicamente.")
+    await update.message.reply_text("🟢 **¡Entendido!** Radar activado. Buscaré licitaciones para ti cada hora. (⁠•̀⁠ᴗ⁠•́⁠)⁠و✨")
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MONITOREO_ACTIVO
     MONITOREO_ACTIVO = False
-    await update.message.reply_text("🔴 Monitoreo automático PAUSADO. No se realizarán búsquedas automáticas.")
+    await update.message.reply_text("🔴 **¡Monitoreo pausado!** Me tomaré un descanso hasta que me necesites de nuevo. (⁠´⁠ー⁠｀⁠)")
 
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Iniciando escaneo manual de licitaciones COTS...")
+    await update.message.reply_text("🔍 **¡Entendido!** Rastreando bases de datos en este instante... (⁠✦⁠‿⁠✦⁠)")
     ejecutar_monitoreo_licitaciones(context.application)
-    await update.message.reply_text("✅ Escaneo manual completado exitosamente.")
+    await update.message.reply_text("✨ **¡Escaneo manual completado!** Si encontré algo relevante, ya te lo envié arriba. 🌸")
 
 # ---------------------------------------------------------------------------
 # 7. PUNTO DE ENTRADA PRINCIPAL
@@ -190,27 +215,26 @@ async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_T
 if __name__ == "__main__":
     init_db()
 
-    # Flask en hilo secundario
+    # Hilo para Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logger.info("Servidor web Flask iniciado en segundo plano.")
+    logger.info("Servidor Flask kawaii iniciado.")
 
-    # Acepta tanto TELEGRAM_BOT_TOKEN como TELEGRAM_TOKEN de Render
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
     if not telegram_token:
-        logger.critical("Error: No se encontró ningún token de Telegram en las variables de entorno.")
+        logger.critical("❌ No se encontró el token de Telegram.")
         exit(1)
 
     bot_app = ApplicationBuilder().token(telegram_token).build()
 
-    # Registro explícito de los handlers de comando
+    # Handlers
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("status", status_command))
     bot_app.add_handler(CommandHandler("on", on_command))
     bot_app.add_handler(CommandHandler("off", off_command))
     bot_app.add_handler(CommandHandler("forzar_escaneo", forzar_escaneo_command))
 
-    # Configuración de APScheduler
+    # Scheduler
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
         ejecutar_monitoreo_licitaciones,
@@ -220,8 +244,6 @@ if __name__ == "__main__":
         id="job_monitoreo_licitaciones"
     )
     scheduler.start()
-    logger.info("Scheduler de monitoreo iniciado.")
 
-    # Iniciar polling
-    logger.info("Iniciando Polling del Bot de Telegram...")
+    logger.info("✨ Kiyomoto lista y escuchando...")
     bot_app.run_polling(drop_pending_updates=True)
