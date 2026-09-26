@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: kyomoto
+    runtime: python
+    plan: starter          # <-- cambia a 'free' si quieres ahorrar USD 7/mes
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: SAM_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      # 5 a 10 oportunidades diarias, las mejores segun el puntaje.
+      - key: DIAS_DE_VENTANA
+        value: "3"
+      - key: DIAS_POR_CHUNK
+        value: "2"
+      - key: MAX_A_GEMINI
+        value: "25"
+      - key: MAX_NOTIFICACIONES
+        value: "10"
+      - key: PUNTAJE_MINIMO
+        value: "6"
+      - key: TOPE_USD
+        value: "250000"
+      - key: MIN_USD
+        value: "5000"
+      - key: INTERVALO_HORAS
+        value: "24"
+      - key: WORKERS
+        value: "8"
+      - key: DRY_RUN
+        value: "0"

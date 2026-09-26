@@ -1,0 +1,229 @@
+"""
+sam_api.py - Cliente de SAM.gov Contract Opportunities API v2.
+
+HALLAZGOS VERIFICADOS contra la API real (Sept 2026) que explican por que el
+codigo original no encontraba nada:
+
+1) El campo `description` de /v2/search NO contiene texto. Devuelve una URL:
+       "description": "https://api.sam.gov/prod/opportunities/v1/noticedesc?noticeid=<id>"
+   El texto real hay que pedirlo a /v1/noticedesc, que responde con HTML.
+   El codigo original pasaba esa URL a Gemini => no habia nada que evaluar.
+
+2) `offset` esta ROTO / acotado. Medido con limit=100 sobre 2083 registros:
+       offset=0,1,10  -> 100 registros
+       offset=50,99,100,101,500 -> 0 registros
+   Conclusion: NO se puede paginar con offset. La estrategia correcta es
+   TROCEAR la ventana de fechas en bloques chicos y pedir cada bloque con
+   limit=1000 y offset=0.
+
+3) Volumen real medido (ptype=o): ~450 avisos/dia, 2083 en 14 dias.
+   Con ptype=o,a son 7647 en 14 dias. El limit=250 del codigo original
+   cubria ~4% de una ventana de 10 dias.
+
+4) `responseDeadLine` puede venir VENCIDO (hay avisos con fecha limite anterior
+   a postedDate). Hay que filtrarlos.
+"""
+from __future__ import annotations
+
+import html
+import logging
+import re
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Iterator
+from urllib.parse import urlencode
+
+import requests
+
+import config
+
+log = logging.getLogger("kyomoto.sam")
+
+BASE_SEARCH = "https://api.sam.gov/prod/opportunities/v2/search"
+BASE_DESC = "https://api.sam.gov/prod/opportunities/v1/noticedesc"
+
+_sesion = requests.Session()
+_sesion.headers.update({"Accept": "application/json", "User-Agent": "Kyomoto/2.0"})
+
+TAG_HTML = re.compile(r"<[^>]+>")
+ESPACIOS = re.compile(r"[ \t\r\f\v]+")
+SALTOS = re.compile(r"\n{3,}")
+
+
+class SamError(Exception):
+    """Error de la API de SAM.gov con contexto suficiente para diagnosticarlo."""
+
+
+def _fecha(dt: datetime) -> str:
+    """SAM.gov exige MM/DD/YYYY con DIAGONALES. Nunca usar to_native de Windows,
+    que en locale es-419 devuelve 09-23-2026 y la API responde 400."""
+    return f"{dt.month:02d}/{dt.day:02d}/{dt.year:04d}"
+
+
+def _parse_fecha(valor: str | None) -> datetime | None:
+    if not valor:
+        return None
+    texto = valor.strip()
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            dt = datetime.strptime(texto[: len(fmt) + 6], fmt)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(texto.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def limpiar_html(bruto: str) -> str:
+    """El endpoint noticedesc devuelve HTML, a veces con ** de markdown dentro."""
+    texto = TAG_HTML.sub(" ", bruto or "")
+    texto = html.unescape(texto)
+    texto = texto.replace("**", " ").replace("\r", " ")
+    texto = ESPACIOS.sub(" ", texto)
+    texto = SALTOS.sub("\n\n", texto)
+    return texto.strip()
+
+
+def verificar_api() -> dict:
+    """Prueba de humo de la API. Se usa en /selftest."""
+    if not config.SAM_API_KEY:
+        return {"ok": False, "detalle": "SAM_API_KEY no configurada"}
+    hoy = datetime.now(timezone.utc)
+    params = {
+        "api_key": config.SAM_API_KEY,
+        "postedFrom": _fecha(hoy - timedelta(days=1)),
+        "postedTo": _fecha(hoy),
+        "limit": 1,
+        "ptype": "o",
+    }
+    r = _get(params, reintentos=1)
+    if r.status_code != 200:
+        return {"ok": False, "detalle": f"HTTP {r.status_code}: {r.text[:200]}"}
+    datos = r.json()
+    return {
+        "ok": True,
+        "detalle": f"OK - {datos.get('totalRecords', 0)} avisos en 24h",
+    }
+
+
+def _get(params: dict, reintentos: int | None = None) -> requests.Response:
+    intentos = config.MAX_REINTENTOS if reintentos is None else reintentos
+    url = BASE_SEARCH if "postedFrom" in params else BASE_DESC
+    ultima = None
+    for i in range(intentos):
+        try:
+            r = _sesion.get(url, params=params, timeout=config.TIMEOUT_HTTP)
+        except requests.RequestException as e:
+            ultima = SamError(f"Error de red: {e}")
+        else:
+            if r.status_code == 200:
+                return r
+            if r.status_code in (429, 500, 502, 503, 504):
+                espera = 2 ** i + 1
+                log.warning("SAM.gov %s, reintento %s en %ss", r.status_code, i + 1, espera)
+                ultima = SamError(f"HTTP {r.status_code}: {r.text[:300]}")
+                time.sleep(espera)
+                continue
+            # 400/401/403 no se arreglan reintentando.
+            raise SamError(f"HTTP {r.status_code}: {r.text[:300]}")
+        time.sleep(1)
+    raise ultima or SamError("Fallo desconocido")
+
+
+def obtener_descripcion(notice_id: str) -> str:
+    """Texto real de la oportunidad. Devuelve "" si falla (no revienta el escaneo)."""
+    try:
+        r = _get({"api_key": config.SAM_API_KEY, "noticeid": notice_id}, reintentos=2)
+        if r.status_code != 200:
+            return ""
+        crudo = r.text
+        if not crudo or not crudo.lstrip().startswith("{"):
+            return ""
+        return limpiar_html(r.json().get("description") or "")[: config.MAX_CHARS_DESCRIPCION]
+    except SamError as e:
+        log.warning("No se pudo bajar la descripcion de %s: %s", notice_id, e)
+        return ""
+
+
+def _bloque(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
+    params = {
+        "api_key": config.SAM_API_KEY,
+        "postedFrom": _fecha(desde),
+        "postedTo": _fecha(hasta),
+        # offset=0 SIEMPRE: el offset de SAM.gov no pagina de forma confiable.
+        "offset": 0,
+        "limit": config.LIMITE_POR_CHUNK,
+        "ptype": ptype,
+    }
+    r = _get(params)
+    datos = r.json()
+    return datos.get("opportunitiesData") or []
+
+
+def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = None) -> Iterator[dict]:
+    """
+    Recorre la ventana de fechas en bloques de DIAS_POR_CHUNK y entrega cada
+    oportunidad una vez. Deduplica por noticeId entre bloques.
+
+    `stats` es un dict opcional que se llena con:
+        bloques_ok, bloques_error, total_api, errores[]
+    El scanner lo usa para distinguir "no hay nada" de "SAM.gov esta caido",
+    que es la diferencia entre un dia tranquilo y un bot roto.
+    """
+    if stats is not None:
+        stats.update(bloques_ok=0, bloques_error=0, total_api=0, errores=[])
+
+    if not config.SAM_API_KEY:
+        raise SamError("SAM_API_KEY no configurada")
+
+    dias = dias or config.DIAS_DE_VENTANA
+    # Si piden menos dias que un bloque, se agranda la ventana: mejor revisar
+    # de mas que devolver cero sin haber consultado nada (y sin explicar por que).
+    dias = max(dias, config.DIAS_POR_CHUNK)
+    fin = datetime.now(timezone.utc)
+    vistos: set[str] = set()
+    publicados = 0
+
+    for i in range(config.MAX_CHUNKS):
+        hasta = fin - timedelta(days=i * config.DIAS_POR_CHUNK)
+        desde = hasta - timedelta(days=config.DIAS_POR_CHUNK)
+        if desde.date() < (fin - timedelta(days=dias)).date():
+            break
+        try:
+            lote = _bloque(desde, hasta, ptype)
+        except SamError as e:
+            log.error("Fallo el bloque %s -> %s: %s", _fecha(desde), _fecha(hasta), e)
+            if stats is not None:
+                stats["bloques_error"] += 1
+                stats["errores"].append(f"{_fecha(desde)}..{_fecha(hasta)}: {e}")
+            continue
+        if stats is not None:
+            stats["bloques_ok"] += 1
+        nuevos = 0
+        for opp in lote:
+            nid = opp.get("noticeId")
+            if nid and nid not in vistos:
+                vistos.add(nid)
+                publicados += 1
+                nuevos += 1
+                if stats is not None:
+                    stats["total_api"] += 1
+                yield opp
+        log.info(
+            "Bloque %s..%s -> %s registros (%s nuevos, total %s)",
+            _fecha(desde), _fecha(hasta), len(lote), nuevos, publicados,
+        )
+
+
+def deadline_de(opp: dict) -> datetime | None:
+    return _parse_fecha(opp.get("responseDeadLine"))
+
+
+def dias_restantes(opp: dict) -> int:
+    dl = deadline_de(opp)
+    if not dl:
+        return 999
+    return (dl - datetime.now(timezone.utc)).days

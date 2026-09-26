@@ -1,0 +1,7 @@
+python-telegram-bot[job-queue]
+google-genai
+requests
+python-docx
+reportlab
+Flask
+gunicorn

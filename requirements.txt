@@ -1,0 +1,10 @@
+# Kyomoto - dependencias
+python-telegram-bot[job-queue]==21.10
+google-genai>=1.0.0
+requests>=2.32.0
+Flask>=3.0.0
+reportlab>=4.2.0
+
+# gunicorn ya no se usa: el servicio corre con "python main.py"
+# porque el bot necesita run_polling(), no un servidor WSGI de workers.
+# python-docx se elimino: no se usaba en ningun modulo.

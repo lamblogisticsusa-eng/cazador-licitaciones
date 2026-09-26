@@ -1,0 +1,20 @@
+# Entorno
+.env
+*.db
+*.db-wal
+*.db-shm
+etiquetas/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Nunca subes claves reales
+render.local.yaml
+secrets.yaml
+
+# Sistema
+Thumbs.db
+desktop.ini
+.DS_Store
