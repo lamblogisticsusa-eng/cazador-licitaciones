@@ -94,12 +94,12 @@ def buscar_licitaciones_sam():
         return []
     
     hoy = datetime.now()
-    hace_dos_dias = hoy - timedelta(days=2)
+    hace_diez_dias = hoy - timedelta(days=10)
     
-    posted_from = hace_dos_dias.strftime("%m/%d/%Y")
+    posted_from = hace_diez_dias.strftime("%m/%d/%Y")
     posted_to = hoy.strftime("%m/%d/%Y")
     
-    url = f"https://api.sam.gov/prod/opportunities/v2/search?api_key={SAM_API_KEY}&postedFrom={posted_from}&postedTo={posted_to}&limit=100"
+    url = f"https://api.sam.gov/prod/opportunities/v2/search?api_key={SAM_API_KEY}&postedFrom={posted_from}&postedTo={posted_to}&limit=250"
     
     try:
         response = requests.get(url, timeout=30)
@@ -132,28 +132,32 @@ def analizar_oportunidad_con_gemini(opp):
     Descripción: {description}
 
     REQUISITOS DE EVALUACIÓN:
-    1. Determina si se trata de la compra/suministro de PRODUCTOS FÍSICOS (materiales, equipos, repuestos, componentes, insumos, etc.). Rechaza o marca como NO VIABLE si es puramente servicios intangibles, consultorías o servicios de personal.
-    2. Realiza un análisis financiero estimado:
+    1. Determina si es una licitación en la cual se pueda postular entregando PRODUCTOS FÍSICOS O BIENES MATERIALES (equipos, suministros, piezas, consumibles, herramientas, etc.). Marca como NO VIABLE únicamente si es un servicio intangible puro, consultoría o contratación de personal sin suministro físico.
+    2. Realiza un análisis financiero estimado y estratégico:
        - Presupuesto o Valor Estimado del Contrato.
        - Costo Aprox. de Adquisición/Proveedor.
-       - Margen y Ganancia Neta Proyectada.
-    3. Sugiere términos de búsqueda en inglés para encontrar proveedores/distribuidores clave en EE. UU.
+       - Margen de Ganancia Neta Proyectada.
+       - Recomienda el precio exacto o rango a licitar (Offer Price) para maximizar la probabilidad de ganar manteniendo un excelente margen.
+    3. Sugiere términos de búsqueda en inglés para encontrar distribuidores en EE. UU.
 
     FORMATO DE RESPUESTA:
     Si la oportunidad NO cumple con los parámetros, responde únicamente: "NO_VIABLE".
 
-    Si la oportunidad SÍ CUMPLE con los parámetros de productos físicos, responde en el siguiente formato exacto en español:
+    Si la oportunidad SÍ CUMPLE, responde en el siguiente formato exacto en español (manteniendo un toque amable y profesional):
 
     📦 {title}
     🔢 Solicitud: {solicitation_number}
     
     📝 Descripción del Producto:
-    [Breve resumen claro del producto o bien requerido]
+    [Breve resumen claro del producto o bien a entregar]
 
     💰 Análisis Financiero Proyectado:
     • Valor Est. Contrato: [Monto aprox. USD]
     • Costo Est. Proveedor: [Monto aprox. USD]
     • Ganancia Neta Est.: [Monto aprox. USD] ([Porcentaje]% de margen)
+
+    🎯 Estrategia de Oferta Recomendada:
+    • Oferta Sugerida para Licitar: [Monto recomendado en USD para ganar la licitación con buen margen]
 
     🔍 Distribuidores Sugeridos:
     Buscar en EE. UU.: [Términos de búsqueda sugeridos]
@@ -200,9 +204,9 @@ def ejecutar_monitoreo_licitaciones(chat_id_target=None):
 # --- HANDLERS DE TELEGRAM ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "✨ Kiyomoto Logistics Bot está activa y lista.\n\n"
-        "Comandos disponibles:\n"
-        "• /forzar_escaneo - Limpia el historial y realiza un escaneo inmediato.\n"
+        "Hola Amo, Kyomoto reportandose >< es hora de trabajar!\n\n"
+        "✨ Lista para ayudarte con las licitaciones. Comandos disponibles:\n"
+        "• /forzar_escaneo - Limpia el historial y realiza un escaneo inmediato (~10 días).\n"
         "• /off - Pausa el monitoreo automático.\n"
         "• /on - Reactiva el monitoreo automático."
     )
@@ -210,16 +214,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_ACTIVO
     BOT_ACTIVO = False
-    await update.message.reply_text("⏸️ Monitoreo automático pausado.")
+    await update.message.reply_text("⏸️ Monitoreo automático pausado, Amo (⁠.⁠–⁠ Anchor ⁠.⁠)")
 
 async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_ACTIVO
     BOT_ACTIVO = True
-    await update.message.reply_text("▶️ Monitoreo automático reactivado.")
+    await update.message.reply_text("▶️ Monitoreo automático reactivado! De vuelta al trabajo (⁠✦⁠_⁠✦⁠)")
 
 async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    await update.message.reply_text("🧹 Limpiando historial e iniciando escaneo en SAM.gov...")
+    await update.message.reply_text("🧹 Limpiando historial e iniciando escaneo completo en SAM.gov... ¡Un momento, Amo! (⁠•⁠̀⁠ᴗ⁠•⁠́⁠)⁠و")
     
     # Ejecutar la búsqueda de forma no bloqueante
     loop = asyncio.get_running_loop()
@@ -229,7 +233,7 @@ async def forzar_escaneo_command(update: Update, context: ContextTypes.DEFAULT_T
         return ejecutar_monitoreo_licitaciones(chat_id_target=chat_id)
 
     total = await loop.run_in_executor(None, tarea)
-    await context.bot.send_message(chat_id=chat_id, text=f"✨ ¡Escaneo completado! Se notificaron {total} oportunidades viables.")
+    await context.bot.send_message(chat_id=chat_id, text=f"✨ ¡Escaneo completado con éxito, Amo! Se encontraron y notificaron {total} oportunidades viables (⁠≧⁠◡⁠≦⁠)")
 
 # --- SERVIDOR FLASK (HEALTH CHECK) ---
 server = Flask(__name__)
