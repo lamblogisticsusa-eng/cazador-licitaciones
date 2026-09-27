@@ -52,6 +52,7 @@ FICHA = {
     "ganancia_neta_usd": 52800.0,
     "margen_neto_porcentaje": 20.6,
     "precio_oferta_sugerido_usd": 45000.0,
+    "razonamiento_oferta": "Ofertar 12% bajo el presupuesto del gobierno.",
     "estrategia_oferta": "Ofertar 8% bajo estimado con entrega en 45 dias.",
     "margen_por_distribuidor": (
         "Distribuidor de catalogo grande 15-20%; mayorista 20-25%; "

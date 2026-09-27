@@ -409,42 +409,91 @@ resuelve y que toda la API que usa Kyomoto existe en PTB 22.x. Nota: en 22.x
 
 ## La ficha que recibes
 
-El análisis es **por unidad**, que es como se piensa un negocio de
-distribución, no por contrato. Y el margen que decide es el **neto**, porque
-el capital se resuelve con factoring.
-
-### El modelo
+Así llega cada oportunidad a Telegram:
 
 ```
-Margen bruto          15% – 35%   ← lo que ganas comprando y revendiendo
-Factoring              3.5%      ← lo que pagas por cobrar antes
-─────────────────────────────────
-Margen neto           11% – 31%   ← este decide si se oferta
+✨ ¡Amo, encontré una nueva oportunidad súper interesante! (≧◡≦)
+
+📦 USAF - Suministro de Repuestos y Módulos Generadores diésel de 50kW
+🔢 Solicitud: FA8601-26-Q-0182
+🏛️ Agencia: Department of the Air Force (USAF / Wright-Patterson AFB)
+⭐ Small Business
+
+📝 Descripción del Producto:
+Repuestos y módulos para generadores diésel tácticos de 50kW
+(Estándar MIL-STD-882) — 16 KIT
+12 módulos de control electrónico + 4 kits de alternadores de repuesto,
+estándar MIL-STD, entrega física directa en base aérea
+
+💰 Análisis Financiero Estimado:
+• Presupuesto Est. Gobierno: $85,000.00
+• Costo Est. Proveedor/Distribuidor: $52,000.00
+• Ganancia Neta Proyectada: $19,892.50 (26.7% de margen neto)
+
+🔢 La cuenta por unidad:
+• Comprar cada una: $3,250.00
+• Precio de catálogo: $3,900.00
+• Ofertar cada una: $4,656.25
+• Ganancia por unidad: $1,406.25
+
+🏦 De dónde sale el margen:
+• Ganancia bruta: $22,500.00 (30.2%)
+• Factoring (3.5%): -$2,607.50
+• Neta real: $19,892.50 (26.7% neto)
+Objetivo: 15%–35% bruto, mínimo 12% neto.
+
+🎯 Estrategia de Oferta Sugerida:
+• Precio Sugerido para Licitar: $74,500.00
+(Con este monto nos mantenemos un 12% por debajo del presupuesto máximo
+del gobierno para asegurar alta competitividad y ganar el contrato,
+asegurando una ganancia neta estimada de $19,892.50.)
+
+💡 Dónde está el mejor margen:
+Mayorista de exportación 20-25% (mejor opción). Fabricante directo 35% pero
+exige MOQ de 100 unidades y no tenemos espacio de almacenamiento.
+
+🔍 Búsqueda Automática de Distribuidores:
+🔎 Buscar en Google (siempre funciona)      ← clic
+• ThomasNet — el mayor directorio industrial de USA
+• Supplyhouse — mayorista e industrial
+• Global Sources US — marketplace con vendedores en USA
+• Faire — marketplace de mayoristas
+Para buscar a mano: 50kW diesel generator control module
+
+📍 Entrega:
+• Destino: Wright-Patterson AFB / Ohio / UNITED STATES
+• Límite para ofertar: 2026-11-04
+• Contacto: John Smith | john.smith@af.mil | +1 937 555 0142
+
+❓ Antes de ofertar, confirma esto ♡
+• ¿Aceptan marca equivalente o exigen el OEM original?
+• ¿El precio es FOB destino o FOB origen?
+• ¿El set-aside exige ser pequeño negocio de EE.UU.?
+
+Riesgo: MEDIO  ojo con esto, hay que revisar (’-⌒-’)
+
+🔗 Enlace Directo SAM.gov:
+📄 Ver Ficha Completa de la Licitación
 ```
 
-Ejemplo real, el caso de 50 laptops:
+### El detalle que hace que la cuenta sirva
 
-```
-📝 Laptops para Answer Key Kiosks
-   Modelo: Dell Latitude 5450
-   Cantidad: 50 EA
-🔧 i5-1345U, 16GB RAM, 512GB SSD
-📍 Fort Huachuca / Arizona / UNITED STATES
+El ejemplo original decía *"Ganancia Neta Proyectada: $33,000 (38.8%)"*
+con una oferta de $74,500 y un costo de $52,000. Eso no cuadra: $33,000
+es exactamente `85,000 − 52,000`, o sea que estaba midiendo la ganancia
+contra el **presupuesto del gobierno** en vez de contra **lo que ofertaste**.
 
-💰 La cuenta, por unidad
-   Comprar cada una en USA:      $1,200.00
-   Precio de catálogo:           $1,249.00
-   Ofertar cada una a:           $1,450.00
-   Ganancia por unidad:            $250.00
+| | Ejemplo original | Como lo hace Kyomoto |
+|---|---|---|
+| Ingresos reales (tu oferta) | $74,500 | $74,500 |
+| Costo | $52,000 | $52,000 |
+| Ganancia bruta | $22,500 | $22,500 (30.2%) |
+| Factoring 3.5% | no se contaba | −$2,607.50 |
+| **Neta** | $33,000 (38.8%) ❌ | **$19,892.50 (26.7%)** ✅ |
 
-📊 El total
-   Valor del contrato:          $72,500.00
-   Costo de compra:             $60,000.00
-   Ganancia bruta:              $12,500.00  (17.2%)
-   Factoring (3.5%):            -$2,537.50
-   Ganancia neta:                $9,962.50  (13.7%)
-   Ofertar:                     $72,500.00
-```
+El margen va contra **tu oferta**, y el factoring va contra **tu oferta**,
+porque el factoring cobra sobre la factura que te paga el gobierno. Medirlo
+contra el presupuesto infla el margen en 12 puntos y te hace ofertar mal.
 
 ### Por qué los totales se recalculan aquí
 

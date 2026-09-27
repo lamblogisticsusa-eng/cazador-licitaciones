@@ -104,6 +104,17 @@ def _esc(valor) -> str:
     return html.escape(str(valor if valor is not None else ""), quote=False)
 
 
+def _cantidad(valor) -> str:
+    """Sin decimales si es entera. 50.0 se ve como 50, no como 50.0 EA."""
+    try:
+        n = float(valor)
+    except (TypeError, ValueError):
+        return str(valor or "")
+    if n == int(n):
+        return f"{int(n):,}"
+    return f"{n:,.2f}"
+
+
 def _usd(valor) -> str:
     if valor is None:
         return "N/E"
@@ -111,125 +122,144 @@ def _usd(valor) -> str:
 
 
 def formatear_analisis(a: dict) -> str:
-    """Render HTML de la ficha. Todo pasa por html.escape, por eso ya no hay
-    riesgo de que el texto de Gemini rompa el formato."""
-    import kyo
+    """
+    La ficha, en el formato que pidio el usuario.
+
+    Regla de oro: la cuenta se sostiene. Si el bot dice que vas a ofertar
+    $74,500, la ganancia se mide contra $74,500 y no contra el presupuesto
+    del gobierno, porque lo que entra a tu cuenta es lo que ofertaste.
+    """
     import distribuidores
+    import kyo
 
-    L: list[str] = []
-    L.append(kyo.cabecera_ficha())
-    L.append("")
+    L = ["✨ <b>¡Amo, encontré una nueva oportunidad súper interesante!</b> (≧◡≦)", ""]
 
-    # --- Encabezado y enlace a SAM.gov ---
+    # --- Encabezado ---
     L.append(f"📦 <b>{_esc(a['title'])}</b>")
     L.append(f"🔢 Solicitud: <code>{_esc(a['solicitation'])}</code>")
-    if a.get("ui_link"):
-        L.append(
-            f"🔗 <a href=\"{_esc(a['ui_link'])}\">📄 Ver aviso completo en SAM.gov</a>"
-        )
-    L.append(f"🏛 <i>{_esc(a['agencia'])}</i>")
-    L.append(f"🗂 NAICS <code>{_esc(a['naics'])}</code> | PSC <code>{_esc(a['psc'])}</code>")
-    L.append(f"⭐ {_esc(a['set_aside'])}")
+    L.append(f"🏛️ Agencia: {_esc(a['agencia'])}")
+    if a.get("set_aside"):
+        L.append(f"⭐ {_esc(a['set_aside'])}")
     L.append("")
 
-    # --- Que hay que entregar ---
-    L.append("📝 <b>Que hay que entregar</b>")
-    L.append(_esc(a["producto"]))
+    # --- Descripcion del producto ---
+    L.append("📝 <b>Descripción del Producto:</b>")
+    descripcion = _esc(a.get("producto") or "")
     if a.get("modelo_especifico"):
-        L.append(f"Modelo: <b>{_esc(a['modelo_especifico'])}</b>")
-
-    # Cantidad y unidad: es la base de toda la cuenta.
+        descripcion += f" ({_esc(a['modelo_especifico'])})"
     cantidad = a.get("cantidad_total")
     unidad = a.get("unidad_medida") or "EA"
     if cantidad:
-        L.append(f"Cantidad: <b>{cantidad:,.0f} {_esc(str(unidad))}</b>")
-    if a["especificacion_tecnica_clave"]:
+        descripcion += f" — {_cantidad(cantidad)} {_esc(str(unidad))}"
+    L.append(descripcion)
+    if a.get("especificacion_tecnica_clave"):
+        L.append(f"<i>{_esc(a['especificacion_tecnica_clave'])}</i>")
+    L.append("")
+
+    # --- Analisis financiero ---
+    L.append("💰 <b>Análisis Financiero Estimado:</b>")
+    L.append(f"• Presupuesto Est. Gobierno: <b>{_usd(a['valor_contrato_usd'])}</b>")
+    L.append(f"• Costo Est. Proveedor/Distribuidor: <b>{_usd(a['costo_total_usd'])}</b>")
+    L.append(
+        f"• Ganancia Neta Proyectada: <b>{_usd(a['ganancia_neta_usd'])}</b>"
+        + (f" ({a['margen_neto_porcentaje']:.1f}% de margen neto)"
+           if a.get("margen_neto_porcentaje") is not None else "")
+    )
+    L.append("")
+
+    # --- La cuenta por unidad ---
+    if a.get("cantidad_total") and a.get("precio_unitario_costo"):
+        L.append("🔢 <b>La cuenta por unidad:</b>")
+        L.append(f"• Comprar cada una: <b>{_usd(a['precio_unitario_costo'])}</b>")
+        L.append(f"• Precio de catálogo: <b>{_usd(a['precio_unitario_mercado'])}</b>")
+        L.append(f"• Ofertar cada una: <b>{_usd(a['precio_unitario_oferta'])}</b>")
+        L.append(f"• <b>Ganancia por unidad: {_usd(a['ganancia_por_unidad'])}</b>")
         L.append("")
-        L.append("🔧 <b>Especificacion tecnica clave</b>")
-        L.append(_esc(a["especificacion_tecnica_clave"]))
-    L.append(f"📍 Destino: <b>{_esc(a['lugar_entrega'])}</b>")
-    L.append(f"⏰ Limite para ofertar: <code>{_esc(a['limite'])}</code>")
-    if a.get("sin_descripcion"):
-        L.append(f"⚠️ <i>{kyo.EMOCIONES['sin_descripcion']}. Las cifras son estimaciones.</i>")
-    L.append("")
 
-    # --- La cuenta, por unidad ---
-    L.append("💰 <b>La cuenta, por unidad</b>")
-    L.append(f"• Comprar cada una en USA: <b>{_usd(a['precio_unitario_costo'])}</b>")
-    L.append(f"• Precio de catalogo de cada una: <b>{_usd(a['precio_unitario_mercado'])}</b>")
-    L.append(f"• Ofertar cada una a: <b>{_usd(a['precio_unitario_oferta'])}</b>")
-    L.append(f"• <b>Ganancia por unidad: {_usd(a['ganancia_por_unidad'])}</b>")
-    L.append("")
+    # --- Desglose del margen, con el factoring a la vista ---
+    margen_bruto = a.get("margen_bruto_porcentaje")
+    margen_neto = a.get("margen_neto_porcentaje")
+    if margen_bruto is not None:
+        L.append("🏦 <b>De dónde sale el margen:</b>")
+        L.append(
+            f"• Ganancia bruta: <b>{_usd(a['ganancia_total_usd'])}</b> "
+            f"({margen_bruto:.1f}%)"
+        )
+        L.append(
+            f"• Factoring ({config.FACTORING_PCT * 100:.1f}%): "
+            f"<b>-{_usd(a['costo_factoring_usd'])}</b>"
+        )
+        L.append(
+            f"• <b>Neta real: {_usd(a['ganancia_neta_usd'])}</b>"
+            + (f" ({margen_neto:.1f}% neto)" if margen_neto is not None else "")
+        )
+        L.append(
+            f"<i>Objetivo: {config.MARGEN_BRUTO_MIN * 100:.0f}%–"
+            f"{config.MARGEN_BRUTO_MAX * 100:.0f}% bruto, "
+            f"mínimo {config.MARGEN_NETO_MIN * 100:.0f}% neto.</i>"
+        )
+        L.append("")
 
-    # --- El total, con factoring ---
-    L.append("📊 <b>El total</b>")
-    L.append(f"• Valor del contrato: <b>{_usd(a['valor_contrato_usd'])}</b>")
-    L.append(f"• Costo de compra: {_usd(a['costo_total_usd'])}")
-    mb = a.get("margen_bruto_porcentaje")
-    mn = a.get("margen_neto_porcentaje")
-    L.append(
-        f"• <b>Ganancia bruta: {_usd(a['ganancia_total_usd'])}</b>"
-        + (f" ({mb:.1f}%)" if mb is not None else "")
-    )
-    L.append(
-        f"• Factoring ({config.FACTORING_PCT * 100:.1f}%): "
-        f"-{_usd(a['costo_factoring_usd'])}"
-    )
-    L.append(
-        f"• <b>Ganancia neta: {_usd(a['ganancia_neta_usd'])}</b>"
-        + (f" ({mn:.1f}%)" if mn is not None else "")
-    )
-    L.append(f"• <b>Ofertar: {_usd(a['precio_oferta_sugerido_usd'])}</b>")
-    L.append("")
-    L.append(
-        f"<i>Objetivo: {config.MARGEN_BRUTO_MIN * 100:.0f}%–"
-        f"{config.MARGEN_BRUTO_MAX * 100:.0f}% bruto; minimo "
-        f"{config.MARGEN_NETO_MIN * 100:.0f}% neto tras factoring.</i>"
-    )
-    L.append("")
-
+    # --- Estrategia de oferta ---
+    L.append("🎯 <b>Estrategia de Oferta Sugerida:</b>")
+    L.append(f"• Precio Sugerido para Licitar: <b>{_usd(a['precio_oferta_sugerido_usd'])}</b>")
+    if a.get("razonamiento_oferta"):
+        L.append(f"({_esc(a['razonamiento_oferta'])})")
+    elif a.get("estrategia_oferta"):
+        L.append(f"({_esc(a['estrategia_oferta'])})")
     if a.get("margen_por_distribuidor"):
-        L.append("💡 <b>Donde esta el mejor margen</b>")
-        L.append(_esc(a["margen_por_distribuidor"]))
         L.append("")
-
-    # --- Estrategia ---
-    L.append("🎯 <b>Estrategia de oferta</b>")
-    L.append(f"Ofertar: <b>{_usd(a['precio_oferta_sugerido_usd'])}</b>")
-    if a["estrategia_oferta"]:
-        L.append(_esc(a["estrategia_oferta"]))
-    L.append(f"Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b> {kyo.emoji_riesgo(a['nivel_riesgo'])}")
+        L.append("💡 <b>Dónde está el mejor margen:</b>")
+        L.append(_esc(a["margen_por_distribuidor"]))
     L.append("")
 
-    # --- Distribuidores en USA ---
-    L.append("🔍 <b>Distribuidores en USA</b>")
+    # --- Distribuidores ---
+    L.append("🔍 <b>Búsqueda Automática de Distribuidores:</b>")
     d = distribuidores.para_oportunidad(
         a.get("busquedas_distribuidores") or [],
         a.get("producto") or "",
         a.get("lugar_entrega") or "",
     )
     etiqueta, url = d["principal"]
-    L.append(f'<a href="{_esc(url)}">{_esc(etiqueta)}</a>')
+    L.append(f'🔎 <a href="{_esc(url)}">{_esc(etiqueta)}</a>')
+    for nombre, u, nota in d["sitios"][:4]:
+        L.append(f"• <a href=\"{_esc(u)}\">🏬 {_esc(nombre)}</a> — <i>{_esc(nota)}</i>")
     L.append("")
-    L.append("_Toca para abrir, ya filtrado por el producto y por USA:_")
-    for nombre, u, nota in d["sitios"]:
-        L.append(f'• <a href="{_esc(u)}">🏬 {_esc(nombre)}</a> — <i>{_esc(nota)}</i>')
-    L.append("")
-    L.append("_Para buscar a mano:_")
+    L.append("<i>Para buscar a mano:</i>")
     L.append(f"<code>{_esc(distribuidores.texto_plano(d['terminos']))}</code>")
     L.append("")
 
-    if a["preguntas_criticas"]:
+    # --- Logistica y contacto ---
+    L.append("📍 <b>Entrega:</b>")
+    L.append(f"• Destino: {_esc(a['lugar_entrega'])}")
+    L.append(f"• Límite para ofertar: <code>{_esc(a['limite'])}</code>")
+    L.append(f"• Contacto: {_esc(a['contacto'])}")
+    if a.get("sin_descripcion"):
+        L.append("")
+        L.append(
+            f"⚠️ <i>SAM.gov no publicó descripción de este aviso; las cifras "
+            f"son estimaciones. Antes de ofertar, léelo en el enlace.</i>"
+        )
+    if a.get("preguntas_criticas"):
+        L.append("")
         L.append(f"❓ <b>{kyo.PREGUNTA_ANTES}</b>")
         for p in a["preguntas_criticas"]:
             L.append(f"• {_esc(p)}")
+    if a.get("nivel_riesgo"):
         L.append("")
+        L.append(
+            f"Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b> "
+            f"{kyo.emoji_riesgo(a['nivel_riesgo'])}"
+        )
+    L.append("")
 
-    if a["observaciones"]:
-        L.append(f"⚠️ {_esc(a['observaciones'])}")
-        L.append("")
+    # --- Enlace ---
+    L.append("🔗 <b>Enlace Directo SAM.gov:</b>")
+    if a.get("ui_link"):
+        L.append(f"📄 <a href=\"{_esc(a['ui_link'])}\"><b>Ver Ficha Completa de la Licitación</b></a>")
+    else:
+        L.append("📄 Ver Ficha Completa de la Licitación")
 
-    L.append(f"👤 Contacto: {_esc(a['contacto'])}")
     L.append("")
     L.append(f"<i>{kyo.CIERRE}</i>")
     return "\n".join(L)

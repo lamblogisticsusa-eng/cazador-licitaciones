@@ -193,6 +193,15 @@ SI ES VIABLE, ENTREGA:
   margen_neto_porcentaje        : (ganancia_total - factoring) / valor * 100
   precio_oferta_sugerido_usd    : total a ofertar (cantidad x unitario)
   estrategia_oferta             : 2-3 frases de tactica
+  razonamiento_oferta          : UNA frase que explique el monto ofertado.
+                                 Debe decir cuantos por ciento queda POR
+                                 DEBAJO del presupuesto del gobierno, y
+                                 cuanto se lleva el margen neto.
+                                 Ejemplo: "Con este monto nos mantenemos un
+                                 12% por debajo del presupuesto maximo del
+                                 gobierno para asegurar alta competitividad
+                                 y ganar el contrato, asegurando una ganancia
+                                 neta estimada de $22,500.00."
   busquedas_distribuidores      : 3-5 terminos EN INGLES con el sustantivo
                                  tecnico del producto y el modelo, sin
                                  palabras de instruccion.
@@ -431,6 +440,7 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
         "margen_neto_porcentaje": margen_neto,
         "precio_oferta_sugerido_usd": _num(datos.get("precio_oferta_sugerido_usd")) or valor,
         "estrategia_oferta": _limpiar_ia(datos.get("estrategia_oferta"))[:700],
+        "razonamiento_oferta": _limpiar_ia(datos.get("razonamiento_oferta"))[:500],
         "busquedas_distribuidores": _lista(datos.get("busquedas_distribuidores")),
         "margen_por_distribuidor": _limpiar_ia(datos.get("margen_por_distribuidor"))[:600],
         "nivel_riesgo": _limpiar_ia(datos.get("nivel_riesgo") or "medio").lower()[:10],

@@ -125,6 +125,7 @@ hostil = {
     "ganancia_neta_usd": 13200.0,
     "margen_neto_porcentaje": 16.5,
     "precio_oferta_sugerido_usd": 80000.0,
+    "razonamiento_oferta": "Ofertar 12% bajo el presupuesto del gobierno.",
     "estrategia_oferta": "Ofertar 8% bajo.", "busquedas_distribuidores": ["a & b"],
     "nivel_riesgo": "medio", "preguntas_criticas": ["¿<b>x</b>?"],
     "observaciones": "", "contacto": "A & B", "ui_link": "https://x.com/?a=1&b=2",

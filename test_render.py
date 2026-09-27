@@ -53,6 +53,7 @@ hostil = {
     "costo_factoring_usd": 2800.0,
     "ganancia_neta_usd": 13200.0,
     "margen_neto_porcentaje": 16.5,
+    "razonamiento_oferta": "Ofertar 12% bajo el presupuesto del gobierno.",
     "estrategia_oferta": "Ofertar 8% bajo el estimado *con_underline* incluido.",
     "busquedas_distribuidores": ["wholesale mechanical seal usa", "seals & gaskets distributor"],
     "nivel_riesgo": "medio",
@@ -73,7 +74,7 @@ check("No deja <b>inyectado</b> del proveedor", "<b>inyectado</b>" not in html)
 check("Escapa el ampersand", "&amp; mas" in html or "&amp;" in html)
 check("Conserva el enlace de SAM.gov", 'href="https://sam.gov/workspace' in html)
 check("Muestra los 3 numeros financieros", html.count("$") >= 5)
-check("Avisa que falta la descripcion", "sin descripcion oficial" in html)
+check("Avisa que falta la descripcion", "no publicó descripción" in html)
 check("Muestra limite y destino", "2026-10-10" in html and "Portland" in html)
 check("Terminos de busqueda en <code>", "<code>wholesale mechanical seal usa" in html)
 print()
