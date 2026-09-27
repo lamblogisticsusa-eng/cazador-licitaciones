@@ -213,13 +213,23 @@ def guardar_busqueda(opp: dict) -> None:
 
 
 def desde_cache(dias: int) -> list[dict]:
-    """Avisos cacheados cuya fecha de publicacion cae en la ventana."""
+    """Avisos cacheados publicados dentro de la ventana de N dias."""
+    return desde_cache_rango(dias, 0)
+
+
+def desde_cache_rango(dias_max: int, dias_min: int = 0) -> list[dict]:
+    """
+    Avisos cacheados publicados entre hace(dias_max) y hace(dias_min).
+
+    Es lo que hace posible el fetching incremental: la parte vieja de la
+    ventana (que ya no cambia) sale de la base y la reciente se pide a la API.
+    """
     import json as _json
     init_db()
     with _lock, _conexion() as c:
         filas = c.execute(
-            "SELECT datos FROM cache_busqueda WHERE posted_date >= ?",
-            (_hace(dias),),
+            "SELECT datos FROM cache_busqueda WHERE posted_date >= ? AND posted_date < ?",
+            (_hace(dias_max), _hace(dias_min)),
         ).fetchall()
     salida = []
     for (crudo,) in filas:

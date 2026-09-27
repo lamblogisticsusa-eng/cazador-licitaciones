@@ -36,6 +36,7 @@ from urllib.parse import urlencode
 import requests
 
 import config
+import store
 
 log = logging.getLogger("kyomoto.sam")
 
@@ -190,19 +191,39 @@ def _bloque(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
     return datos.get("opportunitiesData") or []
 
 
+def _rango_vivo(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
+    """Pide un bloque a la API y lo cachea."""
+    lote = _bloque(desde, hasta, ptype)
+    for opp in lote:
+        store.guardar_busqueda(opp)
+    return lote
+
+
 def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = None) -> Iterator[dict]:
     """
-    Recorre la ventana de fechas en bloques de DIAS_POR_CHUNK y entrega cada
-    oportunidad una vez.
+    Trae la ventana de fechas con FETCHING INCREMENTAL.
 
-    Con una ventana de 10 dias son 5 peticiones a la API por barrido, y la API
-    de SAM.gov tiene tope DIARIO. Por eso se consulta la cache primero: los
-    tramos ya vistos y los avisos ya cacheados cuestan 0 peticiones.
+    La ventana de 10 dias son 4 peticiones por barrido, y con barridos cada
+    2h eso son 48 al dia: demasiado para el tope diario de SAM.gov. La
+    solucion es no volver a pedir lo que ya no cambia:
+
+      - los ultimos DIAS_VIVOS dias SIEMPRE se piden a la API, porque ahi es
+        donde aparecen los avisos nuevos
+      - el resto de la ventana sale de cache_busqueda, que esta en SQLite y
+        sobrevive entre barridos y reinicios
+
+    Resultado: 2 peticiones por barrido en vez de 4, y si el tope esta alto
+    el coste se amortiza aun mas porque la parte vieja no se vuelve a pedir
+    en todo el dia.
+
+    La primera vez que corre (base vacia) si hace falta pedir la parte vieja
+    una vez para llenarla.
     """
     import store
 
     if stats is not None:
-        stats.update(bloques_ok=0, bloques_error=0, total_api=0, errores=[], desde_cache=0)
+        stats.update(bloques_ok=0, bloques_error=0, total_api=0,
+                     errores=[], desde_cache=0)
 
     if not config.SAM_API_KEY:
         raise SamError("SAM_API_KEY no configurada")
@@ -214,34 +235,61 @@ def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = Non
 
     dias = dias or config.DIAS_DE_VENTANA
     dias = max(dias, config.DIAS_POR_CHUNK)
+    dias_vivos = max(config.DIAS_POR_CHUNK, min(config.DIAS_VIVOS, dias))
     fin = datetime.now(timezone.utc)
     vistos: set[str] = set()
     publicados = 0
 
-    # Lo que ya esta en la base no se vuelve a pedir.
-    clave = f"{dias}:{ptype}"
-    if clave in _cache_rangos and time.time() - _cache_rangos[clave] < config.TTL_CACHE:
-        for opp in store.desde_cache(dias):
-            nid = opp.get("noticeId")
-            if nid and nid not in vistos:
-                vistos.add(nid)
-                publicados += 1
-                if stats is not None:
-                    stats["desde_cache"] += 1
-                yield opp
-        log.info(
-            "Ventana de %s dias servida desde la cache: %s avisos, 0 peticiones",
-            dias, publicados,
-        )
-        return
+    def emitir(opp: dict, de_cache: bool):
+        nonlocal publicados
+        nid = opp.get("noticeId")
+        if not nid or nid in vistos:
+            return None
+        vistos.add(nid)
+        publicados += 1
+        if stats is not None:
+            stats["desde_cache" if de_cache else "total_api"] += 1
+        return opp
 
+    # ---- Parte 1: lo viejo, desde la base ----
+    viejos = store.desde_cache_rango(dias, dias_vivos)
+    if not viejos and dias > dias_vivos:
+        # Base vacia para esa parte: hay que llenarla una vez.
+        log.info("Cache de la parte vieja vacio: se pide una vez a la API")
+        desde_antiguo = fin - timedelta(days=dias)
+        hasta_antiguo = fin - timedelta(days=dias_vivos)
+        for i in range(config.MAX_CHUNKS):
+            hasta = hasta_antiguo - timedelta(days=i * config.DIAS_POR_CHUNK)
+            desde = hasta - timedelta(days=config.DIAS_POR_CHUNK)
+            if desde < desde_antiguo:
+                break
+            try:
+                for opp in _rango_vivo(desde, hasta, ptype):
+                    if emitir(opp, False) is not None:
+                        yield opp
+                if stats is not None:
+                    stats["bloques_ok"] += 1
+            except SamError as e:
+                if stats is not None:
+                    stats["bloques_error"] += 1
+                    stats["errores"].append(f"cache {desde.date()}: {e}")
+                log.error("Fallo llenando la cache: %s", e)
+                break
+    else:
+        for opp in viejos:
+            if emitir(opp, True) is not None:
+                yield opp
+        log.info("Parte vieja de la ventana: %s avisos desde la cache (0 peticiones)",
+                 len(vistos))
+
+    # ---- Parte 2: lo reciente, siempre a la API ----
     for i in range(config.MAX_CHUNKS):
         hasta = fin - timedelta(days=i * config.DIAS_POR_CHUNK)
         desde = hasta - timedelta(days=config.DIAS_POR_CHUNK)
-        if desde.date() < (fin - timedelta(days=dias)).date():
+        if desde < fin - timedelta(days=dias_vivos):
             break
         try:
-            lote = _bloque(desde, hasta, ptype)
+            lote = _rango_vivo(desde, hasta, ptype)
         except SamError as e:
             log.error("Fallo el bloque %s -> %s: %s", _fecha(desde), _fecha(hasta), e)
             if stats is not None:
@@ -252,21 +300,11 @@ def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = Non
             stats["bloques_ok"] += 1
         nuevos = 0
         for opp in lote:
-            nid = opp.get("noticeId")
-            if nid and nid not in vistos:
-                vistos.add(nid)
-                publicados += 1
+            if emitir(opp, False) is not None:
                 nuevos += 1
-                if stats is not None:
-                    stats["total_api"] += 1
-                store.guardar_busqueda(opp)
                 yield opp
-        log.info(
-            "Bloque %s..%s -> %s registros (%s nuevos, total %s)",
-            _fecha(desde), _fecha(hasta), len(lote), nuevos, publicados,
-        )
-
-    _cache_rangos[clave] = time.time()
+        log.info("Bloque %s..%s -> %s nuevos (total %s)",
+                 _fecha(desde), _fecha(hasta), nuevos, publicados)
 
 
 def proximo_acceso() -> str:

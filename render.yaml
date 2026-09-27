@@ -33,10 +33,12 @@ services:
         value: "10"
       - key: DIAS_POR_CHUNK
         value: "3"
-      # Horas que se puede servir una ventana desde la cache antes de volver a
-      # pedirla a la API. Debe ser MENOR que INTERVALO_HORAS.
-      - key: TTL_CACHE
-        value: "1"
+      # Dias de la ventana que SIEMPRE se piden a la API, porque ahi es donde
+      # aparecen los avisos nuevos. El resto sale de la cache en SQLite.
+      # Con 3 dias vivos y ventana de 10, son 1 peticion por barrido en vez
+      # de 4: unas 12 al dia en lugar de 48.
+      - key: DIAS_VIVOS
+        value: "3"
       - key: PRESUPUESTO_GEMINI_DIARIO
         value: "20"
       - key: PRESUPUESTO_MINIMO

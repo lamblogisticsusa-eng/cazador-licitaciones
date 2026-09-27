@@ -40,10 +40,13 @@ DIAS_DE_VENTANA = _int("DIAS_DE_VENTANA", 10)
 DIAS_POR_CHUNK = _int("DIAS_POR_CHUNK", 3)
 LIMITE_POR_CHUNK = _int("LIMITE_POR_CHUNK", 1000)
 MAX_CHUNKS = _int("MAX_CHUNKS", 12)
-# Cuanto tiempo se puede servir una ventana desde la cache antes de volver a
-# pedirla. Debe ser MENOR que INTERVALO_HORAS: si no, nunca se veran los
-# avisos nuevos.
-TTL_CACHE = _float("TTL_CACHE", 1.0)
+# Dias de la ventana que SIEMPRE se piden a la API, porque ahi es donde
+# aparecen los avisos nuevos. El resto sale de la cache (SQLite).
+# Con 2 dias vivos y ventana de 10, solo se piden 1 bloque por barrido.
+# OJO: esto NO es un TTL. Un TTL tiene que ser mayor que INTERVALO_HORAS para
+# servir de algo; si es menor, la cache nunca se usa (que fue el bug que
+# hubo en la primera version de esto).
+DIAS_VIVOS = _int("DIAS_VIVOS", 3)
 
 # Objetivo del usuario: 10 licitaciones VIABLES al dia. Como no todas las
 # analizadas sobreviven, se piden mas de las que quieres recibir.
