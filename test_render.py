@@ -66,7 +66,7 @@ check("Conserva el enlace de SAM.gov", 'href="https://sam.gov/workspace' in html
 check("Muestra los 3 numeros financieros", html.count("$") >= 5)
 check("Avisa que falta la descripcion", "sin descripcion oficial" in html)
 check("Muestra limite y destino", "2026-10-10" in html and "Portland" in html)
-check("Terminos de busqueda en <code>", "<code>wholesale mechanical seal usa</code>" in html)
+check("Terminos de busqueda en <code>", "<code>wholesale mechanical seal usa" in html)
 print()
 
 print("=" * 70)

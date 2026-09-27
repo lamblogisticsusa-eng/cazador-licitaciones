@@ -32,11 +32,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 # --- Ventana de busqueda en SAM.gov ---
-# DIAS_POR_CHUNK debe ser chico: la API devuelve ~450 registros/dia y corta en 1000.
-DIAS_DE_VENTANA = _int("DIAS_DE_VENTANA", 3)
-DIAS_POR_CHUNK = _int("DIAS_POR_CHUNK", 2)
+# 10 dias: ademas de los avisos nuevos, entra todo lo que se publico durante
+# el fin de semana y el lunes siguiente. Los sabados y domingos se publica
+# muy poco, asi que con una ventana corta Kyomoto se quedaria sin nada que
+# mostrarte. El filtro de fecha limite ya descarta los que se cerraron.
+DIAS_DE_VENTANA = _int("DIAS_DE_VENTANA", 10)
+DIAS_POR_CHUNK = _int("DIAS_POR_CHUNK", 3)
 LIMITE_POR_CHUNK = _int("LIMITE_POR_CHUNK", 1000)
-MAX_CHUNKS = _int("MAX_CHUNKS", 10)
+MAX_CHUNKS = _int("MAX_CHUNKS", 12)
+# Cuanto tiempo se puede servir una ventana desde la cache antes de volver a
+# pedirla. Debe ser MENOR que INTERVALO_HORAS: si no, nunca se veran los
+# avisos nuevos.
+TTL_CACHE = _float("TTL_CACHE", 1.0)
 
 # Objetivo del usuario: 10 licitaciones VIABLES al dia. Como no todas las
 # analizadas sobreviven, se piden mas de las que quieres recibir.
@@ -57,6 +64,10 @@ MAX_NOTIFICACIONES = _int("MAX_NOTIFICACIONES", 10)
 TOPE_USD = _float("TOPE_USD", 250000.0)
 MIN_USD = _float("MIN_USD", 5000.0)
 DIAS_MINIMO_PARA_POSTULAR = _int("DIAS_MINIMO_PARA_POSTULAR", 7)
+# Colchon sobre el costo de compra para calcular el capital que hay que tener
+# disponible. Cubre flete interno, ionizedos, ajustes de cantidad y el desfase
+# entre pagar y cobrar. El diferenciador: lo que ganas no lo tocas hasta que cobres.
+MARGEN_COLCHON = _float("MARGEN_COLCHON", 0.15)
 
 # --- Rendimiento / Costos ---
 # WORKERS controla las descargas de descripciones (HTTP barato a SAM.gov).

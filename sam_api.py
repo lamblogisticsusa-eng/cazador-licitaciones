@@ -48,6 +48,10 @@ _sesion.headers.update({"Accept": "application/json", "User-Agent": "Kyomoto/2.0
 # Momento en que SAM.gov dice que vuelve a dejar usar la API. None = sin tope.
 _proximo_acceso: str | None = None
 
+# Ventanas servidas hace poco desde la cache, para no repetir los mismos
+# bloques dentro del intervalo de barrido.
+_cache_rangos: dict[str, float] = {}
+
 TAG_HTML = re.compile(r"<[^>]+>")
 ESPACIOS = re.compile(r"[ \t\r\f\v]+")
 SALTOS = re.compile(r"\n{3,}")
@@ -189,33 +193,47 @@ def _bloque(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
 def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = None) -> Iterator[dict]:
     """
     Recorre la ventana de fechas en bloques de DIAS_POR_CHUNK y entrega cada
-    oportunidad una vez. Deduplica por noticeId entre bloques.
+    oportunidad una vez.
 
-    `stats` es un dict opcional que se llena con:
-        bloques_ok, bloques_error, total_api, errores[]
-    El scanner lo usa para distinguir "no hay nada" de "SAM.gov esta caido",
-    que es la diferencia entre un dia tranquilo y un bot roto.
+    Con una ventana de 10 dias son 5 peticiones a la API por barrido, y la API
+    de SAM.gov tiene tope DIARIO. Por eso se consulta la cache primero: los
+    tramos ya vistos y los avisos ya cacheados cuestan 0 peticiones.
     """
+    import store
+
     if stats is not None:
-        stats.update(bloques_ok=0, bloques_error=0, total_api=0, errores=[])
+        stats.update(bloques_ok=0, bloques_error=0, total_api=0, errores=[], desde_cache=0)
 
     if not config.SAM_API_KEY:
         raise SamError("SAM_API_KEY no configurada")
     if _proximo_acceso:
-        # Ya sabemos que la API esta throttled. Fallar rapido y claro es mejor
-        # que reintentar y gastar mas cuota.
         raise SamError(
             f"SAM.gov tiene el tope diario de peticiones alcanzado. "
             f"Vuelve a las {_proximo_acceso}."
         )
 
     dias = dias or config.DIAS_DE_VENTANA
-    # Si piden menos dias que un bloque, se agranda la ventana: mejor revisar
-    # de mas que devolver cero sin haber consultado nada (y sin explicar por que).
     dias = max(dias, config.DIAS_POR_CHUNK)
     fin = datetime.now(timezone.utc)
     vistos: set[str] = set()
     publicados = 0
+
+    # Lo que ya esta en la base no se vuelve a pedir.
+    clave = f"{dias}:{ptype}"
+    if clave in _cache_rangos and time.time() - _cache_rangos[clave] < config.TTL_CACHE:
+        for opp in store.desde_cache(dias):
+            nid = opp.get("noticeId")
+            if nid and nid not in vistos:
+                vistos.add(nid)
+                publicados += 1
+                if stats is not None:
+                    stats["desde_cache"] += 1
+                yield opp
+        log.info(
+            "Ventana de %s dias servida desde la cache: %s avisos, 0 peticiones",
+            dias, publicados,
+        )
+        return
 
     for i in range(config.MAX_CHUNKS):
         hasta = fin - timedelta(days=i * config.DIAS_POR_CHUNK)
@@ -241,11 +259,14 @@ def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = Non
                 nuevos += 1
                 if stats is not None:
                     stats["total_api"] += 1
+                store.guardar_busqueda(opp)
                 yield opp
         log.info(
             "Bloque %s..%s -> %s registros (%s nuevos, total %s)",
             _fecha(desde), _fecha(hasta), len(lote), nuevos, publicados,
         )
+
+    _cache_rangos[clave] = time.time()
 
 
 def proximo_acceso() -> str:

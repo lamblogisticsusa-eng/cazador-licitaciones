@@ -407,6 +407,81 @@ resuelve y que toda la API que usa Kyomoto existe en PTB 22.x. Nota: en 22.x
 
 ---
 
+## La ficha que recibes
+
+Cada oportunidad llega con todo lo necesario para decidir sin abrir nada más:
+
+```
+📦 USNS MERCY (T-AH 19) MAIN MACHINERY ROOM FIRE PUMP VALVES
+🔢 N0010426QFF21
+🔗 📄 Ver aviso completo en SAM.gov      ← el enlace directo
+🏛 DEPT OF DEFENSE.DEPT OF THE NAVY
+🗂 NAICS 332911 | PSC 5330   ⭐ SBA
+
+📝 Que hay que entregar
+   Válvulas de compuerta de bronce para bomba contraincendios naval
+   Cantidad estimada: 1 LOTE
+🔧 ASTM B584, 150 psi, PN20
+📍 Destino: Norfolk / Virginia / UNITED STATES
+⏰ Limite para ofertar: 2026-11-04
+
+💰 Los numeros
+   Valor del contrato: $48,000.00
+   Comprar en USA:     $32,000.00
+
+💳 Dinero que necesitas tener disponible
+   Para ofertar y cumplir: $36,800.00
+   (compra + 15% de colchón para flete, aranceles e imprevistos.
+    No lo recuperas hasta que cobres.)
+
+📈 Ganancia
+   Neta estimada: $16,000.00 (33.3%)
+   Precio unitario de catálogo: $6,400.00
+   Precio unitario a ofertar:  $8,000.00
+
+💡 Dónde está el mejor margen
+   Catálogo grande 15-20%; mayorista 20-25%; fabricante directo 25-35%.
+
+🔍 Distribuidores en USA
+   🔎 Buscar en Google (siempre funciona)      ← clic
+   🏬 ThomasNet — el mayor directorio industrial de USA
+   🏬 Supplyhouse — mayorista e industrial
+   🏬 Global Sources US — marketplace con vendedores en USA
+   🏬 Faire — marketplace de mayoristas
+   🏬 Zoro — distribuidor con envío desde USA
+   Para buscar a mano: "bronze gate valve marine" · "naval fire pump valve"
+```
+
+### Sobre los enlaces de distribuidores
+
+**No invento URLs de producto.** Ninguna API disponible aquí puede consultar
+el catálogo real de un distribuidor: SAM.gov no los da y Gemini no navega. Un
+enlace con aspecto correcto sería un 404 justo cuando lo necesites.
+
+Lo que sí hago es generar **enlaces de búsqueda de Google dirigidos con el
+operador `site:`** a los directorios estadounidenses. Comprobado:
+
+| Enlace | Estado |
+|---|---|
+| `google.com/search?q=...` | 200 con resultados |
+| `... site:thomasnet.com` | 200 **con resultados de ThomasNet** |
+| `... site:supplyhouse.com` | 200 **con resultados de Supplyhouse** |
+
+Ventajas: siempre funcionan, se actualizan solos, y devuelven páginas de
+producto reales en vez de la portada. Los sitios de distribuidores bloquean
+peticiones automáticas con 403, así que no se puede verificar uno por uno;
+por eso el vehículo es Google, que sí responde.
+
+### El capital necesario
+
+`capital_necesario` no es lo mismo que el precio de oferta ni que el valor del
+contrato: es **la plata que hay que tener en la cuenta** para comprar el
+producto y cumplir si ganas, con un colchón (`MARGEN_COLCHON`, 15%) para
+flete interno, aranceles deonnage y ajustes de cantidad. Es el número que
+importa porque no lo recuperas hasta que cobras.
+
+---
+
 ## Estructura
 
 ```

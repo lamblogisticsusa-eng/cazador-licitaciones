@@ -45,6 +45,7 @@ ESQUEMA = {
     "lugar_entrega": "str",
     "valor_contrato_usd": "num|null",
     "costo_proveedor_usd": "num|null",
+    "capital_necesario_usd": "num|null",
     "precio_unitario_referencia_usd": "num|null",
     "precio_unitario_sugerido_usd": "num|null",
     "ganancia_neta_usd": "num|null",
@@ -52,6 +53,7 @@ ESQUEMA = {
     "precio_oferta_sugerido_usd": "num|null",
     "estrategia_oferta": "str",
     "busquedas_distribuidores": "[str]",
+    "margen_por_distribuidor": "str",
     "nivel_riesgo": "bajo|medio|alto",
     "preguntas_criticas": "[str]",
     "observaciones": "str",
@@ -156,20 +158,34 @@ DESCRIPCION OFICIAL
 {descripcion if descripcion.strip() else "*** NO DISPONIBLE *** (SAM.gov respondio 404 'Description Not Found' para este aviso. Evalua SOLO con el titulo y los metadatos, y baja la certeza de tus estimaciones. Si el titulo no alcanza para saber si es producto fisico, marca viable=false.)"}
 
 SI ES VIABLE, ENTREGA:
+
   producto                      : que se compra, en espanol claro
   especificacion_tecnica_clave  : 3-5 datos tecnicos que hay que cumplir
-  cantidad_estimada            : ej. "1,200 EA", "40 LOTES", "1 servicio anual"
+  cantidad_estimada            : ej. "1,200 EA", "40 LOTES"
   valor_contrato_usd            : mejor estimacion. null si no se puede saber
-  costo_proveedor_usd           : costo estimado de compra en USA + exportacion
-  precio_unitario_referencia_usd: precio de mercado actual por unidad en USA
+  costo_proveedor_usd           : lo que cuesta COMPRAR en USA + preparar el envio
+  capital_necesario_usd         : dinero que hay que tener DISPONIBLE para poder
+                                  ofertar y cumplir si ganas. Es el costo del
+                                  producto mas un colchón de 15% para imprevistos
+                                  (flete interno, ionizedos, ajustes). No es lo
+                                  mismo que el valor del contrato.
+  precio_unitario_referencia_usd: precio de catalogo actual por unidad en USA
   precio_unitario_sugerido_usd  : tu precio por unidad para ofertar
   ganancia_neta_usd             : valor - costo proveedor
   margen_porcentaje             : ganancia / valor * 100
   precio_oferta_sugerido_usd    : total a ofertar para ganar con buen margen
   estrategia_oferta             : 2-3 frases de tactica de oferta
-  busquedas_distribuidores      : 3-6 terminos EN INGLES para buscar
-                                 distribuidores mayoristas en USA (Google,
-                                 Thomasnet, Faire, Alibaba US, Global Sources)
+  busquedas_distribuidores      : 3-5 terminos EN INGLES para buscar el
+                                 producto en catálogos de distribuidores
+                                 estadounidenses. Solo el sustantivo tecnico
+                                 del producto, sin palabras de instruccion.
+                                 Ejemplo: "bronze gate valve", "fire pump valve"
+  margen_por_distribuidor       : como varia la ganancia segun de donde se
+                                 compre. Rango tipico 15% a 35%:
+                                 - distribuidor de catalogo grande: 15-20%
+                                 - mayorista/importador: 20-25%
+                                 - fabricante directo: 25-35%
+                                 Explica en una frase donde esta el mejor margen.
   nivel_riesgo                  : bajo | medio | alto
   preguntas_criticas            : 3-5 preguntas que DEBO hacer antes de ofertar
   observaciones                 : 1-2 frases de advertencia
@@ -325,6 +341,7 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
         "lugar_entrega": str(datos.get("lugar_entrega") or lugar or "No especificado")[:150],
         "valor_contrato_usd": _num(datos.get("valor_contrato_usd")),
         "costo_proveedor_usd": _num(datos.get("costo_proveedor_usd")),
+        "capital_necesario_usd": _num(datos.get("capital_necesario_usd")),
         "precio_unitario_referencia_usd": _num(datos.get("precio_unitario_referencia_usd")),
         "precio_unitario_sugerido_usd": _num(datos.get("precio_unitario_sugerido_usd")),
         "ganancia_neta_usd": _num(datos.get("ganancia_neta_usd")),
@@ -332,6 +349,7 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
         "precio_oferta_sugerido_usd": _num(datos.get("precio_oferta_sugerido_usd")),
         "estrategia_oferta": _limpiar_ia(datos.get("estrategia_oferta"))[:700],
         "busquedas_distribuidores": _lista(datos.get("busquedas_distribuidores")),
+        "margen_por_distribuidor": _limpiar_ia(datos.get("margen_por_distribuidor"))[:600],
         "nivel_riesgo": str(datos.get("nivel_riesgo") or "medio").lower()[:10],
         "preguntas_criticas": _lista(datos.get("preguntas_criticas")),
         "observaciones": _limpiar_ia(datos.get("observaciones"))[:400],

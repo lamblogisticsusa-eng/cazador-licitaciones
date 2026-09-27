@@ -16,7 +16,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 
@@ -41,11 +41,32 @@ CREATE TABLE IF NOT EXISTS cache_descripciones (
     texto      TEXT NOT NULL,
     guardado   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS cache_busqueda (
+    notice_id    TEXT PRIMARY KEY,
+    posted_date  TEXT NOT NULL,
+    datos        TEXT NOT NULL,
+    guardado     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_busqueda_posted ON cache_busqueda(posted_date);
+CREATE TABLE IF NOT EXISTS rangos_buscados (
+    desde  TEXT NOT NULL,
+    hasta  TEXT NOT NULL,
+    dia    TEXT NOT NULL,
+    PRIMARY KEY (desde, hasta, dia)
+);
 """
 
 
 def _ahora() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _hoy() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _hace(dias: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=dias)).strftime("%Y-%m-%d")
 
 
 @contextmanager
@@ -143,6 +164,80 @@ def limpiar_cache() -> int:
     with _lock, _conexion() as c:
         n = c.execute("SELECT COUNT(*) FROM cache_descripciones").fetchone()[0]
         c.execute("DELETE FROM cache_descripciones")
+        return n
+
+
+def rango_buscado(desde: str, hasta: str) -> bool:
+    """Ese tramo de fechas ya se consulto hoy y no hay que volver a pedirlo."""
+    init_db()
+    with _lock, _conexion() as c:
+        f = c.execute(
+            "SELECT 1 FROM rangos_buscados WHERE desde=? AND hasta=? AND dia=?",
+            (desde, hasta, _hoy()),
+        ).fetchone()
+        return f is not None
+
+
+def marcar_rango(desde: str, hasta: str) -> None:
+    init_db()
+    with _lock, _conexion() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO rangos_buscados (desde, hasta, dia) VALUES (?,?,?)",
+            (desde, hasta, _hoy()),
+        )
+
+
+def guardar_busqueda(opp: dict) -> None:
+    """Cachea el aviso completo.
+
+    Con una ventana de 10 dias la API se consulta en bloques de 2 dias: son
+    5 peticiones por barrido, y con barridos cada 2 h serian 60 al dia. La
+    cache hace que los tramos ya vistos cuesten 0 peticiones y que un aviso
+    reanalizado tampoco.
+    """
+    import json as _json
+    nid = opp.get("noticeId")
+    posted = str(opp.get("postedDate") or "")
+    if not nid or not posted:
+        return
+    try:
+        datos = _json.dumps(opp, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return
+    with _lock, _conexion() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO cache_busqueda (notice_id, posted_date, datos, guardado) "
+            "VALUES (?,?,?,?)",
+            (nid, posted, datos, _ahora()),
+        )
+
+
+def desde_cache(dias: int) -> list[dict]:
+    """Avisos cacheados cuya fecha de publicacion cae en la ventana."""
+    import json as _json
+    init_db()
+    with _lock, _conexion() as c:
+        filas = c.execute(
+            "SELECT datos FROM cache_busqueda WHERE posted_date >= ?",
+            (_hace(dias),),
+        ).fetchall()
+    salida = []
+    for (crudo,) in filas:
+        try:
+            salida.append(_json.loads(crudo))
+        except ValueError:
+            continue
+    return salida
+
+
+def limpiar_cache_busqueda(dias: int = 30) -> int:
+    init_db()
+    with _lock, _conexion() as c:
+        n = c.execute(
+            "SELECT COUNT(*) FROM cache_busqueda WHERE posted_date < ?", (_hace(dias),)
+        ).fetchone()[0]
+        c.execute("DELETE FROM cache_busqueda WHERE posted_date < ?", (_hace(dias),))
+        c.execute("DELETE FROM rangos_buscados WHERE dia < ?", (_hace(3),))
         return n
 
 

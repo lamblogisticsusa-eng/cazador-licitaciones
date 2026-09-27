@@ -114,17 +114,25 @@ def formatear_analisis(a: dict) -> str:
     """Render HTML de la ficha. Todo pasa por html.escape, por eso ya no hay
     riesgo de que el texto de Gemini rompa el formato."""
     import kyo
+    import distribuidores
 
     L: list[str] = []
     L.append(kyo.cabecera_ficha())
     L.append("")
+
+    # --- Encabezado y enlace a SAM.gov ---
     L.append(f"📦 <b>{_esc(a['title'])}</b>")
     L.append(f"🔢 Solicitud: <code>{_esc(a['solicitation'])}</code>")
+    if a.get("ui_link"):
+        L.append(
+            f"🔗 <a href=\"{_esc(a['ui_link'])}\">📄 Ver aviso completo en SAM.gov</a>"
+        )
     L.append(f"🏛 <i>{_esc(a['agencia'])}</i>")
     L.append(f"🗂 NAICS <code>{_esc(a['naics'])}</code> | PSC <code>{_esc(a['psc'])}</code>")
     L.append(f"⭐ {_esc(a['set_aside'])}")
     L.append("")
 
+    # --- Que hay que entregar ---
     L.append("📝 <b>Que hay que entregar</b>")
     L.append(_esc(a["producto"]))
     if a["cantidad_estimada"]:
@@ -134,32 +142,61 @@ def formatear_analisis(a: dict) -> str:
         L.append("🔧 <b>Especificacion tecnica clave</b>")
         L.append(_esc(a["especificacion_tecnica_clave"]))
     L.append(f"📍 Destino: <b>{_esc(a['lugar_entrega'])}</b>")
-    L.append(f"⏰ Limite: <code>{_esc(a['limite'])}</code>")
+    L.append(f"⏰ Limite para ofertar: <code>{_esc(a['limite'])}</code>")
     if a.get("sin_descripcion"):
         L.append(f"⚠️ <i>{kyo.EMOCIONES['sin_descripcion']}. Las cifras son estimaciones.</i>")
     L.append("")
 
-    L.append("💰 <b>Analisis financiero</b>")
-    L.append(f"• Valor est. contrato: <b>{_usd(a['valor_contrato_usd'])}</b>")
-    L.append(f"• Costo proveedor + export: <b>{_usd(a['costo_proveedor_usd'])}</b>")
-    L.append(f"• Ganancia neta: <b>{_usd(a['ganancia_neta_usd'])}</b>"
+    # --- Dinero ---
+    L.append("💰 <b>Los numeros</b>")
+    L.append(f"• Valor del contrato: <b>{_usd(a['valor_contrato_usd'])}</b>")
+    L.append(f"• Comprar en USA: <b>{_usd(a['costo_proveedor_usd'])}</b>")
+    capital = a.get("capital_necesario_usd")
+    if capital:
+        L.append("")
+        L.append("💳 <b>Dinero que necesitas tener disponible</b>")
+        L.append(f"• Para ofertar y cumplir: <b>{_usd(capital)}</b>")
+        L.append(
+            f"<i>(compra {config.MARGEN_COLCHON * 100:.0f}% de colchón para flete, "
+            "aranceles e imprevistos. No lo recovers hasta que cobres.)</i>"
+        )
+    L.append("")
+    L.append("📈 <b>Ganancia</b>")
+    L.append(f"• Neta estimada: <b>{_usd(a['ganancia_neta_usd'])}</b>"
              + (f" ({a['margen_porcentaje']:.1f}%)" if a["margen_porcentaje"] is not None else ""))
-    L.append(f"• Precio unitario de mercado: <b>{_usd(a['precio_unitario_referencia_usd'])}</b>")
+    L.append(f"• Precio unitario de catálogo: <b>{_usd(a['precio_unitario_referencia_usd'])}</b>")
     L.append(f"• Precio unitario a ofertar: <b>{_usd(a['precio_unitario_sugerido_usd'])}</b>")
+    if a.get("margen_por_distribuidor"):
+        L.append("")
+        L.append("💡 <b>Dónde está el mejor margen</b>")
+        L.append(_esc(a["margen_por_distribuidor"]))
     L.append("")
 
+    # --- Estrategia ---
     L.append("🎯 <b>Estrategia de oferta</b>")
-    L.append(f"Monto a ofertar: <b>{_usd(a['precio_oferta_sugerido_usd'])}</b>")
+    L.append(f"Ofertar: <b>{_usd(a['precio_oferta_sugerido_usd'])}</b>")
     if a["estrategia_oferta"]:
         L.append(_esc(a["estrategia_oferta"]))
     L.append(f"Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b> {kyo.emoji_riesgo(a['nivel_riesgo'])}")
     L.append("")
 
-    if a["busquedas_distribuidores"]:
-        L.append("🔍 <b>Buscar distribuidores en USA</b>")
-        for termino in a["busquedas_distribuidores"]:
-            L.append(f"• <code>{_esc(termino)}</code>")
-        L.append("")
+    # --- Distribuidores en USA ---
+    L.append("🔍 <b>Distribuidores en USA</b>")
+    d = distribuidores.para_oportunidad(
+        a.get("busquedas_distribuidores") or [],
+        a.get("producto") or "",
+        a.get("lugar_entrega") or "",
+    )
+    etiqueta, url = d["principal"]
+    L.append(f'<a href="{_esc(url)}">{_esc(etiqueta)}</a>')
+    L.append("")
+    L.append("_Toca para abrir, ya filtrado por el producto y por USA:_")
+    for nombre, u, nota in d["sitios"]:
+        L.append(f'• <a href="{_esc(u)}">🏬 {_esc(nombre)}</a> — <i>{_esc(nota)}</i>')
+    L.append("")
+    L.append("_Para buscar a mano:_")
+    L.append(f"<code>{_esc(distribuidores.texto_plano(d['terminos']))}</code>")
+    L.append("")
 
     if a["preguntas_criticas"]:
         L.append(f"❓ <b>{kyo.PREGUNTA_ANTES}</b>")
@@ -172,8 +209,6 @@ def formatear_analisis(a: dict) -> str:
         L.append("")
 
     L.append(f"👤 Contacto: {_esc(a['contacto'])}")
-    if a["ui_link"]:
-        L.append(f"🔗 <a href=\"{_esc(a['ui_link'])}\">Ver en SAM.gov</a>")
     L.append("")
     L.append(f"<i>{kyo.CIERRE}</i>")
     return "\n".join(L)

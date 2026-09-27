@@ -26,10 +26,17 @@ services:
       # Objetivo: 10 licitaciones VIABLES al dia. Se piden 20 analisis porque
       # no todas sobreviven, y se reparten en 12 barridos de 2h para que un
       # fallo no te deje el dia entero sin nada.
+      # DIAS_DE_VENTANA=10: ademas de lo nuevo, entra lo publicado durante el
+      # fin de semana. Los sabados y domingos se publica muy poco, asi que con
+      # una ventana de 2 dias Kyomoto se quedaria sin nada que mostrarte.
       - key: DIAS_DE_VENTANA
-        value: "2"
+        value: "10"
       - key: DIAS_POR_CHUNK
-        value: "2"
+        value: "3"
+      # Horas que se puede servir una ventana desde la cache antes de volver a
+      # pedirla a la API. Debe ser MENOR que INTERVALO_HORAS.
+      - key: TTL_CACHE
+        value: "1"
       - key: PRESUPUESTO_GEMINI_DIARIO
         value: "20"
       - key: PRESUPUESTO_MINIMO
@@ -44,6 +51,8 @@ services:
         value: "250000"
       - key: MIN_USD
         value: "5000"
+      - key: MARGEN_COLCHON
+        value: "0.15"
       - key: INTERVALO_HORAS
         value: "2"
       - key: WORKERS
