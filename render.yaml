@@ -8,6 +8,9 @@ services:
     startCommand: python main.py
     healthCheckPath: /healthz
     envVars:
+      # CRITICO: sin esto Render usa Python 3.14 y el bot no arranca.
+      # Si creaste el servicio a mano y no importando este Blueprint, tienes
+      # que poner la version de Python en Settings > Environment.
       - key: PYTHON_VERSION
         value: "3.12.6"
       - key: TELEGRAM_BOT_TOKEN

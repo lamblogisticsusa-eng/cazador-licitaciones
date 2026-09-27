@@ -295,20 +295,85 @@ Comandos: `/cuota` (estado), `/puntajes` (por qué sí o no), `/estado`.
 
 ---
 
+## El deploy que murió: Python 3.14
+
+Render usa **Python 3.14.3 por defecto**, y el bot se caía de inmediato:
+
+```
+RuntimeError: There is no current event loop in thread 'MainThread'
+  File "telegram/ext/_application.py", line 1051, in __run
+    loop = asyncio.get_event_loop()
+```
+
+Lo que pasó: `python-telegram-bot` 21.10 (la versión que estaba fijada) llama
+`asyncio.get_event_loop()` desde un hilo sin bucle. En Python ≤3.11 eso creaba
+un bucle nuevo en silencio; en 3.12 se deprecó; en **3.14 lanza `RuntimeError`**.
+El servidor web ya respondía 200 y el health check pasaba, y justo después
+moría el polling.
+
+**Dos arreglos, ambos aplicados:**
+
+1. **`python-telegram-bot[job-queue]==22.8`.** Es la primera versión que
+   maneja Python 3.14 por dentro:
+   ```python
+   # This handles the Python 3.14+ behavior where get_event_loop() raises RuntimeError
+   try:
+       loop = asyncio.get_event_loop()
+   except RuntimeError:
+       loop = asyncio.new_event_loop()
+       asyncio.set_event_loop(loop)
+   ```
+
+2. **`main.py` deja el bucle listo antes de `run_polling()`**, por si alguien
+   vuelve a una versión vieja:
+   ```python
+   try:
+       _loop = asyncio.get_event_loop_policy().get_event_loop()
+       if _loop.is_closed():
+           _loop = asyncio.new_event_loop()
+   except RuntimeError:
+       _loop = asyncio.new_event_loop()
+   asyncio.set_event_loop(_loop)
+   ```
+
+3. **`PYTHON_VERSION=3.12.6` fijado en `render.yaml`**, para no depender de
+   ninguna de las dos.
+
+> **Si creaste el servicio a mano y no importando el Blueprint, el pin de
+> `render.yaml` NO se aplica.** El log lo delata: si dice
+> `Using Python version 3.14.3 (default)`, falta ponerlo en
+> **Settings → Environment → PYTHON_VERSION = 3.12.6**.
+
+`test_arranque.py` reproduce el fallo a propósito (deja el hilo sin bucle,
+comprueba que `get_event_loop()` revienta) y después verifica que el fix lo
+resuelve y que toda la API que usa Kyomoto existe en PTB 22.x. Nota: en 22.x
+`JobQueue.remove_job()` ya no existe, ahora se usa `job.remove()`.
+
+---
+
 ## Estructura
 
 ```
-config.py            variables de entorno, listas NAICS/PSC, palabras clave
+config.py            variables de entorno, listas NAICS/PSC, descalificadores
 sam_api.py           cliente SAM.gov: troceo de fechas, noticedesc, reintentos
-filters.py           pre-filtrado gratis por NAICS + palabras (costo 0 de API)
+filters.py           pre-filtrado gratis: NAICS, palabras, valor de contrato
 gemini_analyzer.py   evaluación con Gemini, devuelve JSON, errores visibles
 scanner.py           orquesta: trae → filtra → puntúa → analiza → notifica
 telegram_notify.py   envío seguro en HTML, troceado, con escape
+quota.py             presupuesto diario de Gemini, adaptativo y persistente
+kyo.py               la voz de Kyomoto (tono kawaii, saludos, emojis)
 label.py             etiqueta de envío y packing list en PDF (reportlab)
 store.py             SQLite: qué ya se notificó
 main.py              bot de Telegram, comandos, servidor web de salud
+test_arranque.py     reproduce el crash de Python 3.14 y verifica el fix
 test_pipeline.py     prueba el pipeline real contra SAM.gov
+test_valor.py        prueba el extractor de valor de contrato
+test_cuota.py        prueba el presupuesto diario
+test_descalificadores.py  prueba que los descalificadores funcionan
+test_presupuesto.py  prueba que la cuota manda sobre MAX_A_GEMINI
 test_render.py       prueba escape HTML, troceado, PDF y fuga de secretos
+test_deploy.py       prueba firmas, imports, render.yaml y el fix de 3.14
+test_real.py         prueba con SAM.gov y Gemini reales, sin simulaciones
 ```
 
 ## Probarlo en local

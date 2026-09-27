@@ -497,6 +497,28 @@ def main() -> None:
     app = _crear_app()
     app.post_init = _post_init
     app.post_shutdown = _post_shutdown
+
+    # --- Este bloque es la diferencia entre funcionar y caerse. ---
+    #
+    # python-telegram-bot, al arrancar, hace asyncio.get_event_loop() desde un
+    # hilo sin bucle. En Python <=3.11 eso creaba un bucle nuevo en silencio.
+    # En Python 3.12 se deprecó, y en 3.14 LANZA:
+    #
+    #   RuntimeError: There is no current event loop in thread 'MainThread'
+    #
+    # Render usa Python 3.14 por defecto, asi que sin esto el deploy muere
+    # apenas arranca (aunque el servidor web ya responda 200). Crear el bucle
+    # aqui y dejarlo como actual hace que get_event_loop() lo encuentre, sin
+    # importar la version de Python ni la de PTB.
+    try:
+        _loop = asyncio.get_event_loop_policy().get_event_loop()
+        if _loop.is_closed():
+            _loop = asyncio.new_event_loop()
+    except RuntimeError:
+        _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+    log.info("Bucle de eventos listo: %s", type(_loop).__name__)
+
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=["message"],

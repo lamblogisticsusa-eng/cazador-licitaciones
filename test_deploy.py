@@ -144,6 +144,47 @@ for clave in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SAM_API_KEY", "GEMINI_A
 print()
 
 print("=" * 70)
+print("5) EL FALLO DE RENDER: PYTHON 3.14 + PTB VIEJO")
+print("=" * 70)
+with open("requirements.txt", encoding="utf-8") as f:
+    req = f.read()
+check("PTB >= 22.8 (la primera que tolera Python 3.14)",
+      "python-telegram-bot[job-queue]==22.8" in req,
+      "-> falta el pin a 22.8 en requirements.txt")
+check("Se explica el porque en los comentarios", "3.14" in req)
+check("Se documenta el sintoma del crash",
+      "There is no current event loop" in req)
+
+with open("main.py", encoding="utf-8") as f:
+    src_main = f.read()
+check("main.py crea el bucle de eventos",
+      "asyncio.set_event_loop" in src_main and "new_event_loop" in src_main)
+check("run_polling viene DESPUES de fijar el bucle",
+      src_main.index("asyncio.set_event_loop") < src_main.index("app.run_polling"))
+check("El except cubre RuntimeError (comportamiento de 3.14)",
+      "except RuntimeError" in src_main)
+
+with open("render.yaml", encoding="utf-8") as f:
+    ry = f.read()
+check("render.yaml fija PYTHON_VERSION", "PYTHON_VERSION" in ry)
+
+# Hay que mirar el VALOR del pin, no la palabra "3.14": el archivo la menciona
+# a proposito, en el comentario que advierte del crash.
+import re
+m = re.search(r"PYTHON_VERSION\s*\n\s*value:\s*[\"']?([0-9.]+)", ry)
+check("El pin de Python se pudo leer", m is not None)
+if m:
+    version = m.group(1)
+    print(f"       -> PYTHON_VERSION = {version}")
+    major, minor = (version.split(".") + ["0"])[:2]
+    check("No es 3.14 (la version que rompia el arranque)",
+          not version.startswith("3.14"), f"-> {version}")
+    check("Es 3.11 o posterior (sintaxis moderna del proyecto)",
+          (int(major), int(minor)) >= (3, 10), f"-> {version}")
+check("El pin de Python lleva comentario de alerta", "CRITICO" in ry)
+print()
+
+print("=" * 70)
 if FALLA:
     print(f"RESULTADO: {FALLA} fallo(s) de despliegue")
     sys.exit(1)

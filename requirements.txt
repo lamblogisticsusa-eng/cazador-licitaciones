@@ -1,10 +1,17 @@
 # Kyomoto - dependencias
-python-telegram-bot[job-queue]==21.10
-google-genai>=1.0.0
+#
+# IMPORTANTE: python-telegram-bot 22.8 es la primera version que tolera
+# Python 3.14. Con 21.10 el deploy muere al arrancar con:
+#   RuntimeError: There is no current event loop in thread 'MainThread'
+# porque PTB >=21.10 <=21.x llama a asyncio.get_event_loop() y en Python
+# 3.14 eso lanza RuntimeError en vez de crear un bucle.
+python-telegram-bot[job-queue]==22.8
+
+google-genai>=2.25.0
 requests>=2.32.0
-Flask>=3.0.0
+Flask>=3.1.0
 reportlab>=4.2.0
 
-# gunicorn ya no se usa: el servicio corre con "python main.py"
-# porque el bot necesita run_polling(), no un servidor WSGI de workers.
+# gunicorn NO se usa: el servicio corre con "python main.py" porque el bot
+# necesita run_polling() en primer plano, no un servidor WSGI de workers.
 # python-docx se elimino: no se usaba en ningun modulo.
