@@ -222,51 +222,76 @@ módulo.
 
 ---
 
-## Diseñado para 10 análisis al día con el plan gratuito
+## Diseñado para 10 licitaciones VIABLES al día con el plan gratuito
 
-No necesitas tarjeta. Kyomoto se auto-limita y aprovecha cada llamada.
+Sin tarjeta. Kyomoto se auto-limita y aprovecha cada llamada.
 
-**1. Presupuesto diario (`quota.py`)**
-`PRESUPUESTO_GEMINI_DIARIO = 10`. El contador vive en SQLite, sobrevive a los
-reinicios de Render y reinicia a la **medianoche del Pacífico**, que es cuando
-Google reinicia su cuota. Si ya se gastaron las 10, el escaneo no intenta ni una
-llamada más y te lo dice. Comando `/cuota` para verlo.
+**El problema real: la tasa de conversión.** En los primeros análisis contra
+SAM.gov, de cada 6 oportunidades evaluadas **solo 1 salía viable** (17%). Con
+10 llamadas eso eran 2 licitaciones, no 10. Los motivos se repetían siempre:
 
-**2. Filtro de valor por texto (`filters.valor_declarado`)**
-SAM.gov no permite filtrar por monto, pero la descripción del aviso suele
-decirlo: *"Indefinite Delivery Contract: Estimated quantity 2.000 ; Not to
-Exceed 350,000.00"*. Kyomoto extrae ese número con regex y **descarta el
-contrato antes de gastar una llamada de Gemini**. Medido: 9 de 20 avisos
-descartados por monto, sin tocar la cuota.
+| Motivo del descarte | Frecuencia |
+|---|---|
+| Certificaciones (DD2345, FAT, Level I, clearance) | ~40% |
+| Destino en el extranjero | ~20% |
+| Contrato sobre $250.000 | ~15% |
+| Es servicio (Overhaul/Rebuild) | ~15% |
 
-**3. Ritmo lento**
-`GEMINI_WORKERS=1` y `GEMINI_PAUSA_SEG=8`. Nada de paralelismo. Los límites
-exactos de RPM/TPM/RPD del plan gratis no son públicos (solo se ven en AI
-Studio), así que el código no los necesita conocer: se autolimita.
+Esos cuatro son detectables **por texto, gratis**. Eso es lo que cambió el
+resultado.
 
-**4. Lo que no se analiza, no se pierde**
+### Las cinco capas del embudo
+
+**1. Presupuesto diario adaptativo (`quota.py`)**
+`PRESUPUESTO_GEMINI_DIARIO=20`, repartido en 4 barridos de 4. El contador vive
+en SQLite, sobrevive a los reinicios de Render y reinicia a la **medianoche
+del Pacífico**, que es cuando Google reinicia su cuota.
+
+Es adaptativo porque los límites de RPM/TPM/RPD del plan gratuito **no son
+públicos**: solo se ven dentro de AI Studio. En vez de adivinar, Kyomoto mira
+qué pasó ayer: si hubo 429 baja el listón (hasta un piso de 10), si terminó
+limpio lo mantiene.
+
+**2. Descalificadores por texto (`config.PALABRAS_CERTIFICACION` y compañía)**
+Certificaciones inaccesibles −7, destino en el extranjero −9 (veto), servicio
+disfrazado de producto −5. Todo antes de gastar una llamada.
+
+Medido sobre casos reales: los que Gemini descartaba quedaron en 0-3 puntos,
+muy por debajo del piso de 6. Las buenas quedaron en 8-13.
+
+**3. El tope de USD, en texto (`filters.valor_declarado`)**
+SAM.gov no deja filtrar por monto, pero la descripción lo dice:
+*"Indefinite Delivery Contract: Estimated quantity 2.000 ; Not to Exceed
+350,000.00"*. Kyomoto extrae el número con regex y **descarta el contrato sin
+tocar la cuota**. Medido: 5 de 12 avisos eliminados por monto.
+
+**4. Ritmo serializado**
+`GEMINI_WORKERS=1`, `GEMINI_PAUSA_SEG=8`. Nada de paralelismo.
+
+**5. Lo que no se analiza, no se pierde**
 Si se acaba la cuota, los avisos **no se marcan como vistos**. Mañana vuelven a
-la cola. Nada se pierde por un 429.
+la cola.
 
-**Medición real del embudo en 2 días** (661 avisos):
+### Medición real del embudo (2 días, 661 avisos)
 
 ```
 661 avisos de SAM.gov
-  -> 329  tras el veto por NAICS
-  ->  74  tras puntaje, duplicados y rango de USD
-  ->  10  analizados con Gemini   <- el presupuesto diario
+  -> 329  veto por NAICS (servicios, construcción, IT fuera)
+  -> 233  sin duplicados, sin descalificadores, dentro del rango de USD
+  ->   4  analizados por barrido  (20 al día en 4 barridos)
+  ->  ~3  viables por barrido    (~10-12 al día)
 ```
 
-Los 10 son los de mayor puntaje, no los primeros que aparecieron.
-
-### Ajustes si quieres más o menos
+### Ajustes
 
 | Querés | Cambiá |
 |---|---|
-| Más de 10 al día | `PRESUPUESTO_GEMINI_DIARIO=20` (y sube `GEMINI_PAUSA_SEG`) |
+| Más viable por día | `PRESUPUESTO_GEMINI_DIARIO=30` y sube `GEMINI_PAUSA_SEG` |
 | Menos ruido | `PUNTAJE_MINIMO=8` |
-| Más avisos pequeños | `PUNTAJE_MINIMO=4` |
-| Revisar más días | `DIAS_DE_VENTANA=5` |
+| Más avisos chicos | `PUNTAJE_MINIMO=4` |
+| Revisar más días | `DIAS_DE_VENTANA=3` |
+
+Comandos: `/cuota` (estado), `/puntajes` (por qué sí o no), `/estado`.
 
 ---
 

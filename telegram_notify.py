@@ -113,8 +113,10 @@ def _usd(valor) -> str:
 def formatear_analisis(a: dict) -> str:
     """Render HTML de la ficha. Todo pasa por html.escape, por eso ya no hay
     riesgo de que el texto de Gemini rompa el formato."""
+    import kyo
+
     L: list[str] = []
-    L.append("✨ <b>Kyomoto encontro una oportunidad</b> ✨")
+    L.append(kyo.cabecera_ficha())
     L.append("")
     L.append(f"📦 <b>{_esc(a['title'])}</b>")
     L.append(f"🔢 Solicitud: <code>{_esc(a['solicitation'])}</code>")
@@ -134,10 +136,7 @@ def formatear_analisis(a: dict) -> str:
     L.append(f"📍 Destino: <b>{_esc(a['lugar_entrega'])}</b>")
     L.append(f"⏰ Limite: <code>{_esc(a['limite'])}</code>")
     if a.get("sin_descripcion"):
-        L.append(
-            "⚠️ <i>SAM.gov no publico descripcion para este aviso: las cifras de "
-            "abajo son estimaciones por titulo. Confirma leyendo el aviso completo.</i>"
-        )
+        L.append(f"⚠️ <i>{kyo.EMOCIONES['sin_descripcion']}. Las cifras son estimaciones.</i>")
     L.append("")
 
     L.append("💰 <b>Analisis financiero</b>")
@@ -153,7 +152,7 @@ def formatear_analisis(a: dict) -> str:
     L.append(f"Monto a ofertar: <b>{_usd(a['precio_oferta_sugerido_usd'])}</b>")
     if a["estrategia_oferta"]:
         L.append(_esc(a["estrategia_oferta"]))
-    L.append(f"Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b>")
+    L.append(f"Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b> {kyo.emoji_riesgo(a['nivel_riesgo'])}")
     L.append("")
 
     if a["busquedas_distribuidores"]:
@@ -163,7 +162,7 @@ def formatear_analisis(a: dict) -> str:
         L.append("")
 
     if a["preguntas_criticas"]:
-        L.append("❓ <b>Antes de ofertar, confirmar</b>")
+        L.append(f"❓ <b>{kyo.PREGUNTA_ANTES}</b>")
         for p in a["preguntas_criticas"]:
             L.append(f"• {_esc(p)}")
         L.append("")
@@ -176,7 +175,7 @@ def formatear_analisis(a: dict) -> str:
     if a["ui_link"]:
         L.append(f"🔗 <a href=\"{_esc(a['ui_link'])}\">Ver en SAM.gov</a>")
     L.append("")
-    L.append("<i>Kyomoto passandote la info para que tu llegue a tiempo ✿</i>")
+    L.append(f"<i>{kyo.CIERRE}</i>")
     return "\n".join(L)
 
 

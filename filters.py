@@ -46,6 +46,35 @@ def es_bien_por_naics(opp: dict) -> bool | None:
     return None
 
 
+def _pais_extranjero(opp: dict) -> tuple[str, bool]:
+    """
+    Devuelve (pais, es_confiable) si el lugar de entrega NO es Estados Unidos.
+
+    es_confiable=True cuando el countryCode de la API lo dice. False cuando
+    solo aparece el nombre en el texto, que puede ser incidental ("fabricado
+    en Alemania" en un aviso que se entrega en Ohio).
+    """
+    pop = opp.get("placeOfPerformance") or {}
+    pais = pop.get("country")
+    codigo = ""
+    if isinstance(pais, dict):
+        codigo = str(pais.get("code") or pais.get("name") or "").upper()
+    if codigo and codigo not in ("USA", "US", "UNITED STATES", "AMERICA"):
+        return codigo, True
+
+    crudo = " ".join(
+        str(pop.get(clave, "")) for clave in ("city", "country", "state")
+    ).lower()
+    if not crudo.strip():
+        ofi = opp.get("officeAddress") or {}
+        crudo = f"{ofi.get('city','')} {ofi.get('countryCode','')}".lower()
+
+    for nombre in config.PAISES_EXTRANJEROS:
+        if nombre in crudo:
+            return nombre, False
+    return "", False
+
+
 def _coincide(texto: str, diccionario: set) -> int:
     return sum(1 for palabra in diccionario if palabra in texto)
 
@@ -102,7 +131,40 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     if "supplies" in titulo or "materials" in titulo or "equipment" in titulo:
         puntos += 1
 
-    # --- Set aside para small business (te abre puertas) ---
+    # --- Descalificadores que se repiten en cada analisis real -------------
+    # Se detectan aqui para no gastar una de las 10 llamadas diarias en
+    # descubrir lo que ya sabemos. Peso alto, no veto: si queda duda, que lo
+    # decida Gemini con la descripcion completa.
+
+    certs = [c for c in config.PALABRAS_CERTIFICACION if c in combo]
+    if certs:
+        # "or equal" y "authorized distributor" son condicionantes suaves;
+        # las certificaciones de seguridad si son un veto practico.
+        duros = [c for c in certs if c in config.PALABRAS_CERTIFICACION_DUROS]
+        if duros:
+            puntos -= 7
+            motivos.append(f"certificacion inaccesible: {duros[0][:40]}")
+        else:
+            puntos -= 3
+            motivos.append(f"condicionante: {certs[0][:40]}")
+
+    servicios = [s for s in config.PALABRAS_SERVICIO_OCULTO if s in combo]
+    if servicios:
+        puntos -= 5
+        motivos.append(f"es servicio, no venta: {servicios[0][:36]}")
+
+    pais, fiable = _pais_extranjero(opp)
+    if pais and fiable:
+        # El countryCode de la API lo dice: veto practico. Kyomoto despacha
+        # desde Chile, no puede servir una base en Dubai.
+        puntos -= 9
+        motivos.append(f"DESTINO EN EL EXTRANJERO ({pais}): no despachable")
+    elif pais:
+        # Solo aparece en el texto; puede ser incidental ("fabricado en
+        # Alemania" de algo que se entrega en Ohio). Penaliza, no veta.
+        puntos -= 5
+        motivos.append(f"menciona destino extranjero ({pais}): revisar")
+
     set_aside = str(opp.get("typeOfSetAside") or "").upper()
     if set_aside in ("BPA", "SBA", "TOTAL", "EDWOSB", "WOSB", "HBC", "SDVOSBC", "VOSBC"):
         puntos += 1

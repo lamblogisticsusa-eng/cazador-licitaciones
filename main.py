@@ -318,22 +318,16 @@ async def cmd_escaneo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not resumen["candidatas"]:
         cuerpo = (
             "🤍 <b>Sin novedades, amo</b>\n\n"
-            f"Revise {resumen['traidas']} avisos de SAM.gov en {dias} dias y "
-            "ninguno era compra de producto.\n\n"
+            f"Kyomoto reviso {resumen['traidas']} avisos de SAM.gov en {dias} dias "
+            "y ninguno era compra de producto.\n\n"
             "Prueba con mas dias: <code>/escaneo 14</code>"
         )
     else:
-        cuerpo = (
-            f"✨ <b>Escaneo terminado, amo</b> ✨\n\n"
-            f"• Avisos revisados: {resumen['traidas']}\n"
-            f"• Candidato a producto: {resumen['candidatas']}\n"
-            f"• Pasaron el filtro: {resumen['puntuales']}\n"
-            f"• Analizados por Kyomoto: {resumen['analizadas']}\n"
-            f"• <b>Viables: {resumen['viables']}</b>\n"
-            f"• Notificados: {resumen['notificadas']}\n"
+        import kyo
+        cuerpo = kyo.resumen_escaneo(resumen) + (
+            "\n\n<i>Las fichas viables llegaron justo antes de este mensaje.</i>"
+            if resumen["viables"] and not config.DRY_RUN else ""
         )
-        if not config.DRY_RUN and resumen["viables"] == 0 and resumen["analizadas"] > 0:
-            cuerpo += "\n<i>Los analisis de arriba los puedes ver con /puntajes</i>"
     try:
         await aviso.edit_text(cuerpo, parse_mode=ParseMode.HTML)
     except Exception:

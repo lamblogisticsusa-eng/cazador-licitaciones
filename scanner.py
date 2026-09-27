@@ -238,12 +238,13 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         )
         return resumen
 
-    top = min(len(puntuadas), config.MAX_A_GEMINI, presupuesto["restantes"])
+    top = min(len(puntuadas), config.MAX_A_GEMINI,
+              quota.por_barrido(), presupuesto["restantes"])
     a_analizar = puntuadas[:top]
     resumen["analizadas"] = len(a_analizar)
     avisar(
         f"🧠 Analizando {top} con Gemini "
-        f"({presupuesto['restantes']} de presupuesto libre)..."
+        f"({presupuesto['restantes']} de presupuesto libre hoy)..."
     )
 
     fallos_gemini: list[str] = []

@@ -70,12 +70,13 @@ def estado() -> dict:
             "SELECT llamadas, fallidas FROM uso_gemini WHERE dia = ?", (hoy_pacifico(),)
         ).fetchone()
     usadas, fallidas = (fila or (0, 0))
-    presupuesto = config.PRESUPUESTO_GEMINI_DIARIO
+    presupuesto = presupuesto_ajustado()
     return {
         "dia": hoy_pacifico(),
         "usadas": usadas,
         "fallidas": fallidas,
         "presupuesto": presupuesto,
+        "configurado": config.PRESUPUESTO_GEMINI_DIARIO,
         "restantes": max(0, presupuesto - usadas),
         "agotado": usadas >= presupuesto,
     }
@@ -126,9 +127,55 @@ def limpiar_reservas() -> int:
         return n
 
 
+def limpiar() -> int:
+    """Borra el conteo de hoy. Solo para pruebas; el bot nunca lo llama."""
+    with _lock, _conexion() as c:
+        n = c.execute("SELECT COUNT(*) FROM uso_gemini").fetchone()[0]
+        c.execute("DELETE FROM uso_gemini")
+        c.execute("DELETE FROM vista_quota")
+        return n
+
+
 def dias_registrados() -> list[dict]:
     with _lock, _conexion() as c:
         filas = c.execute(
             "SELECT dia, llamadas, fallidas FROM uso_gemini ORDER BY dia DESC LIMIT 14"
         ).fetchall()
     return [{"dia": f[0], "llamadas": f[1], "fallidas": f[2]} for f in filas]
+
+
+def presupuesto_ajustado() -> int:
+    """
+    Aprende de la historia para no repetir el mismo error.
+
+    Los limites RPM/TPM/RPD del plan gratuito no son publicos: no aparecen en
+    la documentacion, solo dentro de AI Studio. Asi que en vez de adivinar un
+    numero fijo, Kyomoto observa que paso ayer y baja el liston si se topo:
+
+      - si ayer hubo fallos por cuota, hoy se pide menos
+      - si ayer se completo sin fallos, hoy se pide un poco mas
+      - nunca baja de PRESUPUESTO_MINIMO ni sube de PRESUPUESTO_GEMINI_DIARIO
+
+    Asi el presupuesto se ajusta solo la primera semana y despues se estabiliza.
+    """
+    base = config.PRESUPUESTO_GEMINI_DIARIO
+    piso = min(config.PRESUPUESTO_MINIMO, base)
+    filas = dias_registrados()[:3]
+    if not filas:
+        return base
+    top = filas[0]
+    if top["fallidas"] > 0 and top["llamadas"] >= base:
+        return max(piso, base - 3)
+    if top["fallidas"] == 0 and top["llamadas"] >= base:
+        return base  # se completo el liston sin problemas: no subir mas
+    return base
+
+
+def por_barrido() -> int:
+    """
+    Cuantas llamadas usar en UN barrido. Se reparten a lo largo del dia para
+    no gastar todo de golpe y para que, si un barrido falla, los siguientes
+    cubran la cuota.
+    """
+    barridos = max(1, int(24 / max(config.INTERVALO_HORAS, 0.5)))
+    return max(1, presupuesto_ajustado() // barridos)

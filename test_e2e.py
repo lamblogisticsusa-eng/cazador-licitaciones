@@ -18,6 +18,7 @@ os.environ["DIAS_DE_VENTANA"] = "3"
 os.environ["DIAS_POR_CHUNK"] = "2"
 
 import gemini_analyzer
+import quota
 import scanner
 import store
 import telegram_notify as tn
@@ -49,17 +50,36 @@ print("=" * 70)
 
 LLAMADAS = {"n": 0}
 
+# Como decide la IA real: viable salvo que sea servicio, exija certificacion
+# inaccesible o el destino sea el extranjero. Antes este mock solo aceptaba
+# titulos con "PART" o "KIT", lo cual era una aproximacion tan pobre que el
+# filtro mejorado de descalificadores empezo a promover oportunidades que el
+# mock rechazaba.
+DESCARTABLES = {
+    "overhaul", "rebuild", "repair", "refurbish", "maintenance",
+    "dd2345", "security clearance", "first article", "installation",
+    "consulting", "training", "software",
+}
+
+
+def _viable(titulo: str, desc: str) -> tuple[bool, str]:
+    texto = f"{titulo} {desc}".lower()
+    for palabra in DESCARTABLES:
+        if palabra in texto:
+            return False, f"exige {palabra} o es servicio"
+    return True, ""
+
 
 def gemini_falso(opp, descripcion, lugar=""):
     LLAMADAS["n"] += 1
     titulo = opp.get("title", "")
+    ok, motivo = _viable(titulo, descripcion)
     return {
         "notice_id": opp["noticeId"],
-        "viable": "PART" in titulo.upper() or "KIT" in titulo.upper() or "EPI" in titulo.upper(),
-        "motivo_descarte": "" if "PART" in titulo.upper() else "es un servicio, no producto",
+        "viable": ok,
+        "motivo_descarte": motivo,
         "sin_descripcion": not descripcion.strip(),
         "producto": f"Producto de prueba para {titulo[:30]}",
-        "especificacion_tecnica_clave": "Norma ISO 9001, acero 316L",
         "cantidad_estimada": "500 EA",
         "lugar_entrega": lugar or "Portland / Oregon / UNITED STATES",
         "valor_contrato_usd": 120000.0,
@@ -74,6 +94,7 @@ def gemini_falso(opp, descripcion, lugar=""):
         "nivel_riesgo": "medio",
         "preguntas_criticas": ["¿Aceptan marcas equivalentes?"],
         "observaciones": "",
+        "especificacion_tecnica_clave": "Norma ISO 9001, acero 316L",
         "naics": opp.get("naicsCode", ""),
         "psc": opp.get("classificationCode", ""),
         "solicitation": opp.get("solicitationNumber", "N/A"),
@@ -92,6 +113,10 @@ scanner.gemini_analyzer.analizar = gemini_falso
 
 store.init_db()
 store.limpiar()
+# El presupuesto diario de Gemini vive en la misma base y persiste entre
+# corridas. Sin esto, la segunda vez que se corre el test no analizaría nada.
+quota.init()
+quota.limpiar()
 t0 = time.time()
 r = scanner.escanear("123456", dias=3)
 print(f"  Tiempo: {time.time() - t0:.1f}s")

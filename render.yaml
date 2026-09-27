@@ -20,13 +20,19 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-3.8-flash
-      # 5 a 10 oportunidades diarias, las mejores segun el puntaje.
+      # Objetivo: 10 licitaciones VIABLES al dia. Se piden 20 analisis porque
+      # no todas sobreviven, y se reparten en 4 barridos (4 c/u) para que un
+      # fallo no te deje el dia entero sin nada.
       - key: DIAS_DE_VENTANA
-        value: "3"
+        value: "2"
       - key: DIAS_POR_CHUNK
         value: "2"
-      - key: MAX_A_GEMINI
+      - key: PRESUPUESTO_GEMINI_DIARIO
+        value: "20"
+      - key: PRESUPUESTO_MINIMO
         value: "10"
+      - key: MAX_A_GEMINI
+        value: "4"
       - key: MAX_NOTIFICACIONES
         value: "10"
       - key: PUNTAJE_MINIMO
@@ -36,11 +42,9 @@ services:
       - key: MIN_USD
         value: "5000"
       - key: INTERVALO_HORAS
-        value: "24"
+        value: "4"
       - key: WORKERS
         value: "8"
-      - key: PRESUPUESTO_GEMINI_DIARIO
-        value: "10"
       - key: GEMINI_WORKERS
         value: "1"
       - key: GEMINI_PAUSA_SEG

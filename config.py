@@ -38,16 +38,16 @@ DIAS_POR_CHUNK = _int("DIAS_POR_CHUNK", 2)
 LIMITE_POR_CHUNK = _int("LIMITE_POR_CHUNK", 1000)
 MAX_CHUNKS = _int("MAX_CHUNKS", 10)
 
-# Cuantas oportunidades pasan a Gemini en cada barrido.
-# El tope real lo impone PRESUPUESTO_GEMINI_DIARIO; este es el maximo por
-# barrido, por si acaso se corre el escaneo mas de una vez al dia.
-MAX_A_GEMINI = _int("MAX_A_GEMINI", 10)
-# Lo que el usuario quiere: 10 analyses solidos al dia, con el plan gratis.
-# Google reinicia su cuota a la medianoche del Pacifico (ver quota.py).
-PRESUPUESTO_GEMINI_DIARIO = _int("PRESUPUESTO_GEMINI_DIARIO", 10)
+# Objetivo del usuario: 10 licitaciones VIABLES al dia. Como no todas las
+# analizadas sobreviven, se piden mas de las que quieres recibir.
+PRESUPUESTO_GEMINI_DIARIO = _int("PRESUPUESTO_GEMINI_DIARIO", 20)
+# Suelo del auto-ajuste: nunca baja de 10, asi siempre hay 10 analisis.
+PRESUPUESTO_MINIMO = _int("PRESUPUESTO_MINIMO", 10)
+# Cuantas por barrido. quota.por_barrido() reparte el presupuesto diario
+# entre los barridos: con 4 barridos y 16 de presupuesto, 4 por barrido.
+MAX_A_GEMINI = _int("MAX_A_GEMINI", 4)
 # Piso de puntaje. Subirlo deja solo lo mas limpio a costa de revisar menos.
 PUNTAJE_MINIMO = _int("PUNTAJE_MINIMO", 6)
-# Cuantas descripciones bajamos de la API antes de puntuar en detalle.
 MAX_DESCRIPCIONES = _int("MAX_DESCRIPCIONES", 40)
 # Tope duro de avisos que te llegan por barrido, ordenados por puntaje.
 # Esto es lo que hace que recibas 5-10 buenos y no 25 mediocres.
@@ -83,10 +83,10 @@ TIMEOUT_HTTP = _int("TIMEOUT_HTTP", 45)
 MAX_REINTENTOS = _int("MAX_REINTENTOS", 3)
 
 # --- Operacion ---
-# Kyomoto revisa una vez al dia: SAM.gov publica ~450 avisos diarios, asi que
-# cada 4 horas solo repetiria barridos para no encontrar nada nuevo y gastar
-# cuota de Gemini al pedo.
-INTERVALO_HORAS = _float("INTERVALO_HORAS", 24)
+# Cuatro barridos al dia reparten las llamadas de Gemini: si uno falla, los
+# otros tres cubren la cuota, y nunca se piden 10 seguidas. Con 1 solo
+# barrido diario, un fallo te deja el dia entero sin nada.
+INTERVALO_HORAS = _float("INTERVALO_HORAS", 4)
 DB_PATH = os.getenv("DB_PATH", "licitaciones.db")
 DRY_RUN = _bool("DRY_RUN", False)  # True = no envia mensajes, solo loguea
 ETIQUETAS_DIR = os.getenv("ETIQUETAS_DIR", "etiquetas")
@@ -174,9 +174,75 @@ PSC_BIENES = {
     "7690",  # miscelaneos de fabricacion
 }
 
+# ==========================================================================
+#  DESCALIFICADORES QUE APRENDI DE LOS ANALISIS REALES
+#
+#  Medido sobre avisos reales de SAM.gov: de cada 6 que evaluo Gemini, solo
+#  1 sale viable. Las causas se repiten siempre, y la mayoria se pueden
+#  detectar por texto ANTES de gastar una llamada. Esto es lo que sube la
+#  tasa de acierto del presupuesto diario.
+# ==========================================================================
+
+# Certificaciones y accesos que una empresa en Chile no puede obtener.
+# Peso alto: si aparece, casi siempre es descarte.
+PALABRAS_CERTIFICACION = {
+    "dd2345", "dd233", "data custodian", "security clearance", "clearance level",
+    "secret clearance", "top secret", "public trust", "faci", "fobs",
+    "first article testing", "first article approval", "fat", "faa",
+    "certificate of conformance", "certification level i", "level i scope",
+    "special security agreement", "cage code", "facility clearance",
+    "nispom", "nist sp 800-171", "defense industrial base", "dib",
+    "itar", "export control", "technology control plan",
+    "iso 9001", "as9100", "nadcap", "six sigma", "itpsr",
+    "oem approved", "manufacturer authorized", "authorized distributor",
+    "sole source", "sole-source", "brand name only", "or equal",
+}
+
+# Servicio disfrazado de producto: la palabra "repair"/"overhaul" convierte la
+# venta en un servicio, y los servicios no son el negocio.
+PALABRAS_SERVICIO_OCULTO = {
+    "overhaul", "rebuild", "refurbish", "refurbishment", "remanufactur",
+    "repair of", "repair services", "maintenance of", "servicing",
+    "installation of", "install and", "furnish and install",
+    "calibration service", "technician", "technicians", "labor",
+}
+
+# Las de arriba que SI son un veto practico para un proveedor extranjero.
+# "or equal" o "authorized distributor" son negociables, estas no.
+PALABRAS_CERTIFICACION_DUROS = {
+    "dd2345", "dd233", "data custodian", "security clearance", "clearance level",
+    "secret clearance", "top secret", "public trust", "first article testing",
+    "first article approval", "certificate of conformance", "certification level i",
+    "level i scope", "special security agreement", "cage code",
+    "facility clearance", "nispom", "nist sp 800-171", "itar", "export control",
+    "defense industrial base", "sole source", "sole-source", "brand name only",
+    "oem approved", "manufacturer authorized", "authorized distributor",
+}
+
+# Paises fuera de EE.UU. no son despachables para un proveedor en Chile.
+PAISES_EXTRANJEROS = {
+    "united arab emirates", "uae", "afghanistan", "albania", "algeria",
+    "argentina", "australia", "austria", "bahrain", "bangladesh",
+    "belgium", "bolivia", "brazil", "bulgaria", "cambodia", "cameroon",
+    "canada", "chile", "china", "colombia", "croatia", "cyprus", "czech",
+    "ecuador", "egypt", "estonia", "ethiopia", "france", "georgia",
+    "germany", "ghana", "greece", "guatemala", "honduras", "hungary",
+    "india", "indonesia", "iraq", "ireland", "israel", "italy", "japan",
+    "jordan", "kazakhstan", "kenya", "korea", "kuwait", "latvia",
+    "lebanon", "libya", "lithuania", "luxembourg", "malaysia", "mali",
+    "mexico", "mongolia", "morocco", "nepal", "nicaragua", "nigeria",
+    "norway", "pakistan", "panama", "paraguay", "peru", "philippines",
+    "poland", "portugal", "qatar", "romania", "russia", "saudi arabia",
+    "senegal", "serbia", "singapore", "slovakia", "slovenia", "somalia",
+    "south africa", "spain", "sri lanka", "sudan", "sweden", "switzerland",
+    "syria", "taiwan", "tanzania", "thailand", "tunisia", "turkey",
+    "uganda", "ukraine", "united kingdom", "uruguay", "uzbekistan",
+    "venezuela", "vietnam", "yemen", "zambia", "zimbabwe",
+    "africa", "europe", "middle east", "asia", "overseas", "foreign",
+}
+
 # Palabras que delatan un producto fisico.
-PALABRAS_PRODUCTO = {
-    "supply", "supplies", "material", "materials", "equipment", "part", "parts",
+PALABRAS_PRODUCTO = {    "supply", "supplies", "material", "materials", "equipment", "part", "parts",
     "component", "components", "furniture", "appliance", "appliances", "tool", "tools",
     "hardware", "fastener", "fasteners", "fittings", "valve", "valves", "filter", "filters",
     "battery", "batteries", "packaging", "uniform", "uniforms", "ppe",
