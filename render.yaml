@@ -24,7 +24,7 @@ services:
       - key: GEMINI_MODEL
         value: gemini-3.8-flash
       # Objetivo: 10 licitaciones VIABLES al dia. Se piden 20 analisis porque
-      # no todas sobreviven, y se reparten en 4 barridos (4 c/u) para que un
+      # no todas sobreviven, y se reparten en 12 barridos de 2h para que un
       # fallo no te deje el dia entero sin nada.
       - key: DIAS_DE_VENTANA
         value: "2"
@@ -45,7 +45,7 @@ services:
       - key: MIN_USD
         value: "5000"
       - key: INTERVALO_HORAS
-        value: "4"
+        value: "2"
       - key: WORKERS
         value: "8"
       - key: GEMINI_WORKERS

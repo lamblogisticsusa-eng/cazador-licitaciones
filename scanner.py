@@ -62,25 +62,52 @@ def _traer_candidatos(dias: int) -> tuple[list[dict], int, int]:
 
 
 def _bajar_descripciones(candidatos: list[dict]) -> dict[str, str]:
-    """Fase B: baja el texto real en paralelo (endpoint /v1/noticedesc).
+    """
+    Baja el texto real de los candidatos que quedan, con cache.
+
+    Importante por cuota: la API de SAM.gov tiene tope de peticiones por dia.
+    Antes Kyomoto bajaba MAX_DESCRIPCIONES (40) descripciones en cada barrido,
+    y con barridos cada 2h eso son ~480 peticiones diarias solo en descripciones.
+    Ahora:
+      - se consulta la cache primero (cuesta 0 peticiones)
+      - solo se baja lo que falta
+      - lo que se baja se guarda para el siguiente barrido
 
     Ojo: ~50% de los avisos devuelven 404 'Description Not Found' (medido:
     24 de 45). Pasa sobre todo con Award Notice y los Pre-solicitation. Se
     maneja como texto vacio: el titulo suele bastar para el pre-filtro.
     """
+    import store
+
+    pendientes: list[dict] = []
     descripciones: dict[str, str] = {}
+    for o in candidatos:
+        nid = o["noticeId"]
+        cacheada = store.leer_descripcion(nid)
+        if cacheada:
+            descripciones[nid] = cacheada
+        else:
+            pendientes.append(o)
+
+    if not pendientes:
+        _log(f"Las {len(descripciones)} descriciones salieron de la cache (0 peticiones)")
+        return descripciones
+
+    _log(f"Bajando {len(pendientes)} descripciones nuevas (SAM.gov tiene tope diario)")
+
+    def bajar(o):
+        return o["noticeId"], (sam_api.obtener_descripcion(o["noticeId"]) or "")
+
     with ThreadPoolExecutor(max_workers=config.WORKERS) as pool:
-        futuros = {
-            pool.submit(sam_api.obtener_descripcion, o["noticeId"]): o["noticeId"]
-            for o in candidatos
-        }
-        for fut in as_completed(futuros):
-            nid = futuros[fut]
+        for fut in as_completed({pool.submit(bajar, o): o for o in pendientes}):
             try:
-                descripciones[nid] = fut.result() or ""
+                nid, texto = fut.result()
             except Exception as e:
-                log.warning("descripcion de %s fallo: %s", nid, e)
-                descripciones[nid] = ""
+                log.warning("descripcion fallo: %s", e)
+                continue
+            descripciones[nid] = texto
+            store.cache_descripcion(nid, texto)
+
     return descripciones
 
 
@@ -142,14 +169,21 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         if p >= config.PUNTAJE_MINIMO:
             provisionales.append((p, opp))
     provisionales.sort(key=lambda x: x[0], reverse=True)
-    objetivo = [o for _, o in provisionales[: config.MAX_DESCRIPCIONES]]
+
+    # Cuantas descripciones bajar. Antes era MAX_DESCRIPCIONES (40) en cada
+    # barrido, y con barridos cada 2h eso reventaba el tope diario de SAM.gov.
+    # Ahora se bajan solo las que pueden entrar al presupuesto de Gemini, con
+    # margen: el resto espera su turno en el siguiente barrido.
+    presupuesto = quota.estado()
+    cupos = min(config.MAX_A_GEMINI, presupuesto["restantes"])
+    objetivo = [o for _, o in provisionales[: max(cupos + 4, 6)]]
     _log(
-        f"Pre-puntaje por titulo: {len(provisionales)} sobre el piso, "
-        f"descargo {len(objetivo)}"
+        f"Pre-puntaje por titulo: {len(provisionales)} sobre el piso; "
+        f"necesito {cupos} analisis asi que bajo {len(objetivo)} descripciones"
     )
 
     # ---- Fase B ----
-    avisar(f"📄 Bajando descripciones de {len(objetivo)} avisos...")
+    avisar(f"📄 Buscando descripciones de {len(objetivo)} avisos...")
     descripciones = _bajar_descripciones(objetivo)
     con_texto = sum(1 for v in descripciones.values() if v.strip())
     _log(f"Descripciones con texto real: {con_texto}/{len(descripciones)}")
@@ -226,6 +260,9 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     # intenta ni una mas: lo que queda espera a manana sin marcarse como visto.
     presupuesto = quota.estado()
     resumen["cuota"] = presupuesto
+    resumen["sam_tope"] = sam_api.proximo_acceso()
+    if sam_api.throttled():
+        _log(f"SAM.gov tiene el tope diario alcanzado. Vuelve {sam_api.proximo_acceso()}")
     if presupuesto["restantes"] <= 0:
         _log(
             f"Presupuesto diario agotado ({presupuesto['usadas']}/"
@@ -345,15 +382,27 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
 
 def redactar_fallo(chat_id: str, resumen: dict) -> None:
     """Si algo sale mal de verdad, avisar. Nunca fallar en silencio."""
-    if not resumen["errores"] or config.DRY_RUN:
+    if config.DRY_RUN:
+        return
+    if resumen.get("sam_tope"):
+        telegram_notify.enviar(
+            chat_id,
+            "🔋 <b>SAM.gov me dijo que me calle</b> (ᐢ..ᐢ)\n\n"
+            "Llegue al tope de peticiones diarias de la API publica. Vuelve a "
+            f"funcionar <b>{telegram_notify._esc(resumen['sam_tope'])}</b>.\n\n"
+            "No es un error tuyo ni mio: es el limite del plan gratuito de "
+            "SAM.gov. Kyomoto no perdio nada; lo que no vio queda pendiente "
+            "para cuando vuelva.",
+            html_mode=True,
+        )
+    if not resumen["errores"]:
         return
     cuerpo = "🚨 <b>El barrido termino con problemas</b>\n\n"
     for e in resumen["errores"][:5]:
         cuerpo += f"• <code>{telegram_notify._esc(e[:400])}</code>\n"
     if config.GEMINI_API_KEY and any("GEMINI" in e.upper() for e in resumen["errores"]):
         cuerpo += (
-            "\n<b>Lo mas probable:</b> la clave de Gemini no es valida. "
-            "Las claves de AI Studio empiezan con <code>AIza</code>. "
-            "Genera una en https://aistudio.google.com/apikey"
+            "\n<b>Lo mas probable:</b> la cuota de Google se agoto. Manda "
+            "<code>/cuota</code> para ver el detalle."
         )
     telegram_notify.enviar(chat_id, cuerpo, html_mode=True)

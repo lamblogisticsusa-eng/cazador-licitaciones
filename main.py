@@ -23,6 +23,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -99,6 +100,8 @@ def _crear_app() -> Application:
     app.add_handler(CommandHandler("etiqueta", cmd_etiqueta))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_texto))
+    # Los botones del menu. Sin este handler, Telegram muestra "botón muerto".
+    app.add_handler(CallbackQueryHandler(cmd_boton, pattern=r"^k:"))
     return app
 
 
@@ -106,175 +109,252 @@ def _crear_app() -> Application:
 #  COMANDOS
 # ==========================================================================
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    import kyo
+    import menu
+
     await update.message.reply_text(
-        "Kyon~ Kyomoto reportandose ✨\n\n"
-        "Soy tu asistente de licitaciones en SAM.gov. Busco solo oportunidades "
-        "de compra de PRODUCTOS que se puedan despachar a destino, entre "
-        f"USD {config.MIN_USD:,.0f} y USD {config.TOPE_USD:,.0f}.\n\n"
-        "<b>Comandos</b>\n"
-        "/selftest  - Revisa que las 3 APIs Respondan\n"
-        "/escaneo [dias]  - Barrido manual (por defecto "
-        f"{config.DIAS_DE_VENTANA} dias)\n"
-        "/puntajes - Por que Kyomoto si o no cada aviso\n"
-        "/etiqueta <num> - Etiqueta PDF de una oportunidad\n"
-        "/estado    - Ultimo barrido\n"
-        "/off /on   - Pausar o reactivar el monitoreo\n"
-        "/reset     - Olvidar todo el historial\n\n"
-        f"<i>Automatico cada {config.INTERVALO_HORAS:g} horas.</i>",
+        kyo.resumen_menu(ESTADO["activo"]),
         parse_mode=ParseMode.HTML,
+        reply_markup=menu.teclado(ESTADO["activo"]),
     )
+
+
+async def _menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reenvia el menu con el estado actual. Se usa tras cada /on y /off."""
+    import kyo
+    import menu
+
+    try:
+        await update.effective_message.reply_text(
+            kyo.saludo_menu(ESTADO["activo"]),
+            parse_mode=ParseMode.HTML,
+            reply_markup=menu.teclado(ESTADO["activo"]),
+        )
+    except Exception as e:
+        log.warning("No se pudo enviar el menu: %s", e)
 
 
 async def cmd_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     ESTADO["activo"] = True
-    await update.message.reply_text("▶️ Monitoreo reactivado, amo (⁠✦⁠_⁠✦⁠)")
+    await update.message.reply_text(
+        "▶️ <b>Busqueda reactivada, amo</b> (⁠✦⁠_⁠✦⁠)\n"
+        f"Reviso cada {config.INTERVALO_HORAS:g} h lo nuevo que publique SAM.gov, "
+        "de USD "
+        f"{config.MIN_USD:,.0f} a {config.TOPE_USD:,.0f}.",
+        parse_mode=ParseMode.HTML,
+    )
+    await _menu(update, ctx)
 
 
 async def cmd_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     ESTADO["activo"] = False
-    await update.message.reply_text("⏸️ Monitoreo pausado, amo (⁠.⁠-⁠⌟⁠.⁠)")
+    await update.message.reply_text(
+        "⏸ <b>Busqueda pausada, amo</b> (⁠.⁠-⁠⌟⁠.⁠)\n"
+        "No voy a revisar SAM.gov hasta que me digas /on.",
+        parse_mode=ParseMode.HTML,
+    )
+    await _menu(update, ctx)
 
 
-async def cmd_estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+def texto_estado() -> str:
+    """Cuerpo de /estado. Funcion pura: la usan el comando y el boton."""
     r = ULTIMO_ESCANEO.get("resumen")
     q = quota.estado()
     partes = [
         "📊 <b>Estado de Kyomoto</b>",
-        f"• Monitoreo: {'🟢 activo' if ESTADO['activo'] else '🔴 pausado'}",
+        f"• Busqueda: {'🟢 activa' if ESTADO['activo'] else '⏸ pausada'}",
         f"• Escaneando ahora: {'sí' if ESTADO['escaneando'] else 'no'}",
-        f"• Historico guardado: {store.total_procesadas()} avisos",
-        f"• Ventana de busqueda: {config.DIAS_DE_VENTANA} dias",
-        f"• Tope: USD {config.TOPE_USD:,.0f} | Minimo: USD {config.MIN_USD:,.0f}",
+        f"• Cada: <b>{config.INTERVALO_HORAS:g} h</b> "
+        f"· Ventana: {config.DIAS_DE_VENTANA} dias",
+        f"• Historico: {store.total_procesadas()} avisos vistos",
+        f"• Rango: <b>USD {config.MIN_USD:,.0f} – {config.TOPE_USD:,.0f}</b>",
         "",
-        "<b>Cuota de Gemini hoy</b> (reinicia a medianoche del Pacifico)",
-        f"• Usadas: {q['usadas']}/{q['presupuesto']} | Restan: {q['restantes']}",
+        "<b>Cuota de Gemini hoy</b>",
+        f"• Usadas: {q['usadas']}/{q['presupuesto']} | "
+        f"Restan: <b>{q['restantes']}</b>",
     ]
     if q["fallidas"]:
         partes.append(f"• Fallidas por cuota: {q['fallidas']}")
     if q["agotado"]:
-        partes.append("• ⚠️ Agotada: Kyomoto no analizara mas hasta mañana")
+        partes.append(
+            "• ⚠️ <b>Agotada</b>: no analizo mas hasta que Google reinicie "
+            "su cuota (medianoche del Pacífico)"
+        )
     if r:
         partes += [
             "",
             "<b>Ultimo barrido</b>",
-            f"• Traidas de SAM.gov: {r['traidas']}",
-            f"• Potencialmente bienes: {r['candidatas']}",
-            f"• Pasaron el filtro: {r['puntuales']}",
-            f"• Analizadas por Gemini: {r['analizadas']}",
-            f"• Viables: {r['viables']}  |  Notificadas: {r['notificadas']}",
+            f"• Avisos de SAM.gov: {r['traidas']}",
+            f"• Con producto fisico: {r['puntuales']}",
+            f"• Analizadas por IA: {r['analizadas']}",
+            f"• <b>Viables: {r['viables']}</b> | Notificadas: {r['notificadas']}",
         ]
         if r["errores"]:
-            partes += ["", f"⚠️ {len(r['errores'])} problema(s) en el ultimo barrido"]
-    partes.append("" if not config.DRY_RUN else "")
+            partes.append(f"⚠️ {len(r['errores'])} problema(s), mira /cuota")
     if config.DRY_RUN:
-        partes.append("🧪 <b>DRY_RUN activo</b>: no se envia nada.")
-    await update.message.reply_text("\n".join(partes), parse_mode=ParseMode.HTML)
+        partes.append("\n🧪 <b>DRY_RUN</b>: no se envia nada.")
+    return "\n".join(partes)
 
 
-async def cmd_cuota(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+def texto_cuota() -> str:
+    """Cuerpo de /cuota."""
     q = quota.estado()
     dias = quota.dias_registrados()
     lineas = [
-        "🔋 <b>Cuota de Gemini</b>",
-        f"• Hoy ({q['dia']}): <b>{q['usadas']}/{q['presupuesto']}</b> usadas",
+        "🔋 <b>Cuota de Gemini</b> (ᐢ..ᐢ)",
+        f"• Hoy ({q['dia']}): <b>{q['usadas']}/{q['presupuesto']}</b>",
         f"• Restan: <b>{q['restantes']}</b>",
-        f"• Ritmo: 1 llamada cada {config.GEMINI_PAUSA_SEG:g}s, "
-        f"{config.GEMINI_WORKERS} a la vez",
+        f"• Ritmo: 1 llamada cada {config.GEMINI_PAUSA_SEG:g}s",
     ]
     if q["fallidas"]:
-        lineas.append(f"• Hoy fallaron por cuota de Google: {q['fallidas']}")
+        lineas.append(
+            f"• Hoy Google nos cortó: {q['fallidas']} intento(s) rechazados"
+        )
+    if q["agotado"]:
+        lineas.append("")
+        lineas.append(
+            "⚠️ <b>Cuota agotada.</b> No es un error: es el límite del plan "
+            "gratis. Se reinicia sola a las 00:00 del Pacífico."
+        )
+        lineas.append("Lo que no alcancé queda pendiente para mañana, amo.")
     if dias:
         lineas += ["", "<b>Ultimos dias</b>"]
         for d in dias:
             barra = "▰" * min(d["llamadas"], 20)
-            lineas.append(f"• {d['dia']}: {d['llamadas']} {barra}")
-    lineas += [
+            extra = f" · {d['fallidas']} fallo(s)" if d["fallidas"] else ""
+            lineas.append(f"• {d['dia']}: {d['llamadas']} {barra}{extra}")
+    return "\n".join(lineas)
+
+
+def texto_puntajes() -> str:
+    """Cuerpo de /puntajes."""
+    r = ULTIMO_ESCANEO.get("resumen") or ESTADO["ultimo_resumen"]
+    detalle = (r or {}).get("detalle_puntajes") or []
+    if not detalle:
+        return (
+            "📋 Aun no tengo puntajes, amo.\n\n"
+            "Toca <b>🔍 Buscar ahora</b> y despues vuelvo a mirar (｡•̀ᴗ-)✧"
+        )
+    lineas = [
+        "📋 <b>Por que Kyomoto si o no cada aviso</b>",
+        "_(numero alto = mas prometedor)_",
         "",
-        "<i>Google reinicia su cuota a la medianoche del Pacifico (17:00 hora de "
-        "Chile en invierno). Lo que no se alcanza hoy se reintenta manana.</i>",
     ]
-    await update.message.reply_text("\n".join(lineas), parse_mode=ParseMode.HTML)
+    for d in detalle:
+        motivos = "; ".join(str(x) for x in d["motivos"])
+        lineas.append(f"<b>[{d['puntaje']}]</b> {telegram_notify._esc(d['titulo'])}")
+        lineas.append(f"    <i>{telegram_notify._esc(motivos)}</i>")
+        lineas.append("")
+    return "\n".join(lineas)
 
 
-async def cmd_selftest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Lo primero que debes correr. Dice en que parte esta el problema."""
-    aviso = await update.message.reply_text("🩺 Autodiagnostico de Kyomoto... (puede tardar ~20s)")
+async def cmd_estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(texto_estado(), parse_mode=ParseMode.HTML)
 
-    def revisar() -> tuple[str, list[str]]:
-        lineas, fallas = [], []
-        if config.TELEGRAM_BOT_TOKEN:
-            lineas.append("✅ <b>Telegram token</b> presente")
-        else:
-            lineas.append("❌ <b>TELEGRAM_BOT_TOKEN</b> vacio")
-            fallas.append("Telegram")
-        if config.TELEGRAM_CHAT_ID:
-            lineas.append(f"✅ <b>Chat destino</b>: <code>{telegram_notify._esc(config.TELEGRAM_CHAT_ID)}</code>")
-        else:
-            lineas.append("❌ <b>TELEGRAM_CHAT_ID</b> vacio")
-            fallas.append("Chat destino")
 
-        sam = sam_api.verificar_api()
-        if sam["ok"]:
-            lineas.append(f"✅ <b>SAM.gov</b>: {telegram_notify._esc(sam['detalle'])}")
-        else:
-            lineas.append(f"❌ <b>SAM.gov</b>: {telegram_notify._esc(sam['detalle'])}")
-            fallas.append("SAM.gov")
+async def cmd_cuota(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(texto_cuota(), parse_mode=ParseMode.HTML)
 
-        gem = gemini_analyzer.verificar_api()
-        if gem["ok"]:
-            lineas.append(f"✅ <b>Gemini</b>: {telegram_notify._esc(gem['detalle'])}")
-        else:
-            lineas.append(f"❌ <b>Gemini</b>: {telegram_notify._esc(gem['detalle'])}")
-            fallas.append("Gemini")
-        return "\n".join(lineas), fallas
 
-    lineas, fallas = await asyncio.get_running_loop().run_in_executor(None, revisar)
+async def _selftest(destino, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Autodiagnostico. `destino` es cualquier objeto con reply_text / edit_text,
+    para que funcione igual desde un comando o desde un boton del menu.
 
-    cuerpo = f"🩺 <b>Autodiagnostico</b>\n\n{lineas}\n"
-    if fallas:
-        cuerpo += "\n<b>Que hacer</b>\n"
-        if "Gemini" in fallas:
-            cuerpo += (
-                "• <b>Gemini</b>: Google devolvio 401, no reconoce la clave. "
-                "Ojo: desde mayo 2026 las claves de AI Studio ya NO empiezan "
-                "con AIza, asi que el prefijo no dice nada. Revisa en este orden:\n"
-                "   1. La clave se copio incompleta.\n"
-                "   2. Tiene restriccion de IP: Render usa IPs dinamicas y una "
-                "clave restringida a tu IP local falla ahi.\n"
-                "   3. Falta habilitar la API Generative Language en el proyecto.\n"
-                "   4. Es una clave de otro producto de Google.\n"
-                "   Crea una auth key nueva sin restriccion en "
-                "https://aistudio.google.com/apikey\n"
-            )
-        if "SAM.gov" in fallas:
-            cuerpo += (
-                "• <b>SAM.gov</b>: revisa SAM_API_KEY y que la cuenta tenga la "
-                "API pública aprobada en https://open.gsa.gov/api/get-opportunities-public-api/\n"
-            )
-        if "Telegram" in fallas or "Chat destino" in fallas:
-            cuerpo += "• <b>Telegram</b>: revisa el token y el CHAT_ID en Render.\n"
+    Distingue 429 (cuota del plan gratis agotada, no es un error) de 401
+    (la credencial no existe). Antes siempre daba el consejo del 401, que
+    mandaba a crear una clave nueva cuando el problema era otro.
+    """
+    aviso = await destino.reply_text(
+        "🩺 Autodiagnóstico de Kyomoto... (hasta ~20s) (ᐢ..ᐢ)"
+    )
+
+    def revisar() -> dict:
+        r = {"telegram": bool(config.TELEGRAM_BOT_TOKEN), "chat": config.TELEGRAM_CHAT_ID,
+             "sam": sam_api.verificar_api(), "gem": gemini_analyzer.verificar_api()}
+        return r
+
+    d = await asyncio.get_running_loop().run_in_executor(None, revisar)
+
+    L = ["🩺 <b>Autodiagnóstico de Kyomoto</b>", ""]
+    L.append("✅ <b>Telegram</b> listo" if d["telegram"] else "❌ Falta <b>TELEGRAM_BOT_TOKEN</b>")
+    L.append(
+        f"✅ Destino: <code>{telegram_notify._esc(d['chat'] or 'NO CONFIGURADO')}</code>"
+        if d["chat"] else "❌ Falta <b>TELEGRAM_CHAT_ID</b>"
+    )
+    L.append(
+        f"{'✅' if d['sam']['ok'] else '❌'} <b>SAM.gov</b>: "
+        f"{telegram_notify._esc(d['sam']['detalle'][:200])}"
+    )
+    L.append("")
+
+    g = d["gem"]
+    cuerpo_gem = telegram_notify._esc(g["detalle"][:400])
+    if g["ok"]:
+        L.append(f"✅ <b>Gemini</b>: {cuerpo_gem}")
     else:
-        cuerpo += "\n✨ Todo en orden. Kyomoto puede trabajar."
+        det = g["detalle"]
+        if "429" in det or "RESOURCE_EXHAUSTED" in det:
+            # Esto NO es un error de configuracion. Es el tope del plan gratis.
+            L.append(f"⚠️ <b>Gemini</b>: {cuerpo_gem}")
+        else:
+            L.append(f"❌ <b>Gemini</b>: {cuerpo_gem}")
+    cuerpo = "\n".join(L)
+
+    # ---- Consejo segun el fallo real ----
+    if not g["ok"] and ("429" in g["detalle"] or "RESOURCE_EXHAUSTED" in g["detalle"]):
+        cuerpo += (
+            "\n\n<b>Esto no es un error, amo.</b> Es el límite del plan "
+            "gratis de Google: se agotó la cuota de hoy.\n"
+            "Se reinicia sola a las <b>00:00 del Pacífico</b> "
+            "(≈ 03:00 hora de Chile). Lo que no alcancé queda pendiente para "
+            "mañana, no se pierde nada.\n"
+            "<i>Para ver el detalle: /cuota</i>"
+        )
+    elif not g["ok"]:
+        cuerpo += (
+            "\n\n<b>Que hacer con Gemini</b>\n"
+            "   1. Copiala completa con el boton de copiar de AI Studio.\n"
+            "   2. Quitalle la restriccion de IP: Render usa IPs dinamicas y "
+            "una clave restringida a tu IP local falla ahi.\n"
+            "   3. Verifica que la API Generative Language este habilitada.\n"
+            "   Prueba sin gastar nada: <code>python probar_clave.py</code>"
+        )
+    if not d["sam"]["ok"]:
+        cuerpo += (
+            "\n\n<b>SAM.gov</b>: revisa SAM_API_KEY y que la cuenta tenga "
+            "aprobada la API pública en "
+            "https://open.gsa.gov/api/get-opportunities-public-api/"
+        )
+    if not d["telegram"] or not d["chat"]:
+        cuerpo += "\n\n<b>Telegram</b>: revisa el token y el CHAT_ID en Render."
+
+    if g["ok"] and d["sam"]["ok"] and d["telegram"] and d["chat"]:
+        cuerpo += "\n\n✨ Todo en orden, amo. Kyomoto puede trabajar ✿"
 
     await aviso.edit_text(cuerpo, parse_mode=ParseMode.HTML)
 
 
-async def cmd_escaneo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_selftest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _selftest(update.message, ctx)
+
+
+async def _lanzar_escaneo(chat_id: str, dias: int, menu_msg=None) -> None:
+    """
+    Corre un barrido y va actualizando el progreso. Lo usan /escaneo y el boton
+    "Buscar ahora". `menu_msg` es el mensaje del menu cuando se pide desde ahi:
+    se manda un mensaje nuevo en vez de editar el menu, que es fijo.
+    """
     if ESTADO["escaneando"]:
-        await update.message.reply_text("⏳ Ya hay un escaneo corriendo, amo. Kyomoto espera.")
+        destino = menu_msg or menu_msg
+        texto = "⏳ Ya hay un escaneo corriendo, amo. Kyomoto espera (｡-ω-)zzz"
+        if menu_msg:
+            await menu_msg.reply_text(texto, parse_mode=ParseMode.HTML)
         return
 
-    dias = config.DIAS_DE_VENTANA
-    args = ctx.args
-    if args:
-        try:
-            dias = max(1, min(int(args[0]), 30))
-        except ValueError:
-            await update.message.reply_text("El numero de dias no es valido, amo.")
-            return
-
-    chat_id = str(update.effective_chat.id)
-    aviso = await update.message.reply_text("⚡ Kyomoto empieza a trabajar...")
+    aviso = await (menu_msg.reply_text if menu_msg else _responder(chat_id))(
+        "⚡ Kyomoto empieza a trabajar... (ᐢ..ᐢ)"
+    )
     ESTADO["escaneando"] = True
     ultima = {"txt": ""}
 
@@ -285,7 +365,7 @@ async def cmd_escaneo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await aviso.edit_text(texto, parse_mode=ParseMode.HTML)
         except Exception:
-            pass  # el mensaje es muy viejo o el texto no cambio
+            pass
 
     def correr() -> dict:
         return scanner.escanear(chat_id, dias=dias)
@@ -294,12 +374,11 @@ async def cmd_escaneo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         resumen = await asyncio.get_running_loop().run_in_executor(None, correr)
         scanner.redactar_fallo(chat_id, resumen)
     except Exception as e:
-        ESTADO["escaneando"] = False
         log.exception("Escaneo fallo")
         cuerpo = (
             "🚨 <b>Kyomoto se tropezo</b>\n\n"
-            f"<pre>{telegram_notify._esc(f'{type(e).__name__}: {e}')[:1500]}</pre>\n\n"
-            "Revisa el log de Render para el detalle completo."
+            f"<pre>{telegram_notify._esc(f'{type(e).__name__}: {e}')[:1200]}</pre>\n\n"
+            "Revisa el log de Render para el detalle."
         )
         try:
             await aviso.edit_text(cuerpo, parse_mode=ParseMode.HTML)
@@ -315,42 +394,65 @@ async def cmd_escaneo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if a.get("notice_id"):
             ANALISIS[a["notice_id"]] = a
 
+    import kyo
+
     if not resumen["candidatas"]:
         cuerpo = (
             "🤍 <b>Sin novedades, amo</b>\n\n"
-            f"Kyomoto reviso {resumen['traidas']} avisos de SAM.gov en {dias} dias "
-            "y ninguno era compra de producto.\n\n"
-            "Prueba con mas dias: <code>/escaneo 14</code>"
+            f"Kyomoto revisó {resumen['traidas']} avisos de SAM.gov en {dias} "
+            "días y ninguno era compra de producto.\n"
+            "Prueba con más días: <code>/escaneo 14</code>"
         )
     else:
-        import kyo
-        cuerpo = kyo.resumen_escaneo(resumen) + (
-            "\n\n<i>Las fichas viables llegaron justo antes de este mensaje.</i>"
-            if resumen["viables"] and not config.DRY_RUN else ""
-        )
+        cuerpo = kyo.resumen_escaneo(resumen)
+
     try:
         await aviso.edit_text(cuerpo, parse_mode=ParseMode.HTML)
     except Exception:
-        await update.message.reply_text(cuerpo, parse_mode=ParseMode.HTML)
+        await ctx_bot_send(chat_id, cuerpo)
+
+
+async def ctx_bot_send(chat_id: str, cuerpo: str) -> None:
+    telegram_notify.enviar(chat_id, cuerpo, html_mode=True)
+
+
+APP = {"ptb": None}
+
+
+def _responder(chat_id: str):
+    """
+    Devuelve una corrutina que manda un mensaje a un chatId suelto, para el
+    escaneo que no viene de un comando (por ejemplo, el boton "Buscar ahora"
+    o el scheduler).
+    """
+    async def _enviar(texto: str, **kw):
+        app = APP.get("ptb")
+        if app is None:
+            # Sin la Application a mano se cae al envio por HTTP directo, que
+            # ya sabe trocear y escapar. Es el camino de emergencia.
+            telegram_notify.enviar(chat_id, texto, html_mode=True)
+            return None
+        return await app.bot.send_message(
+            chat_id=chat_id, text=texto, parse_mode=ParseMode.HTML
+        )
+    return _enviar
+
+
+async def cmd_escaneo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    dias = config.DIAS_DE_VENTANA
+    if ctx.args:
+        try:
+            dias = max(1, min(int(ctx.args[0]), 30))
+        except ValueError:
+            await update.message.reply_text(
+                "El número de días no es válido, amo (ａ.ω-？)"
+            )
+            return
+    await _lanzar_escaneo(str(update.effective_chat.id), dias)
 
 
 async def cmd_puntajes(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    r = ULTIMO_ESCANEO.get("resumen") or ESTADO["ultimo_resumen"]
-    detalle = (r or {}).get("detalle_puntajes") or []
-    if not detalle:
-        await update.message.reply_text(
-            "Aun no hay puntajes. Corre <code>/escaneo</code> primero, amo."
-        )
-        return
-    lineas = ["🧮 <b>Por que Kyomoto filtro esto</b>", ""]
-    for d in detalle:
-        motivos = "; ".join(str(x) for x in d["motivos"])
-        lineas.append(f"<b>[{d['puntaje']}]</b> {telegram_notify._esc(d['titulo'])}")
-        lineas.append(f"<i>{telegram_notify._esc(motivos)}</i>")
-        lineas.append("")
-    await update.message.reply_text(
-        "\n".join(lineas)[:4000], parse_mode=ParseMode.HTML
-    )
+    await update.message.reply_text(texto_puntajes(), parse_mode=ParseMode.HTML)
 
 
 async def cmd_etiqueta(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -406,6 +508,78 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     n = store.limpiar()
     await update.message.reply_text(
         f"🧹 Listo, amo. Olvide {n} avisos. El proximo escaneo evaluara todo de nuevo."
+    )
+
+
+async def cmd_boton(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cada boton del menu hace lo mismo que su comando equivalente."""
+    import kyo
+    import menu
+
+    q = update.callback_query
+    await q.answer()
+    accion = (q.data or "").split(":")[-1]
+    chat_id = str(q.message.chat.id)
+    log.info("Boton pulsado: %s (chat %s)", accion, chat_id)
+
+    if accion == "on":
+        ESTADO["activo"] = True
+        await q.message.reply_text(
+            "▶️ <b>Busqueda reactivada, amo</b> (⁠✦⁠_⁠✦⁠)\n"
+            f"Reviso cada {config.INTERVALO_HORAS:g} h lo nuevo de SAM.gov.",
+            parse_mode=ParseMode.HTML,
+        )
+        await q.message.reply_text(
+            kyo.saludo_menu(True),
+            parse_mode=ParseMode.HTML,
+            reply_markup=menu.teclado(True),
+        )
+        return
+
+    if accion == "off":
+        ESTADO["activo"] = False
+        await q.message.reply_text(
+            "⏸ <b>Busqueda pausada, amo</b> (⁠.⁠-⁠⌟⁠.⁠)",
+            parse_mode=ParseMode.HTML,
+        )
+        await q.message.reply_text(
+            kyo.saludo_menu(False),
+            parse_mode=ParseMode.HTML,
+            reply_markup=menu.teclado(False),
+        )
+        return
+
+    if accion == "buscar":
+        await _lanzar_escaneo(chat_id, dias=config.DIAS_DE_VENTANA,
+                              menu_msg=q.message)
+        return
+
+    if accion == "etiqueta":
+        await q.message.reply_text(
+            "🏷 Escribe <code>/etiqueta NUMERO-DE-SOLICITUD</code>\n\n"
+            "El numero aparece en la ficha de cada oportunidad, asi:\n"
+            "<code>W9127N26QA145</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Estado, cuota, puntajes y selftest solo dependen de datos locales, asi
+    # que se construyen aqui mismo y se responden al instante.
+    if accion == "estado":
+        await q.message.reply_text(texto_estado(), parse_mode=ParseMode.HTML)
+        return
+    if accion == "cuota":
+        await q.message.reply_text(texto_cuota(), parse_mode=ParseMode.HTML)
+        return
+    if accion == "puntajes":
+        await q.message.reply_text(texto_puntajes(), parse_mode=ParseMode.HTML)
+        return
+    if accion == "selftest":
+        await _selftest(q.message, ctx)
+        return
+
+    await q.message.reply_text(
+        "🤍 Kyomoto no entiende ese boton, amo.", parse_mode=ParseMode.HTML
     )
 
 
@@ -497,6 +671,7 @@ def main() -> None:
     app = _crear_app()
     app.post_init = _post_init
     app.post_shutdown = _post_shutdown
+    APP["ptb"] = app
 
     # --- Este bloque es la diferencia entre funcionar y caerse. ---
     #

@@ -83,10 +83,9 @@ TIMEOUT_HTTP = _int("TIMEOUT_HTTP", 45)
 MAX_REINTENTOS = _int("MAX_REINTENTOS", 3)
 
 # --- Operacion ---
-# Cuatro barridos al dia reparten las llamadas de Gemini: si uno falla, los
-# otros tres cubren la cuota, y nunca se piden 10 seguidas. Con 1 solo
-# barrido diario, un fallo te deja el dia entero sin nada.
-INTERVALO_HORAS = _float("INTERVALO_HORAS", 4)
+# Dos barridos al dia. Cada uno gasta como 1/12 del presupuesto diario, asi
+# que la cuota se reparte sin que un fallo te deje medio dia sin nada.
+INTERVALO_HORAS = _float("INTERVALO_HORAS", 2)
 DB_PATH = os.getenv("DB_PATH", "licitaciones.db")
 DRY_RUN = _bool("DRY_RUN", False)  # True = no envia mensajes, solo loguea
 ETIQUETAS_DIR = os.getenv("ETIQUETAS_DIR", "etiquetas")

@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS etiquetas (
     archivo    TEXT,
     creado    TEXT
 );
+CREATE TABLE IF NOT EXISTS cache_descripciones (
+    notice_id  TEXT PRIMARY KEY,
+    texto      TEXT NOT NULL,
+    guardado   TEXT NOT NULL
+);
 """
 
 
@@ -108,6 +113,43 @@ def guardar_etiqueta(notice_id: str, archivo: str) -> None:
         )
 
 
+def cache_descripcion(notice_id: str, texto: str) -> None:
+    """Guarda la descripcion para no volver a pagarla a la API.
+
+    La API de SAM.gov tiene tope de peticiones por dia. Como se descarto una
+    oportunidad puede volver al top en el siguiente barrido, cachear evita
+    gastar la cuota en el mismo texto una y otra vez.
+    """
+    if not texto:
+        return
+    with _lock, _conexion() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO cache_descripciones (notice_id, texto, guardado) "
+            "VALUES (?,?,?)",
+            (notice_id, texto, _ahora()),
+        )
+
+
+def leer_descripcion(notice_id: str) -> str:
+    init_db()
+    with _lock, _conexion() as c:
+        fila = c.execute(
+            "SELECT texto FROM cache_descripciones WHERE notice_id = ?", (notice_id,)
+        ).fetchone()
+    return fila[0] if fila else ""
+
+
+def limpiar_cache() -> int:
+    with _lock, _conexion() as c:
+        n = c.execute("SELECT COUNT(*) FROM cache_descripciones").fetchone()[0]
+        c.execute("DELETE FROM cache_descripciones")
+        return n
+
+
 def total_procesadas() -> int:
+    # Autoinicializable por el mismo motivo que quota.estado(): lo llama
+    # texto_estado() desde los botones del menu, y en un proceso recien
+    # arrancado la tabla todavia no existe.
+    init_db()
     with _lock, _conexion() as c:
         return c.execute("SELECT COUNT(*) FROM licitaciones_procesadas").fetchone()[0]

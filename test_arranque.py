@@ -96,7 +96,18 @@ esperados = {"start", "escaneo", "forzar_escaneo", "selftest", "cuota",
 faltan = esperados - cmds
 check("Todos los comandos registrados", not faltan, f"-> faltan {faltan}")
 check("JobQueue disponible", app.job_queue is not None)
-check("Handler de texto libre", texto == 1, f"-> {texto}")
+# Solo cuentan los MessageHandler: los CallbackQueryHandler tambien son
+# "handlers que no son comando" pero no son de texto libre.
+n_texto = sum(
+    1 for h in app.handlers[0]
+    if h.__class__.__name__ == "MessageHandler"
+)
+check("Handler de texto libre", n_texto == 1, f"-> {n_texto}")
+n_callback = sum(
+    1 for h in app.handlers[0]
+    if h.__class__.__name__ == "CallbackQueryHandler"
+)
+check("Handler de los botones del menu", n_callback == 1, f"-> {n_callback}")
 
 jq = app.job_queue
 try:

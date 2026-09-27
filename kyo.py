@@ -5,6 +5,12 @@ kawaii sin ensuciar el resto del codigo ni los datos.
 """
 from __future__ import annotations
 
+import config
+
+MIN = config.MIN_USD
+MAX = config.TOPE_USD
+HORAS = config.INTERVALO_HORAS
+
 # Apertura segun cuantos resultados salieron.
 SALUDOS = {
     "muchas": "Kyomoto se lucio hoy ✨",
@@ -65,3 +71,35 @@ def resumen_escaneo(r: dict) -> str:
 
 def cabecera_ficha() -> str:
     return "✨ <b>Kyomoto encuentra una oportunidad</b> ✨"
+
+
+# ==========================================================================
+#  MENU
+# ==========================================================================
+
+TITULO = "🌸 <b>Kyomoto</b> · needy logistics"
+SUBTITULO = (
+    "Busco licitaciones de <b>compra de productos</b> en SAM.gov que puedas "
+    "despachar a destino.\n"
+    f"Rango: <b>USD {MIN:,.0f} – {MAX:,.0f}</b> · cada {HORAS:g} h\n"
+    "Solo avisos que piensen en <i>cosas físicas</i>, no servicios (ᐢ..ᐢ)"
+)
+CIERRE_MENU = "Toca un boton ✿"
+
+
+def saludo_menu(activo: bool) -> str:
+    if activo:
+        estado = "🟢 <b>Buscando activa</b> · te aviso cuando haya algo bueno"
+    else:
+        estado = "⏸ <b>En pausa</b> · no voy a buscar hasta que me digas"
+    return f"{estado}\n\n{SUBTITULO}"
+
+
+def resumen_menu(activo: bool) -> str:
+    """Cuerpo del /start: saludo kawaii + estado + que hace."""
+    if activo:
+        linea = "Kyon~ aqui ando ✨ <b>Lista para trabajar.</b>"
+    else:
+        linea = "Kyon~ aqui ando ✨ <b>Estoy en pausa, amo.</b> (/on cuando quieras)"
+    return f"{linea}\n\n{saludo_menu(activo)}"
+

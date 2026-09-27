@@ -45,6 +45,9 @@ BASE_DESC = "https://api.sam.gov/prod/opportunities/v1/noticedesc"
 _sesion = requests.Session()
 _sesion.headers.update({"Accept": "application/json", "User-Agent": "Kyomoto/2.0"})
 
+# Momento en que SAM.gov dice que vuelve a dejar usar la API. None = sin tope.
+_proximo_acceso: str | None = None
+
 TAG_HTML = re.compile(r"<[^>]+>")
 ESPACIOS = re.compile(r"[ \t\r\f\v]+")
 SALTOS = re.compile(r"\n{3,}")
@@ -148,6 +151,25 @@ def obtener_descripcion(notice_id: str) -> str:
         return ""
 
 
+def throttle(respuesta: requests.Response) -> None:
+    """
+    SAM.gov tambien tiene tope de peticiones por dia. Medido: al agotarlo
+    responde HTTP 429 con nextAccessTime, y dice exactamente cuando vuelve.
+    Guardarlo permite avisar con la hora real en vez de un "se espera" vago.
+    """
+    global _proximo_acceso
+    if respuesta.status_code != 429:
+        return
+    try:
+        cuerpo = respuesta.json()
+    except ValueError:
+        return
+    siguiente = cuerpo.get("nextAccessTime")
+    if siguiente:
+        _proximo_acceso = siguiente
+        log.error("SAM.gov: cuota agotada. Se puede volver a usar en %s", siguiente)
+
+
 def _bloque(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
     params = {
         "api_key": config.SAM_API_KEY,
@@ -159,6 +181,7 @@ def _bloque(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
         "ptype": ptype,
     }
     r = _get(params)
+    throttle(r)
     datos = r.json()
     return datos.get("opportunitiesData") or []
 
@@ -178,6 +201,13 @@ def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = Non
 
     if not config.SAM_API_KEY:
         raise SamError("SAM_API_KEY no configurada")
+    if _proximo_acceso:
+        # Ya sabemos que la API esta throttled. Fallar rapido y claro es mejor
+        # que reintentar y gastar mas cuota.
+        raise SamError(
+            f"SAM.gov tiene el tope diario de peticiones alcanzado. "
+            f"Vuelve a las {_proximo_acceso}."
+        )
 
     dias = dias or config.DIAS_DE_VENTANA
     # Si piden menos dias que un bloque, se agranda la ventana: mejor revisar
@@ -216,6 +246,15 @@ def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = Non
             "Bloque %s..%s -> %s registros (%s nuevos, total %s)",
             _fecha(desde), _fecha(hasta), len(lote), nuevos, publicados,
         )
+
+
+def proximo_acceso() -> str:
+    """Cuando SAM.gov vuelve a dejar usar la API, o "" si no hay tope."""
+    return _proximo_acceso or ""
+
+
+def throttled() -> bool:
+    return bool(_proximo_acceso)
 
 
 def deadline_de(opp: dict) -> datetime | None:

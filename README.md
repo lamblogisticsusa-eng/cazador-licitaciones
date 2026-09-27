@@ -185,18 +185,32 @@ llegan demasiados. Mira `/puntajes` para ver por qué se cayó cada una.
 `render.yaml` ya viene con todo esto. Si lo usas, Render te pregunta si quieres
 importarlo: acepta y solo llenas las 4 claves.
 
-### 4. Habla con Kyomoto
+### Habla con Kyomoto
+
+Manda `/start` y te aparece el menú con botones. No hace falta memorizar
+nada: cada botón hace lo mismo que su comando.
 
 ```
-/selftest     -> te dice si Telegram, SAM.gov y Gemini responden
-/escaneo      -> barrido manual
-/escaneo 14   -> barrido de 14 días
-/puntajes     -> por qué sí o no cada aviso
-/etiqueta W9127N26QA145  -> PDF de la etiqueta
-/estado       -> último barrido
-/off  /on     -> pausar / reactivar
-/reset        -> olvidar el historial
+🔍 Buscar ahora        📊 Estado
+🔋 Cuota de hoy        📋 Por qué descarté
+🏷 Etiqueta PDF        🩺 Autodiagnóstico
+⏸ Pausar búsqueda     (o ▶️ Reactivar)
 ```
+
+Los comandos siguen ahí por si prefieres escribirlos:
+
+```
+/selftest     - Revisa que las 3 APIs respondan
+/escaneo [d]  - Barrido manual (por defecto 2 días, máximo 30)
+/puntajes     - Por qué sí o no cada aviso
+/etiqueta W... - Etiqueta PDF de una oportunidad
+/estado       - Último barrido y cuota
+/cuota        - Gasto de Gemini hoy, con historial
+/off /on      - Pausar o reactivar
+/reset        - Olvidar todo el historial
+```
+
+Buscar es **cada 2 horas** automáticamente.
 
 ---
 
@@ -219,6 +233,48 @@ cada deploy y en cada despertar, y Kyomoto olvida qué ya te notificó. Para no
 recibir duplicados, o usas plan pagado, o guardas el historial fuera
 (Turso/Supabase). `store.py` está preparado para cambiar el backend, es un solo
 módulo.
+
+---
+
+## SAM.gov también tiene tope de peticiones
+
+Descubierto al agotarlo durante las pruebas:
+
+```
+HTTP 429 · code 900804
+"Message throttled out"
+"You have exceeded your quota.
+ You can access API after 2026-Sep-28 00:00:00+0000 UTC"
+```
+
+Google tiene tope por minuto y por día, y **SAM.gov también por día**. Eso
+significa que cada descripción que se baje es una petición que cuenta.
+
+Kyomoto antes bajaba `MAX_DESCRIPCIONES=40` descripciones en cada barrido. Con
+barridos cada 2 h eran ~480 peticiones diarias solo en eso, y el resto de la
+cuota se iba en las búsquedas. Ahora:
+
+- **Solo baja las descripciones que va a usar.** No 40: las que alcanzan para
+  cubrir los cupos de Gemini de ese barrido, más un margen.
+- **Cachea en SQLite.** Si una oportunidad se descartó y vuelve al top en el
+  siguiente barrido, la descripción sale de la base y no de la API. Una
+  oportunidad reanalizada vale 0 peticiones.
+- **Cachea solo textos no vacíos**, porque los 404 no se repiten.
+- **Si está throttled, falla rápido** en vez de reintentar, y reporta la hora
+  exacta que dio Google (`nextAccessTime`) en vez de un "se espera" vago.
+- **Te avisa por Telegram** con esa hora. No es un error tuyo ni mío.
+
+Para medir el estado en cualquier momento:
+
+```bash
+python test_red.py
+```
+
+Devuelve 0 si está bien, 3 si está throttled (con la hora de regreso), 4 si la
+clave fue rechazada.
+
+Con `INTERVALO_HORAS=2` y 6 descripciones por barrido, son ~12 peticiones
+diarias a SAM.gov: muy holgado dentro del plan gratuito.
 
 ---
 

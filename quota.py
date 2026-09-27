@@ -65,6 +65,10 @@ def hoy_pacifico() -> str:
 
 def estado() -> dict:
     """Cuantas llamadas quedan hoy. No cuenta como llamada."""
+    # Autoinicializable: texto_estado() y texto_cuota() se llaman desde los
+    # botones del menu, y en un proceso recien arrancado las tablas todavia no
+    # existen. Que reviente el /cuota seria justo el fallo que no queremos.
+    init()
     with _lock, _conexion() as c:
         fila = c.execute(
             "SELECT llamadas, fallidas FROM uso_gemini WHERE dia = ?", (hoy_pacifico(),)
@@ -137,6 +141,7 @@ def limpiar() -> int:
 
 
 def dias_registrados() -> list[dict]:
+    init()
     with _lock, _conexion() as c:
         filas = c.execute(
             "SELECT dia, llamadas, fallidas FROM uso_gemini ORDER BY dia DESC LIMIT 14"
