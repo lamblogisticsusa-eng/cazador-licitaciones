@@ -96,9 +96,23 @@ def limpiar_html(bruto: str) -> str:
 
 
 def verificar_api() -> dict:
-    """Prueba de humo de la API. Se usa en /selftest."""
+    """Prueba de humo de la API. Se usa en /selftest y /estado.
+
+    NUNCA lanza: si falla devuelve {"ok": False, ...}. El autodiagnostico
+    existe para reportar problemas, asi que reventar al preguntar por el
+    estado seria lo peor que podria hacer.
+    """
     if not config.SAM_API_KEY:
         return {"ok": False, "detalle": "SAM_API_KEY no configurada"}
+    if _proximo_acceso:
+        return {
+            "ok": False,
+            "detalle": (
+                f"Tope diario de SAM.gov alcanzado. Vuelve a las "
+                f"{_proximo_acceso}."
+            ),
+            "throttled": True,
+        }
     hoy = datetime.now(timezone.utc)
     params = {
         "api_key": config.SAM_API_KEY,
@@ -107,7 +121,14 @@ def verificar_api() -> dict:
         "limit": 1,
         "ptype": "o",
     }
-    r = _get(params, reintentos=1)
+    try:
+        r = _get(params, reintentos=1)
+    except SamError as e:
+        return {
+            "ok": False,
+            "detalle": str(e)[:250],
+            "throttled": "429" in str(e),
+        }
     if r.status_code != 200:
         return {"ok": False, "detalle": f"HTTP {r.status_code}: {r.text[:200]}"}
     datos = r.json()
