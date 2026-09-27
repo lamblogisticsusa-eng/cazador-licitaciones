@@ -409,48 +409,57 @@ resuelve y que toda la API que usa Kyomoto existe en PTB 22.x. Nota: en 22.x
 
 ## La ficha que recibes
 
-Cada oportunidad llega con todo lo necesario para decidir sin abrir nada más:
+El análisis es **por unidad**, que es como se piensa un negocio de
+distribución, no por contrato. Y el margen que decide es el **neto**, porque
+el capital se resuelve con factoring.
+
+### El modelo
 
 ```
-📦 USNS MERCY (T-AH 19) MAIN MACHINERY ROOM FIRE PUMP VALVES
-🔢 N0010426QFF21
-🔗 📄 Ver aviso completo en SAM.gov      ← el enlace directo
-🏛 DEPT OF DEFENSE.DEPT OF THE NAVY
-🗂 NAICS 332911 | PSC 5330   ⭐ SBA
-
-📝 Que hay que entregar
-   Válvulas de compuerta de bronce para bomba contraincendios naval
-   Cantidad estimada: 1 LOTE
-🔧 ASTM B584, 150 psi, PN20
-📍 Destino: Norfolk / Virginia / UNITED STATES
-⏰ Limite para ofertar: 2026-11-04
-
-💰 Los numeros
-   Valor del contrato: $48,000.00
-   Comprar en USA:     $32,000.00
-
-💳 Dinero que necesitas tener disponible
-   Para ofertar y cumplir: $36,800.00
-   (compra + 15% de colchón para flete, aranceles e imprevistos.
-    No lo recuperas hasta que cobres.)
-
-📈 Ganancia
-   Neta estimada: $16,000.00 (33.3%)
-   Precio unitario de catálogo: $6,400.00
-   Precio unitario a ofertar:  $8,000.00
-
-💡 Dónde está el mejor margen
-   Catálogo grande 15-20%; mayorista 20-25%; fabricante directo 25-35%.
-
-🔍 Distribuidores en USA
-   🔎 Buscar en Google (siempre funciona)      ← clic
-   🏬 ThomasNet — el mayor directorio industrial de USA
-   🏬 Supplyhouse — mayorista e industrial
-   🏬 Global Sources US — marketplace con vendedores en USA
-   🏬 Faire — marketplace de mayoristas
-   🏬 Zoro — distribuidor con envío desde USA
-   Para buscar a mano: "bronze gate valve marine" · "naval fire pump valve"
+Margen bruto          15% – 35%   ← lo que ganas comprando y revendiendo
+Factoring              3.5%      ← lo que pagas por cobrar antes
+─────────────────────────────────
+Margen neto           11% – 31%   ← este decide si se oferta
 ```
+
+Ejemplo real, el caso de 50 laptops:
+
+```
+📝 Laptops para Answer Key Kiosks
+   Modelo: Dell Latitude 5450
+   Cantidad: 50 EA
+🔧 i5-1345U, 16GB RAM, 512GB SSD
+📍 Fort Huachuca / Arizona / UNITED STATES
+
+💰 La cuenta, por unidad
+   Comprar cada una en USA:      $1,200.00
+   Precio de catálogo:           $1,249.00
+   Ofertar cada una a:           $1,450.00
+   Ganancia por unidad:            $250.00
+
+📊 El total
+   Valor del contrato:          $72,500.00
+   Costo de compra:             $60,000.00
+   Ganancia bruta:              $12,500.00  (17.2%)
+   Factoring (3.5%):            -$2,537.50
+   Ganancia neta:                $9,962.50  (13.7%)
+   Ofertar:                     $72,500.00
+```
+
+### Por qué los totales se recalculan aquí
+
+Gemini devuelve cantidad y precios **por unidad**. Los totales los rehace
+Kyomoto en Python, no se confía en los de la IA. Si la IA dice "margen 85%"
+cuando las unidades dan 17%, gana la aritmética.
+
+Hay un test que lo comprueba: `test_economia.py` mete un margen inventado de
+85% y verifica que la ficha muestre 17.2%.
+
+### La regla de descarte
+
+Regla 7 del prompt: si el margen **neto** queda bajo `MARGEN_NETO_MIN` (12%),
+no es ofertable. Tiene sentido — una oferta que deja 4% bruto y −0.1% neto
+después de factoring no vale el papel donde se escribe.
 
 ### Sobre los enlaces de distribuidores
 
@@ -471,14 +480,6 @@ Ventajas: siempre funcionan, se actualizan solos, y devuelven páginas de
 producto reales en vez de la portada. Los sitios de distribuidores bloquean
 peticiones automáticas con 403, así que no se puede verificar uno por uno;
 por eso el vehículo es Google, que sí responde.
-
-### El capital necesario
-
-`capital_necesario` no es lo mismo que el precio de oferta ni que el valor del
-contrato: es **la plata que hay que tener en la cuenta** para comprar el
-producto y cumplir si ganas, con un colchón (`MARGEN_COLCHON`, 15%) para
-flete interno, aranceles deonnage y ajustes de cantidad. Es el número que
-importa porque no lo recuperas hasta que cobras.
 
 ---
 

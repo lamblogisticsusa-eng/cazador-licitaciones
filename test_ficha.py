@@ -34,17 +34,23 @@ FICHA = {
     "naics": "332911", "psc": "5330", "set_aside": "SBA",
     "producto": "Valvulas de compuerta de bronce para bomba contraincendios naval",
     "especificacion_tecnica_clave": "ASTM B584, 150 psi, PN20",
-    "cantidad_estimada": "1 LOTE (conjunto de reemplazo)",
+    "modelo_especifico": "AWWA C508",
+    "unidad_medida": "LOT",
+    "cantidad_total": 40,
     "lugar_entrega": "Norfolk / Virginia / UNITED STATES",
     "limite": "2026-11-04T18:00:00-05:00",
     "posted": "2026-09-25", "sin_descripcion": False,
-    "valor_contrato_usd": 48000.0,
-    "costo_proveedor_usd": 32000.0,
-    "capital_necesario_usd": 36800.0,
-    "precio_unitario_referencia_usd": 6400.0,
-    "precio_unitario_sugerido_usd": 8000.0,
-    "ganancia_neta_usd": 16000.0,
-    "margen_porcentaje": 33.3,
+    "valor_contrato_usd": 320000.0,
+    "precio_unitario_costo": 6400.0,
+    "precio_unitario_mercado": 7250.0,
+    "precio_unitario_oferta": 8000.0,
+    "ganancia_por_unidad": 1600.0,
+    "costo_total_usd": 256000.0,
+    "ganancia_total_usd": 64000.0,
+    "margen_bruto_porcentaje": 25.0,
+    "costo_factoring_usd": 11200.0,
+    "ganancia_neta_usd": 52800.0,
+    "margen_neto_porcentaje": 20.6,
     "precio_oferta_sugerido_usd": 45000.0,
     "estrategia_oferta": "Ofertar 8% bajo estimado con entrega en 45 dias.",
     "margen_por_distribuidor": (
@@ -70,16 +76,19 @@ print("=" * 70)
 check("Enlace de SAM.gov", 'href="https://sam.gov/workspace/contract' in html)
 check("Descripcion de la licitacion", "Valvulas de compuerta" in html)
 check("  y la especificacion tecnica", "ASTM B584" in html)
-check("Cantidad", "LOTE" in html)
-check("Valor del contrato", "$48,000.00" in html)
-check("Dinero para comprar", "$32,000.00" in html)
-check("Dinero necesario para ofertar", "$36,800.00" in html)
-check("  con la nota del colchon", "colch" in html.lower())
-check("Ganancia neta", "$16,000.00" in html)
-check("Margen porcentual", "33.3%" in html)
-check("Precio unitario de catalogo", "$6,400.00" in html)
+check("Valor del contrato", "$320,000.00" in html)
+check("Costo total de compra", "$256,000.00" in html)
+check("Factoring descontado", "$11,200.00" in html)
+check("  y aparece como porcentaje", "3.5%" in html)
+check("Ganancia bruta", "$64,000.00" in html)
+check("Ganancia neta tras factoring", "$52,800.00" in html)
+check("Margen bruto", "25.0%" in html)
+check("Margen neto", "20.6%" in html)
+check("Precio unitario de catalogo", "$7,250.00" in html)
 check("Precio unitario a ofertar", "$8,000.00" in html)
-check("Monto a ofertar", "$45,000.00" in html)
+check("Ganancia por unidad", "$1,600.00" in html)
+check("Monto a ofertar", "$320,000.00" in html)
+check("Cantidad en unidades", "40 LOT" in html)
 check("Contacto", "jane.doe@navy.mil" in html)
 check("Limite para ofertar", "2026-11-04" in html)
 print()

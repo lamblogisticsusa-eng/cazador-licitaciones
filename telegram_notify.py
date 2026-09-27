@@ -135,8 +135,14 @@ def formatear_analisis(a: dict) -> str:
     # --- Que hay que entregar ---
     L.append("📝 <b>Que hay que entregar</b>")
     L.append(_esc(a["producto"]))
-    if a["cantidad_estimada"]:
-        L.append(f"Cantidad estimada: <b>{_esc(a['cantidad_estimada'])}</b>")
+    if a.get("modelo_especifico"):
+        L.append(f"Modelo: <b>{_esc(a['modelo_especifico'])}</b>")
+
+    # Cantidad y unidad: es la base de toda la cuenta.
+    cantidad = a.get("cantidad_total")
+    unidad = a.get("unidad_medida") or "EA"
+    if cantidad:
+        L.append(f"Cantidad: <b>{cantidad:,.0f} {_esc(str(unidad))}</b>")
     if a["especificacion_tecnica_clave"]:
         L.append("")
         L.append("🔧 <b>Especificacion tecnica clave</b>")
@@ -147,30 +153,45 @@ def formatear_analisis(a: dict) -> str:
         L.append(f"⚠️ <i>{kyo.EMOCIONES['sin_descripcion']}. Las cifras son estimaciones.</i>")
     L.append("")
 
-    # --- Dinero ---
-    L.append("💰 <b>Los numeros</b>")
+    # --- La cuenta, por unidad ---
+    L.append("💰 <b>La cuenta, por unidad</b>")
+    L.append(f"• Comprar cada una en USA: <b>{_usd(a['precio_unitario_costo'])}</b>")
+    L.append(f"• Precio de catalogo de cada una: <b>{_usd(a['precio_unitario_mercado'])}</b>")
+    L.append(f"• Ofertar cada una a: <b>{_usd(a['precio_unitario_oferta'])}</b>")
+    L.append(f"• <b>Ganancia por unidad: {_usd(a['ganancia_por_unidad'])}</b>")
+    L.append("")
+
+    # --- El total, con factoring ---
+    L.append("📊 <b>El total</b>")
     L.append(f"• Valor del contrato: <b>{_usd(a['valor_contrato_usd'])}</b>")
-    L.append(f"• Comprar en USA: <b>{_usd(a['costo_proveedor_usd'])}</b>")
-    capital = a.get("capital_necesario_usd")
-    if capital:
-        L.append("")
-        L.append("💳 <b>Dinero que necesitas tener disponible</b>")
-        L.append(f"• Para ofertar y cumplir: <b>{_usd(capital)}</b>")
-        L.append(
-            f"<i>(compra {config.MARGEN_COLCHON * 100:.0f}% de colchón para flete, "
-            "aranceles e imprevistos. No lo recovers hasta que cobres.)</i>"
-        )
+    L.append(f"• Costo de compra: {_usd(a['costo_total_usd'])}")
+    mb = a.get("margen_bruto_porcentaje")
+    mn = a.get("margen_neto_porcentaje")
+    L.append(
+        f"• <b>Ganancia bruta: {_usd(a['ganancia_total_usd'])}</b>"
+        + (f" ({mb:.1f}%)" if mb is not None else "")
+    )
+    L.append(
+        f"• Factoring ({config.FACTORING_PCT * 100:.1f}%): "
+        f"-{_usd(a['costo_factoring_usd'])}"
+    )
+    L.append(
+        f"• <b>Ganancia neta: {_usd(a['ganancia_neta_usd'])}</b>"
+        + (f" ({mn:.1f}%)" if mn is not None else "")
+    )
+    L.append(f"• <b>Ofertar: {_usd(a['precio_oferta_sugerido_usd'])}</b>")
     L.append("")
-    L.append("📈 <b>Ganancia</b>")
-    L.append(f"• Neta estimada: <b>{_usd(a['ganancia_neta_usd'])}</b>"
-             + (f" ({a['margen_porcentaje']:.1f}%)" if a["margen_porcentaje"] is not None else ""))
-    L.append(f"• Precio unitario de catálogo: <b>{_usd(a['precio_unitario_referencia_usd'])}</b>")
-    L.append(f"• Precio unitario a ofertar: <b>{_usd(a['precio_unitario_sugerido_usd'])}</b>")
+    L.append(
+        f"<i>Objetivo: {config.MARGEN_BRUTO_MIN * 100:.0f}%–"
+        f"{config.MARGEN_BRUTO_MAX * 100:.0f}% bruto; minimo "
+        f"{config.MARGEN_NETO_MIN * 100:.0f}% neto tras factoring.</i>"
+    )
+    L.append("")
+
     if a.get("margen_por_distribuidor"):
-        L.append("")
-        L.append("💡 <b>Dónde está el mejor margen</b>")
+        L.append("💡 <b>Donde esta el mejor margen</b>")
         L.append(_esc(a["margen_por_distribuidor"]))
-    L.append("")
+        L.append("")
 
     # --- Estrategia ---
     L.append("🎯 <b>Estrategia de oferta</b>")

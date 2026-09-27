@@ -67,9 +67,24 @@ MAX_NOTIFICACIONES = _int("MAX_NOTIFICACIONES", 10)
 TOPE_USD = _float("TOPE_USD", 250000.0)
 MIN_USD = _float("MIN_USD", 5000.0)
 DIAS_MINIMO_PARA_POSTULAR = _int("DIAS_MINIMO_PARA_POSTULAR", 7)
-# Colchon sobre el costo de compra para calcular el capital que hay que tener
-# disponible. Cubre flete interno, ionizedos, ajustes de cantidad y el desfase
-# entre pagar y cobrar. El diferenciador: lo que ganas no lo tocas hasta que cobres.
+
+# --- Modelo economico del usuario (empresa unipersonal en Chile) ---
+#
+# El capital NO es un problema: se resuelve con factoring dentro de USA.
+# Ese factoring cobra un 3-4% del valor del contrato, asi que el margen que
+# importa no es el bruto sino el neto despues de factoring.
+#
+#   margen bruto  15% - 35%  (lo que se gana comprando y revendiendo)
+#   factoring     3%  - 4%   (lo que se paga por cobrar antes)
+#   margen neto   11% - 31%
+#
+# Kyomoto no debe recomendar una oferta que deje menos de esto, porque en la
+# practica es una oferta que no vale la pena.
+FACTORING_PCT = _float("FACTORING_PCT", 0.035)
+MARGEN_BRUTO_MIN = _float("MARGEN_BRUTO_MIN", 0.15)
+MARGEN_BRUTO_MAX = _float("MARGEN_BRUTO_MAX", 0.35)
+MARGEN_NETO_MIN = _float("MARGEN_NETO_MIN", 0.12)
+# Colchon para imprevistos al calcular el margen objetivo.
 MARGEN_COLCHON = _float("MARGEN_COLCHON", 0.15)
 
 # --- Rendimiento / Costos ---

@@ -53,8 +53,17 @@ services:
         value: "250000"
       - key: MIN_USD
         value: "5000"
-      - key: MARGEN_COLCHON
+      # --- Modelo economico ---
+      # El capital se resuelve con factoring en USA, asi que no se pide.
+      # Lo que decide es el margen NETO despues de pagar el factoring.
+      - key: FACTORING_PCT
+        value: "0.035"
+      - key: MARGEN_BRUTO_MIN
         value: "0.15"
+      - key: MARGEN_BRUTO_MAX
+        value: "0.35"
+      - key: MARGEN_NETO_MIN
+        value: "0.12"
       - key: INTERVALO_HORAS
         value: "2"
       - key: WORKERS

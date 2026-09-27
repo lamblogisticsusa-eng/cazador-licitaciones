@@ -39,21 +39,30 @@ _bloqueo = threading.Lock()
 ESQUEMA = {
     "viable": "bool",
     "motivo_descarte": "str",
+    # --- Que se compra, a nivel de unidad ---
     "producto": "str",
+    "modelo_especifico": "str",
+    "unidad_medida": "EA|LOT|CJ|KIT|PAIR|SET|CAJA|OTRO",
+    "cantidad_total": "num",
     "especificacion_tecnica_clave": "str",
-    "cantidad_estimada": "str",
     "lugar_entrega": "str",
+    # --- Precio por unidad ---
+    "precio_unitario_costo": "num|null",
+    "precio_unitario_mercado": "num|null",
+    "precio_unitario_oferta": "num|null",
+    "ganancia_por_unidad": "num|null",
+    # --- Totales del contrato ---
     "valor_contrato_usd": "num|null",
-    "costo_proveedor_usd": "num|null",
-    "capital_necesario_usd": "num|null",
-    "precio_unitario_referencia_usd": "num|null",
-    "precio_unitario_sugerido_usd": "num|null",
-    "ganancia_neta_usd": "num|null",
-    "margen_porcentaje": "num|null",
+    "costo_total_usd": "num|null",
+    "ganancia_total_usd": "num|null",
+    "margen_bruto_porcentaje": "num|null",
+    "costo_factoring_usd": "num|null",
+    "margen_neto_porcentaje": "num|null",
     "precio_oferta_sugerido_usd": "num|null",
+    # --- Como se consigue ese margen ---
     "estrategia_oferta": "str",
-    "busquedas_distribuidores": "[str]",
     "margen_por_distribuidor": "str",
+    "busquedas_distribuidores": "[str]",
     "nivel_riesgo": "bajo|medio|alto",
     "preguntas_criticas": "[str]",
     "observaciones": "str",
@@ -133,16 +142,94 @@ REGLAS DE ELIMINACION (si se cumple cualquiera, viable = false)
   1. Si es un servicio intangible, consultoria, personal, TI, software,
      mantenimiento, construccion, limpieza, transporte o alquiler -> false.
   2. Si el valor del contrato supera USD {config.TOPE_USD:,.0f} -> false.
-  3. Si el valor es menor a USD {config.MIN_USD:,.0f} -> false (no justifica el
-     costo de embarque, tramite de exportacion y envio internacional).
+  3. Si el valor es menor a USD {config.MIN_USD:,.0f} -> false.
   4. Si exige presencia en obra, licencia local, certificacion de contratista
      local o que el proveedor sea residente en EE.UU. -> false.
-  5. Si el lugar de entrega es un punto en el extranjero que no sea
-     Estados Unidos o un almacen del gobierno -> false.
+  5. Si el lugar de entrega esta fuera de Estados Unidos -> false.
   6. Si la fecha limite para presentar oferta ya vencio -> false.
+  7. Si el margen NETO (despues de factoring) queda por debajo de
+     {config.MARGEN_NETO_MIN * 100:.0f}% -> false. Es el margen que de
+     verdad se lleva el cliente, y por debajo de eso no vale ofertar.
 
-SI SE CUMPLE -> viable = false y llena SOLO motivo_descarte con una frase
-corta explicando cual regla se rompio.
+MODELO ECONOMICO (esto es lo mas importante, hazlo bien)
+
+Mi cliente es una empresa unipersonal en CHILE que:
+  - compra el producto en ESTADOS UNIDOS a un distribuidor
+  - lo revende al gobierno de EE.UU.
+  - NO tiene capital: usa factoring dentro de USA, que cobra un
+    {config.FACTORING_PCT * 100:.1f}% del valor del contrato
+  - necesita un margen BRUTO entre {config.MARGEN_BRUTO_MIN * 100:.0f}% y
+    {config.MARGEN_BRUTO_MAX * 100:.0f}% para que el negocio valga la pena
+
+Razona por UNIDADES, no por contrato. Ejemplo del razonamiento correcto:
+  "50 laptops modelo X" -> 50 unidades x $1,200 de costo = $60,000 invertido
+  -> se ofrece a $1,320 unitario = $66,000
+  -> $6,000 de ganancia bruta (16.7%)
+  -> factoring 3.5% sobre $66,000 = $2,310
+  -> ganancia neta $3,690 (11.2% del valor del contrato)
+  -> si el margen neto queda bajo {config.MARGEN_NETO_MIN * 100:.0f}%, no ofertar
+
+Cuando la cantidad o el precio no estén en el aviso, ESTIMA a partir del
+valor del contrato y de la especificacion, y dilo. Es preferible un numero
+razonado que un null.
+
+SI ES VIABLE, ENTREGA:
+
+  producto                      : que se compra, en espanol claro
+  modelo_especifico              : marca y modelo exacto, o "" si no se indica
+  unidad_medida                 : EA | LOT | CJ | KIT | PAIR | SET | CAJA | OTRO
+  cantidad_total                : numero de unidades. Sin "comas" ni texto.
+  especificacion_tecnica_clave  : 3-5 datos tecnicos que hay que cumplir
+  lugar_entrega                 : ciudad / estado, o "No especificado"
+  valor_contrato_usd            : mejor estimacion del valor total
+  precio_unitario_costo         : lo que cuesta COMPRAR una unidad en USA
+  precio_unitario_mercado       : precio de catalogo de una unidad
+  precio_unitario_oferta        : por que unidad hay que ofrecer
+  ganancia_por_unidad           : oferta - costo, por unidad
+  costo_total_usd               : cantidad x precio_unitario_costo
+  ganancia_total_usd            : cantidad x ganancia_por_unidad
+  margen_bruto_porcentaje       : ganancia_total / valor_contrato * 100
+  costo_factoring_usd           : valor_contrato * {config.FACTORING_PCT:.3f}
+  margen_neto_porcentaje        : (ganancia_total - factoring) / valor * 100
+  precio_oferta_sugerido_usd    : total a ofertar (cantidad x unitario)
+  estrategia_oferta             : 2-3 frases de tactica
+  busquedas_distribuidores      : 3-5 terminos EN INGLES con el sustantivo
+                                 tecnico del producto y el modelo, sin
+                                 palabras de instruccion.
+                                 Ej: "Dell Latitude 5450 wholesale distributor"
+  margen_por_distribuidor       : como cambia la ganancia segun donde se
+                                 compre, con el rango en cada caso:
+                                 - catalogo grande: 15-20% bruto
+                                 - mayorista/importador: 20-25% bruto
+                                 - fabricante directo: 25-35% bruto
+                                 Di explicitamente cual conviene para ESTE
+                                 producto y por que.
+  nivel_riesgo                  : bajo | medio | alto
+  preguntas_criticas            : 3-5 preguntas que DEBO hacer antes de ofertar
+  observaciones                 : 1-2 frases de advertencia
+
+FORMATO DE SALIDA: SOLO un objeto JSON valido, sin markdown, sin ```.
+Las claves son exactamente:
+{json.dumps(ESQUEMA, indent=2, ensure_ascii=False)}
+
+Ejemplo, bidding 50 laptops:
+{{"viable": true, "motivo_descarte": "",
+  "producto": "Laptops para Answer Key Kiosks",
+  "modelo_especifico": "Dell Latitude 5450",
+  "unidad_medida": "EA", "cantidad_total": 50,
+  "especificacion_tecnica_clave": "i5-1345U, 16GB RAM, 512GB SSD",
+  "lugar_entrega": "Fort Huachuca / Arizona / UNITED STATES",
+  "valor_contrato_usd": 66000,
+  "precio_unitario_costo": 1200, "precio_unitario_mercado": 1249,
+  "precio_unitario_oferta": 1320, "ganancia_por_unidad": 120,
+  "costo_total_usd": 60000, "ganancia_total_usd": 6000,
+  "margen_bruto_porcentaje": 9.1,
+  "costo_factoring_usd": 2310, "margen_neto_porcentaje": 5.6,
+  "precio_oferta_sugerido_usd": 66000,
+  "busquedas_distribuidores": ["Dell Latitude 5450 wholesale distributor usa"],
+  "nivel_riesgo": "medio", "preguntas_criticas": ["..."], "observaciones": ""}}
+(NOTA: ese ejemplo sale con margen neto bajo y por tanto seria viable=false.
+ Sirve solo para mostrar la forma, no el resultado esperado.)
 
 DATOS DE LA OPORTUNIDAD
   Titulo:        {opp.get('title', 'sin titulo')}
@@ -156,50 +243,6 @@ DATOS DE LA OPORTUNIDAD
 
 DESCRIPCION OFICIAL
 {descripcion if descripcion.strip() else "*** NO DISPONIBLE *** (SAM.gov respondio 404 'Description Not Found' para este aviso. Evalua SOLO con el titulo y los metadatos, y baja la certeza de tus estimaciones. Si el titulo no alcanza para saber si es producto fisico, marca viable=false.)"}
-
-SI ES VIABLE, ENTREGA:
-
-  producto                      : que se compra, en espanol claro
-  especificacion_tecnica_clave  : 3-5 datos tecnicos que hay que cumplir
-  cantidad_estimada            : ej. "1,200 EA", "40 LOTES"
-  valor_contrato_usd            : mejor estimacion. null si no se puede saber
-  costo_proveedor_usd           : lo que cuesta COMPRAR en USA + preparar el envio
-  capital_necesario_usd         : dinero que hay que tener DISPONIBLE para poder
-                                  ofertar y cumplir si ganas. Es el costo del
-                                  producto mas un colchón de 15% para imprevistos
-                                  (flete interno, ionizedos, ajustes). No es lo
-                                  mismo que el valor del contrato.
-  precio_unitario_referencia_usd: precio de catalogo actual por unidad en USA
-  precio_unitario_sugerido_usd  : tu precio por unidad para ofertar
-  ganancia_neta_usd             : valor - costo proveedor
-  margen_porcentaje             : ganancia / valor * 100
-  precio_oferta_sugerido_usd    : total a ofertar para ganar con buen margen
-  estrategia_oferta             : 2-3 frases de tactica de oferta
-  busquedas_distribuidores      : 3-5 terminos EN INGLES para buscar el
-                                 producto en catálogos de distribuidores
-                                 estadounidenses. Solo el sustantivo tecnico
-                                 del producto, sin palabras de instruccion.
-                                 Ejemplo: "bronze gate valve", "fire pump valve"
-  margen_por_distribuidor       : como varia la ganancia segun de donde se
-                                 compre. Rango tipico 15% a 35%:
-                                 - distribuidor de catalogo grande: 15-20%
-                                 - mayorista/importador: 20-25%
-                                 - fabricante directo: 25-35%
-                                 Explica en una frase donde esta el mejor margen.
-  nivel_riesgo                  : bajo | medio | alto
-  preguntas_criticas            : 3-5 preguntas que DEBO hacer antes de ofertar
-  observaciones                 : 1-2 frases de advertencia
-
-FORMATO DE SALIDA: SOLO un objeto JSON valido, sin markdown, sin ```.
-Las claves son exactamente:
-{json.dumps(ESQUEMA, indent=2, ensure_ascii=False)}
-
-Ejemplo minimo de forma:
-{{"viable": true, "motivo_descarte": "", "producto": "...", "valor_contrato_usd": 45000,
-  "costo_proveedor_usd": 31000, "precio_unitario_sugerido_usd": 34.5,
-  "ganancia_neta_usd": 14000, "margen_porcentaje": 31.1,
-  "precio_oferta_sugerido_usd": 41000, "busquedas_distribuidores": ["wholesale forklift usa"],
-  "nivel_riesgo": "medio", "preguntas_criticas": ["..."], "observaciones": ""}}
 """.strip()
 
 
@@ -330,27 +373,67 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
     if not isinstance(datos.get("viable"), bool):
         raise GeminiError(f"Gemini no devolvio el campo booleano 'viable': {texto[:200]}")
 
+    # --- Lo que la IA dice ---
+    cantidad = _num(datos.get("cantidad_total"))
+    pu_costo = _num(datos.get("precio_unitario_costo"))
+    pu_oferta = _num(datos.get("precio_unitario_oferta"))
+    pu_mercado = _num(datos.get("precio_unitario_mercado"))
+    valor = _num(datos.get("valor_contrato_usd"))
+
+    # --- Lo que se recalcula aqui ---
+    # Se desconfia de los totales: si vienen mal, la ficha ensena al cliente
+    # una economia que no existe. Con cantidad y precio unitario se rehace
+    # toda la cuenta, que es ademas la que el usuario revisa.
+    if cantidad and cantidad > 0 and pu_costo and pu_oferta:
+        if not valor:
+            valor = pu_oferta * cantidad
+        ganancia_unidad = pu_oferta - pu_costo
+        costo_total = pu_costo * cantidad
+        ganancia_total = ganancia_unidad * cantidad
+        margen_bruto = (ganancia_total / valor * 100) if valor else None
+        factoring = valor * config.FACTORING_PCT if valor else None
+        ganancia_neta = (ganancia_total - factoring) if factoring is not None else None
+        margen_neto = (ganancia_neta / valor * 100) if valor and ganancia_neta is not None else None
+    else:
+        # Sin unidades no se puede hacer la cuenta por unidad: se usa lo que
+        # haya dado la IA y se marca como poco fiable.
+        ganancia_unidad = None
+        costo_total = _num(datos.get("costo_total_usd"))
+        ganancia_total = _num(datos.get("ganancia_total_usd"))
+        margen_bruto = _num(datos.get("margen_bruto_porcentaje"))
+        factoring = valor * config.FACTORING_PCT if valor else _num(datos.get("costo_factoring_usd"))
+        ganancia_neta = _num(datos.get("ganancia_total_usd"))
+        margen_neto = _num(datos.get("margen_neto_porcentaje"))
+
     return {
         "notice_id": opp.get("noticeId"),
         "viable": bool(datos["viable"]),
         "motivo_descarte": _limpiar_ia(datos.get("motivo_descarte"))[:300],
         "sin_descripcion": not bool(descripcion.strip()),
         "producto": _limpiar_ia(datos.get("producto"))[:400],
+        "modelo_especifico": _limpiar_ia(datos.get("modelo_especifico"))[:120],
+        "unidad_medida": _limpiar_ia(datos.get("unidad_medida"))[:20].upper() or "EA",
+        "cantidad_total": cantidad,
         "especificacion_tecnica_clave": _limpiar_ia(datos.get("especificacion_tecnica_clave"))[:700],
-        "cantidad_estimada": _limpiar_ia(datos.get("cantidad_estimada"))[:80],
-        "lugar_entrega": str(datos.get("lugar_entrega") or lugar or "No especificado")[:150],
-        "valor_contrato_usd": _num(datos.get("valor_contrato_usd")),
-        "costo_proveedor_usd": _num(datos.get("costo_proveedor_usd")),
-        "capital_necesario_usd": _num(datos.get("capital_necesario_usd")),
-        "precio_unitario_referencia_usd": _num(datos.get("precio_unitario_referencia_usd")),
-        "precio_unitario_sugerido_usd": _num(datos.get("precio_unitario_sugerido_usd")),
-        "ganancia_neta_usd": _num(datos.get("ganancia_neta_usd")),
-        "margen_porcentaje": _num(datos.get("margen_porcentaje")),
-        "precio_oferta_sugerido_usd": _num(datos.get("precio_oferta_sugerido_usd")),
+        "lugar_entrega": _limpiar_ia(datos.get("lugar_entrega")) or lugar or "No especificado",
+        # Unidad
+        "precio_unitario_costo": pu_costo,
+        "precio_unitario_mercado": pu_mercado,
+        "precio_unitario_oferta": pu_oferta,
+        "ganancia_por_unidad": ganancia_unidad,
+        # Totales
+        "valor_contrato_usd": valor,
+        "costo_total_usd": costo_total,
+        "ganancia_total_usd": ganancia_total,
+        "margen_bruto_porcentaje": margen_bruto,
+        "costo_factoring_usd": factoring,
+        "ganancia_neta_usd": ganancia_neta,
+        "margen_neto_porcentaje": margen_neto,
+        "precio_oferta_sugerido_usd": _num(datos.get("precio_oferta_sugerido_usd")) or valor,
         "estrategia_oferta": _limpiar_ia(datos.get("estrategia_oferta"))[:700],
         "busquedas_distribuidores": _lista(datos.get("busquedas_distribuidores")),
         "margen_por_distribuidor": _limpiar_ia(datos.get("margen_por_distribuidor"))[:600],
-        "nivel_riesgo": str(datos.get("nivel_riesgo") or "medio").lower()[:10],
+        "nivel_riesgo": _limpiar_ia(datos.get("nivel_riesgo") or "medio").lower()[:10],
         "preguntas_criticas": _lista(datos.get("preguntas_criticas")),
         "observaciones": _limpiar_ia(datos.get("observaciones"))[:400],
         "naics": opp.get("naicsCode", ""),
