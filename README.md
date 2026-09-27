@@ -222,35 +222,51 @@ módulo.
 
 ---
 
-## La cuota de Gemini es el cuello de botella real
+## Diseñado para 10 análisis al día con el plan gratuito
 
-Probado contra la API: la clave funciona, `gemini-3.8-flash` responde, y las
-reglas de negocio se aplican bien. Lo que falla es **cuota**.
+No necesitas tarjeta. Kyomoto se auto-limita y aprovecha cada llamada.
+
+**1. Presupuesto diario (`quota.py`)**
+`PRESUPUESTO_GEMINI_DIARIO = 10`. El contador vive en SQLite, sobrevive a los
+reinicios de Render y reinicia a la **medianoche del Pacífico**, que es cuando
+Google reinicia su cuota. Si ya se gastaron las 10, el escaneo no intenta ni una
+llamada más y te lo dice. Comando `/cuota` para verlo.
+
+**2. Filtro de valor por texto (`filters.valor_declarado`)**
+SAM.gov no permite filtrar por monto, pero la descripción del aviso suele
+decirlo: *"Indefinite Delivery Contract: Estimated quantity 2.000 ; Not to
+Exceed 350,000.00"*. Kyomoto extrae ese número con regex y **descarta el
+contrato antes de gastar una llamada de Gemini**. Medido: 9 de 20 avisos
+descartados por monto, sin tocar la cuota.
+
+**3. Ritmo lento**
+`GEMINI_WORKERS=1` y `GEMINI_PAUSA_SEG=8`. Nada de paralelismo. Los límites
+exactos de RPM/TPM/RPD del plan gratis no son públicos (solo se ven en AI
+Studio), así que el código no los necesita conocer: se autolimita.
+
+**4. Lo que no se analiza, no se pierde**
+Si se acaba la cuota, los avisos **no se marcan como vistos**. Mañana vuelven a
+la cola. Nada se pierde por un 429.
+
+**Medición real del embudo en 2 días** (661 avisos):
 
 ```
-You exceeded your current quota, please check your plan and billing details
+661 avisos de SAM.gov
+  -> 329  tras el veto por NAICS
+  ->  74  tras puntaje, duplicados y rango de USD
+  ->  10  analizados con Gemini   <- el presupuesto diario
 ```
 
-El plan gratuito de Gemini da muy pocas llamadas por minuto y por día, y cada
-llamada de Kyomoto es grande (prompt largo + 2048 tokens de salida). Con 12
-análisis por barrido el plan gratis se agota en una o dos pasadas.
+Los 10 son los de mayor puntaje, no los primeros que aparecieron.
 
-**Solución recomendada: activa la facturación** en
-<https://aistudio.google.com> (tarjeta, pero el uso de Kyomoto es de centavos:
-unos 25 análisis al día). Con eso desaparece el 429.
+### Ajustes si quieres más o menos
 
-Sin facturación, la estrategia es frugal:
-
-```
-MAX_A_GEMINI             = 6      # no 12 ni 25
-GEMINI_WORKERS           = 1      # nada de paralelismo
-GEMINI_PAUSA_SEG         = 8      # segundos entre llamadas
-MAX_CHARS_DESCRIPCION    = 3000
-GEMINI_MAX_OUTPUT_TOKENS = 2048
-```
-
-**Los avisos que fallan por cuota NO se marcan como vistos**, a propósito: se
-reintentan en el siguiente barrido en vez de perderse para siempre.
+| Querés | Cambiá |
+|---|---|
+| Más de 10 al día | `PRESUPUESTO_GEMINI_DIARIO=20` (y sube `GEMINI_PAUSA_SEG`) |
+| Menos ruido | `PUNTAJE_MINIMO=8` |
+| Más avisos pequeños | `PUNTAJE_MINIMO=4` |
+| Revisar más días | `DIAS_DE_VENTANA=5` |
 
 ---
 

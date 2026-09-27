@@ -137,6 +137,72 @@ def es_viable(opp: dict, descripcion: str = "", minimo: int | None = None) -> bo
     return puntos >= minimo
 
 
+# Contratos grandes citada explicitamente en la descripcion. Se usan para
+# descartar el tope de USD antes de gastar una llamada de Gemini.
+_MONEDA = re.compile(
+    r"(?:NTE|not[\s\-]?to[\s\-]?exceed(?:ed)?|estimated(?:[\s\-]?value)?|"
+    r"max(?:imum)?|up[\s\-]?to|ceiling|total|contract[\s\-]?value|budget|"
+    r"award|estimated[\s\-]?at|value[\s\-]?of)"
+    r"[^0-9$]{0,40}\$?\s*([0-9][0-9,\.]{3,})",
+    re.IGNORECASE,
+)
+_MONEDA_SUELTA = re.compile(r"\$\s*([0-9][0-9,\.]{4,})")
+
+
+# Palabras que anteceden a una CANTIDAD de piezas, no a un valor de contrato.
+_CANTIDAD = re.compile(
+    r"(quantity|qty|\bea\b|\beach\b|per\s|units?|items?|pieces?|lots?|"
+    r"months?|years?|days?|weeks?|hours?|pages?|copies|boxes|pallets|"
+    r"shipments?|making\s|total\s+(?:items|pieces|units|lots))",
+    re.IGNORECASE,
+)
+
+
+def valor_declarado(descripcion: str) -> tuple[float | None, str]:
+    """
+    Extrae el valor del contrato del texto de la oportunidad.
+    Devuelve (monto, fragmento). monto es None si no se encuentra nada.
+
+    Sirve para aplicar el tope de TOPE_USD ANTES de llamar a Gemini: si el
+    aviso dice "Not to Exceed USD 350,000", no tiene caso gastar una de las
+    10 llamadas diarias en confirmarlo.
+    """
+    if not descripcion:
+        return None, ""
+
+    candidatos: list[tuple[float, str]] = []
+    for patron in (_MONEDA, _MONEDA_SUELTA):
+        for m in patron.finditer(descripcion):
+            previo = descripcion[max(0, m.start() - 20):m.start()]
+            digitos = re.sub(r"[^0-9.]", "", m.group(1))
+            if digitos.count(".") > 1:
+                digitos = re.sub(r"[^0-9]", "", digitos)
+            partes = digitos.split(".")
+            if len(partes) == 2 and len(partes[1]) in (2, 3):
+                valor = float(partes[0] + "." + partes[1])
+            else:
+                valor = float(re.sub(r"[^0-9]", "", digitos) or 0)
+
+            if valor < 1_000 or valor > 50_000_000:
+                continue
+
+            # "Estimated quantity 2.000 ; Not to Exceed 350,000.00": el 2.000 es
+            # un conteo de piezas, no el contrato. La palabra de cantidad solo
+            # descalifica cuando el numero es CHICO: si es grande, es dinero,
+            # aunque la palabra "quantity" este cerca.
+            if valor < 10_000 and _CANTIDAD.search(previo):
+                continue
+
+            inicio = max(0, m.start() - 35)
+            candidatos.append((valor, descripcion[inicio:m.end() + 10].strip()))
+
+    if not candidatos:
+        return None, ""
+    # Con varios montos gana el mayor: "NTE 350,000" es el techo del contrato,
+    # y es el numero que decide si excede tu tope.
+    return max(candidatos, key=lambda x: x[0])
+
+
 def clave_titulo(titulo: str) -> str:
     """
     SAM.gov duplica el mismo aviso bajo varios noticeId (los 'parts kit' de

@@ -32,6 +32,7 @@ from telegram.ext import (
 import config
 import gemini_analyzer
 import label as etiqueta
+import quota
 import sam_api
 import scanner
 import store
@@ -90,6 +91,7 @@ def _crear_app() -> Application:
     app.add_handler(CommandHandler("off", cmd_off))
     app.add_handler(CommandHandler("estado", cmd_estado))
     app.add_handler(CommandHandler("status", cmd_estado))
+    app.add_handler(CommandHandler("cuota", cmd_cuota))
     app.add_handler(CommandHandler("selftest", cmd_selftest))
     app.add_handler(CommandHandler("escaneo", cmd_escaneo))
     app.add_handler(CommandHandler("forzar_escaneo", cmd_escaneo))
@@ -135,6 +137,7 @@ async def cmd_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     r = ULTIMO_ESCANEO.get("resumen")
+    q = quota.estado()
     partes = [
         "📊 <b>Estado de Kyomoto</b>",
         f"• Monitoreo: {'🟢 activo' if ESTADO['activo'] else '🔴 pausado'}",
@@ -142,7 +145,14 @@ async def cmd_estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Historico guardado: {store.total_procesadas()} avisos",
         f"• Ventana de busqueda: {config.DIAS_DE_VENTANA} dias",
         f"• Tope: USD {config.TOPE_USD:,.0f} | Minimo: USD {config.MIN_USD:,.0f}",
+        "",
+        "<b>Cuota de Gemini hoy</b> (reinicia a medianoche del Pacifico)",
+        f"• Usadas: {q['usadas']}/{q['presupuesto']} | Restan: {q['restantes']}",
     ]
+    if q["fallidas"]:
+        partes.append(f"• Fallidas por cuota: {q['fallidas']}")
+    if q["agotado"]:
+        partes.append("• ⚠️ Agotada: Kyomoto no analizara mas hasta mañana")
     if r:
         partes += [
             "",
@@ -159,6 +169,31 @@ async def cmd_estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if config.DRY_RUN:
         partes.append("🧪 <b>DRY_RUN activo</b>: no se envia nada.")
     await update.message.reply_text("\n".join(partes), parse_mode=ParseMode.HTML)
+
+
+async def cmd_cuota(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = quota.estado()
+    dias = quota.dias_registrados()
+    lineas = [
+        "🔋 <b>Cuota de Gemini</b>",
+        f"• Hoy ({q['dia']}): <b>{q['usadas']}/{q['presupuesto']}</b> usadas",
+        f"• Restan: <b>{q['restantes']}</b>",
+        f"• Ritmo: 1 llamada cada {config.GEMINI_PAUSA_SEG:g}s, "
+        f"{config.GEMINI_WORKERS} a la vez",
+    ]
+    if q["fallidas"]:
+        lineas.append(f"• Hoy fallaron por cuota de Google: {q['fallidas']}")
+    if dias:
+        lineas += ["", "<b>Ultimos dias</b>"]
+        for d in dias:
+            barra = "▰" * min(d["llamadas"], 20)
+            lineas.append(f"• {d['dia']}: {d['llamadas']} {barra}")
+    lineas += [
+        "",
+        "<i>Google reinicia su cuota a la medianoche del Pacifico (17:00 hora de "
+        "Chile en invierno). Lo que no se alcanza hoy se reintenta manana.</i>",
+    ]
+    await update.message.reply_text("\n".join(lineas), parse_mode=ParseMode.HTML)
 
 
 async def cmd_selftest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -460,6 +495,8 @@ async def _post_shutdown(app: Application) -> None:
 
 def main() -> None:
     store.init_db()
+    quota.init()
+    quota.limpiar_reservas()
     threading.Thread(target=_servidor, daemon=True).start()
     log.info("Servidor web en el puerto %s", config.PORT)
 

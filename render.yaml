@@ -26,7 +26,7 @@ services:
       - key: DIAS_POR_CHUNK
         value: "2"
       - key: MAX_A_GEMINI
-        value: "12"
+        value: "10"
       - key: MAX_NOTIFICACIONES
         value: "10"
       - key: PUNTAJE_MINIMO
@@ -39,9 +39,11 @@ services:
         value: "24"
       - key: WORKERS
         value: "8"
+      - key: PRESUPUESTO_GEMINI_DIARIO
+        value: "10"
       - key: GEMINI_WORKERS
-        value: "2"
+        value: "1"
       - key: GEMINI_PAUSA_SEG
-        value: "4"
+        value: "8"
       - key: DRY_RUN
         value: "0"

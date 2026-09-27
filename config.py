@@ -39,7 +39,12 @@ LIMITE_POR_CHUNK = _int("LIMITE_POR_CHUNK", 1000)
 MAX_CHUNKS = _int("MAX_CHUNKS", 10)
 
 # Cuantas oportunidades pasan a Gemini en cada barrido.
-MAX_A_GEMINI = _int("MAX_A_GEMINI", 25)
+# El tope real lo impone PRESUPUESTO_GEMINI_DIARIO; este es el maximo por
+# barrido, por si acaso se corre el escaneo mas de una vez al dia.
+MAX_A_GEMINI = _int("MAX_A_GEMINI", 10)
+# Lo que el usuario quiere: 10 analyses solidos al dia, con el plan gratis.
+# Google reinicia su cuota a la medianoche del Pacifico (ver quota.py).
+PRESUPUESTO_GEMINI_DIARIO = _int("PRESUPUESTO_GEMINI_DIARIO", 10)
 # Piso de puntaje. Subirlo deja solo lo mas limpio a costa de revisar menos.
 PUNTAJE_MINIMO = _int("PUNTAJE_MINIMO", 6)
 # Cuantas descripciones bajamos de la API antes de puntuar en detalle.
@@ -60,8 +65,8 @@ WORKERS = _int("WORKERS", 8)
 # Gemini tiene su propio limite: el plan gratis es muy bajo (429
 # RESOURCE_EXHAUSTED). Por eso va aparte y con pausas. Subir estos numeros
 # sin subir de plan es la causa numero uno de que el escaneo se caiga a mitad.
-GEMINI_WORKERS = _int("GEMINI_WORKERS", 2)
-GEMINI_PAUSA_SEG = _float("GEMINI_PAUSA_SEG", 4.0)
+GEMINI_WORKERS = _int("GEMINI_WORKERS", 1)
+GEMINI_PAUSA_SEG = _float("GEMINI_PAUSA_SEG", 8.0)
 # Ante un 429 no se reintenta a lo loco: se deja el aviso para el proximo
 # barrido. Reintentar solo consume mas cuota.
 GEMINI_REINTENTOS_429 = _int("GEMINI_REINTENTOS_429", 1)
