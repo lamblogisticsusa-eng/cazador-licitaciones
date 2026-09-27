@@ -4,6 +4,8 @@ scanner.py - Orquesta el barrido: trae, filtra, puntua, analiza y notifica.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -188,16 +190,22 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     resumen["analizadas"] = len(a_analizar)
 
     # ---- Fase C: Gemini ----
-    # Gemini evalua hasta MAX_A_GEMINI, pero SOLO se notifican las
-    # MAX_NOTIFICACIONES mejores por puntaje. Asi recibes 5-10 oportunidades
-    # buenas en vez de 25 mediocres. El resto se marca como visto para no
-    # volver a salir mañana.
+    # Pocas llamadas simultaneas y con pausa entre ellas. El plan gratis de
+    # Gemini da 429 RESOURCE_EXHAUSTED si le pides 25 analyses en paralelo.
     fallos_gemini: list[str] = []
     viables: list[tuple[int, dict]] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(config.WORKERS, 5))) as pool:
+    throttle = threading.Semaphore(max(1, config.GEMINI_WORKERS))
+
+    def _analizar_serializado(opp: dict, desc: str, lugar: str) -> dict:
+        with throttle:
+            resultado = gemini_analyzer.analizar(opp, desc, lugar)
+            time.sleep(config.GEMINI_PAUSA_SEG)
+            return resultado
+
+    with ThreadPoolExecutor(max_workers=max(1, config.GEMINI_WORKERS)) as pool:
         futuros = {
             pool.submit(
-                gemini_analyzer.analizar,
+                _analizar_serializado,
                 o,
                 d,
                 filters.lugar_de_entrega(o),
@@ -211,7 +219,10 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
                 a = fut.result()
             except gemini_analyzer.GeminiError as e:
                 fallos_gemini.append(str(e))
-                _log(f"   Gemini fallo en {nid[:8]}: {e}")
+                _log(f"   Gemini fallo en {nid[:8]}: {str(e).splitlines()[0][:90]}")
+                # NO se marca como vista: si fallo por cuota o saturacion, este
+                # aviso debe reintentarse en el proximo barrido. Si lo marcaras,
+                # la oportunidad se perderia para siempre.
                 continue
             except Exception as e:
                 fallos_gemini.append(f"{type(e).__name__}: {e}")

@@ -1,4 +1,4 @@
-﻿# Kyomoto ✨
+# Kyomoto ✨
 
 Asistente kawaii que busca licitaciones de **compra de productos** en SAM.gov y
 te las manda a Telegram con el análisis financiero, precio unitario, ganancia
@@ -110,7 +110,7 @@ Ve a <https://aistudio.google.com/apikey> y crea una key.
 Verifícala antes de subir nada:
 
 ```bash
-curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent" \
+curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
   -H "Content-Type: application/json" \
   -H "x-goog-api-key: TU_CLAVE" \
   -d '{"contents":[{"parts":[{"text":"di OK"}]}],"generationConfig":{"maxOutputTokens":2048}}'
@@ -119,9 +119,15 @@ curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:g
 Debe devolver JSON con el texto. Un `401` significa que Google no reconoce la
 credencial.
 
-Ojo también con el modelo: la API de Gemini usa `gemini-2.5-flash`,
-`gemini-3.8-flash` o `gemini-flash-latest`. Si tu clave solo habilita
-algunos modelos, cambia `GEMINI_MODEL` en Render.
+Ojo también con el modelo:
+
+> **`gemini-2.5-flash` ya no está disponible para cuentas nuevas.** Google
+> devuelve `404: This model ... is no longer available to new users`.
+> El default de este proyecto es **`gemini-3.8-flash`**.
+>
+> Este error es engaifiable: parece un problema de credenciales pero es de
+> modelo. Por eso `probar_clave.py` prueba `GET /v1beta/models`, que no
+> necesita ningun modelo y aisla el problema de verdad.
 
 ### 3. Render
 
@@ -147,7 +153,7 @@ GEMINI_API_KEY       = AIza...          <-- empieza con AIza
 Opcionales (tienen buen valor por defecto):
 
 ```
-GEMINI_MODEL          = gemini-2.5-flash
+GEMINI_MODEL          = gemini-3.8-flash
 DIAS_DE_VENTANA       = 3      # ventana de busqueda
 MAX_A_GEMINI          = 25     # cuantas analiza Gemini
 MAX_NOTIFICACIONES    = 10     # <= cuantas te llegan (lo que pediste: 5-10 diarias)
@@ -213,6 +219,38 @@ cada deploy y en cada despertar, y Kyomoto olvida qué ya te notificó. Para no
 recibir duplicados, o usas plan pagado, o guardas el historial fuera
 (Turso/Supabase). `store.py` está preparado para cambiar el backend, es un solo
 módulo.
+
+---
+
+## La cuota de Gemini es el cuello de botella real
+
+Probado contra la API: la clave funciona, `gemini-3.8-flash` responde, y las
+reglas de negocio se aplican bien. Lo que falla es **cuota**.
+
+```
+You exceeded your current quota, please check your plan and billing details
+```
+
+El plan gratuito de Gemini da muy pocas llamadas por minuto y por día, y cada
+llamada de Kyomoto es grande (prompt largo + 2048 tokens de salida). Con 12
+análisis por barrido el plan gratis se agota en una o dos pasadas.
+
+**Solución recomendada: activa la facturación** en
+<https://aistudio.google.com> (tarjeta, pero el uso de Kyomoto es de centavos:
+unos 25 análisis al día). Con eso desaparece el 429.
+
+Sin facturación, la estrategia es frugal:
+
+```
+MAX_A_GEMINI             = 6      # no 12 ni 25
+GEMINI_WORKERS           = 1      # nada de paralelismo
+GEMINI_PAUSA_SEG         = 8      # segundos entre llamadas
+MAX_CHARS_DESCRIPCION    = 3000
+GEMINI_MAX_OUTPUT_TOKENS = 2048
+```
+
+**Los avisos que fallan por cuota NO se marcan como vistos**, a propósito: se
+reintentan en el siguiente barrido en vez de perderse para siempre.
 
 ---
 

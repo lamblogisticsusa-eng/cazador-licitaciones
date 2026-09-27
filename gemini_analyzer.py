@@ -90,7 +90,7 @@ def _construir_config():
     base = {
         "temperature": config.GEMINI_TEMPERATURE,
         "response_mime_type": "application/json",
-        "max_output_tokens": 4096,
+        "max_output_tokens": config.GEMINI_MAX_OUTPUT_TOKENS,
     }
     try:
         return types.GenerateContentConfig(
@@ -228,6 +228,7 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
     prompt = _construir_prompt(opp, descripcion, lugar or filters.lugar_de_entrega(opp))
 
     ultimo_error = None
+    intentos_429 = 0
     for intento in range(config.MAX_REINTENTOS):
         try:
             respuesta = cliente.models.generate_content(
@@ -239,32 +240,58 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
         except Exception as e:
             ultimo_error = e
             texto = str(e)
-            # Reintentar un 400 de prompt o un 404 de modelo no sirve de nada.
-            # OJO: desde el 28-may-2026 AI Studio crea "auth keys" ligadas a una
-            # service account que ya NO empiezan por AIza, asi que el prefijo
-            # no es un diagnostico valido. 401 aqui significa que Google no
-            # reconoce la credencial, y las causas mas comunes son otras.
+
+            # --- 429: la credencial es valida, se acabo la cuota. ---
+            if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
+                intentos_429 += 1
+                if intentos_429 > config.GEMINI_REINTENTOS_429:
+                    raise GeminiError(
+                        f"Se agoto la cuota de Gemini (429 RESOURCE_EXHAUSTED).\n"
+                        f"La clave SI funciona: esto es un limite del plan, no del "
+                        f"codigo. Opciones:\n"
+                        f"  - Bajar MAX_A_GEMINI (ahora {config.MAX_A_GEMINI}) y/o subir "
+                        f"GEMINI_PAUSA_SEG (ahora {config.GEMINI_PAUSA_SEG:g}s).\n"
+                        f"  - Activar facturacion en https://aistudio.google.com para "
+                        f"levantar el limite.\n"
+                        f"Este aviso NO se marco como visto: se reintentara en el "
+                        f"proximo barrido."
+                    ) from e
+                log.warning("429 de cuota. Pausa %.0fs.", config.GEMINI_PAUSA_SEG * 3)
+                time.sleep(config.GEMINI_PAUSA_SEG * 3)
+                continue
+
+            # --- 503: el modelo esta saturado. ---
+            if "503" in texto or "UNAVAILABLE" in texto:
+                log.warning("503 saturacion del modelo. Pausa %.0fs.", config.GEMINI_PAUSA_SEG * 2)
+                time.sleep(config.GEMINI_PAUSA_SEG * 2)
+                if intento + 1 >= config.MAX_REINTENTOS:
+                    raise GeminiError(
+                        f"El modelo {config.GEMINI_MODEL} esta saturado (503). "
+                        "Es transitorio: se reintentara en el proximo barrido."
+                    ) from e
+                continue
+
+            # --- 401: la credencial no es reconocida. ---
             if "401" in texto or "UNAUTHENTICATED" in texto:
                 raise GeminiError(
                     "Google respondio 401: no reconoce GEMINI_API_KEY como "
                     "credencial valida para la API de Gemini.\n"
                     "Causas probables, en orden:\n"
-                    "1. La clave se copio incompleta (puede llevar espacios o "
-                    "cortarse al pegar; son ~53 caracteres con un punto).\n"
-                    "2. La clave tiene restriccion de IP/origen. Render usa IPs "
-                    "dinamicas, asi que una clave restringida a tu IP local "
-                    "funciona en tu casa y falla en Render.\n"
-                    "3. La API Generative Language no esta habilitada en el "
-                    "proyecto de Google Cloud asociado.\n"
-                    "4. La clave es de otro producto de Google, no de AI Studio.\n"
-                    "Solucion: en https://aistudio.google.com/apikey crea una "
-                    "auth key nueva, SIN restriccion de IP, y copiala completa."
+                    "1. La clave se copio incompleta (~53 caracteres con un punto; "
+                    "un solo caracter mal da 401). Copiala con el boton de copiar.\n"
+                    "2. La clave tiene restriccion de IP. Render usa IPs dinamicas, "
+                    "asi que una clave restringida a tu IP local falla ahi.\n"
+                    "3. La API Generative Language no esta habilitada en el proyecto.\n"
+                    "Verificalo sin escribir la clave: python probar_clave.py"
                 ) from e
-            if "not found" in texto.lower() and "model" in texto.lower():
+
+            # --- 404 / modelo retirado. ---
+            if "no longer available" in texto.lower() or "not_found" in texto.lower():
                 raise GeminiError(
-                    f"El modelo '{config.GEMINI_MODEL}' no existe o no esta "
-                    f"disponible para esta clave. Revisa GEMINI_MODEL. Detalle: {texto[:200]}"
+                    f"El modelo '{config.GEMINI_MODEL}' no le sirve a esta cuenta. "
+                    f"Usa 'gemini-3.8-flash'. Detalle: {texto[:200]}"
                 ) from e
+
             log.warning("Gemini fallo (intento %s): %s", intento + 1, texto[:200])
             time.sleep(2 ** intento)
     else:

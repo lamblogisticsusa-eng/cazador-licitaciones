@@ -29,7 +29,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 SAM_API_KEY = os.getenv("SAM_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 # --- Ventana de busqueda en SAM.gov ---
 # DIAS_POR_CHUNK debe ser chico: la API devuelve ~450 registros/dia y corta en 1000.
@@ -54,10 +54,26 @@ MIN_USD = _float("MIN_USD", 5000.0)
 DIAS_MINIMO_PARA_POSTULAR = _int("DIAS_MINIMO_PARA_POSTULAR", 7)
 
 # --- Rendimiento / Costos ---
+# WORKERS controla las descargas de descripciones (HTTP barato a SAM.gov).
 WORKERS = _int("WORKERS", 8)
+
+# Gemini tiene su propio limite: el plan gratis es muy bajo (429
+# RESOURCE_EXHAUSTED). Por eso va aparte y con pausas. Subir estos numeros
+# sin subir de plan es la causa numero uno de que el escaneo se caiga a mitad.
+GEMINI_WORKERS = _int("GEMINI_WORKERS", 2)
+GEMINI_PAUSA_SEG = _float("GEMINI_PAUSA_SEG", 4.0)
+# Ante un 429 no se reintenta a lo loco: se deja el aviso para el proximo
+# barrido. Reintentar solo consume mas cuota.
+GEMINI_REINTENTOS_429 = _int("GEMINI_REINTENTOS_429", 1)
+
 GEMINI_TEMPERATURE = _float("GEMINI_TEMPERATURE", 0.2)
 GEMINI_THINKING_BUDGET = _int("GEMINI_THINKING_BUDGET", 0)
-MAX_CHARS_DESCRIPCION = _int("MAX_CHARS_DESCRIPCION", 6000)
+# El plan gratis de Gemini es muy justo de facto: cada llamada cuenta. Cuanto mas
+# corto el prompt y mas corta la salida, mas avisos entran por barrido.
+# 3000 caracteres de descripcion basta para decidir y para estimar precio;
+# pedir mas solo quema cuota.
+MAX_CHARS_DESCRIPCION = _int("MAX_CHARS_DESCRIPCION", 3000)
+GEMINI_MAX_OUTPUT_TOKENS = _int("GEMINI_MAX_OUTPUT_TOKENS", 2048)
 TIMEOUT_HTTP = _int("TIMEOUT_HTTP", 45)
 MAX_REINTENTOS = _int("MAX_REINTENTOS", 3)
 

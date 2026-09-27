@@ -19,14 +19,14 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.8-flash
       # 5 a 10 oportunidades diarias, las mejores segun el puntaje.
       - key: DIAS_DE_VENTANA
         value: "3"
       - key: DIAS_POR_CHUNK
         value: "2"
       - key: MAX_A_GEMINI
-        value: "25"
+        value: "12"
       - key: MAX_NOTIFICACIONES
         value: "10"
       - key: PUNTAJE_MINIMO
@@ -39,5 +39,9 @@ services:
         value: "24"
       - key: WORKERS
         value: "8"
+      - key: GEMINI_WORKERS
+        value: "2"
+      - key: GEMINI_PAUSA_SEG
+        value: "4"
       - key: DRY_RUN
         value: "0"
