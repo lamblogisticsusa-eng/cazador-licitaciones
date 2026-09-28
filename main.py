@@ -161,7 +161,8 @@ def texto_estado() -> str:
     r = ULTIMO_ESCANEO.get("resumen")
     q = quota.estado()
     partes = [
-        "📊 <b>Estado de Kyomoto</b>",
+        f"📊 <b>Kyomoto v{config.KYOMOTO_VERSION}</b> · modelo "
+        f"<code>{config.GEMINI_MODEL}</code>",
         f"• Busqueda: {'🟢 activa' if ESTADO['activo'] else '⏸ pausada'}",
         f"• Escaneando ahora: {'sí' if ESTADO['escaneando'] else 'no'}",
         f"• Cada: <b>{config.INTERVALO_HORAS:g} h</b> "
@@ -277,6 +278,8 @@ async def _selftest(destino, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     d = await asyncio.get_running_loop().run_in_executor(None, revisar)
 
     L = ["🩺 <b>Autodiagnóstico de Kyomoto</b>", ""]
+    L.append(f"<i>versión {config.KYOMOTO_VERSION} · modelo {config.GEMINI_MODEL}</i>")
+    L.append("")
     L.append("✅ <b>Telegram</b> listo" if d["telegram"] else "❌ Falta <b>TELEGRAM_BOT_TOKEN</b>")
     L.append(
         f"✅ Destino: <code>{telegram_notify._esc(d['chat'] or 'NO CONFIGURADO')}</code>"
@@ -683,6 +686,11 @@ def main() -> None:
     quota.init()
     quota.limpiar_reservas()
     threading.Thread(target=_servidor, daemon=True).start()
+    log.info("Kyomoto v%s arrancando", config.KYOMOTO_VERSION)
+    log.info("  modelo      : %s", config.GEMINI_MODEL)
+    log.info("  alternativas: %s", ", ".join(config.GEMINI_MODELES_ALTERNATIVOS))
+    log.info("  cada        : %g h | tope USD %s | margen neto min %g%%",
+             config.INTERVALO_HORAS, config.TOPE_USD, config.MARGEN_NETO_MIN * 100)
     log.info("Servidor web en el puerto %s", config.PORT)
 
     app = _crear_app()

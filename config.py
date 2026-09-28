@@ -4,6 +4,10 @@ Todas las claves se leen de variables de entorno. Nunca se hardcodean.
 """
 import os
 
+# Se muestra en /selftest y /estado para saber que codigo esta
+# corriendo en Render. Sube la version cuando cambies algo importante.
+KYOMOTO_VERSION = "2.0.0"
+
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
     return os.getenv(nombre, "1" if por_defecto else "0").strip().lower() in ("1", "true", "yes", "si", "s")

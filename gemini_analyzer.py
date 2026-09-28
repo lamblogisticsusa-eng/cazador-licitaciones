@@ -115,6 +115,80 @@ def _construir_config():
 
 
 def verificar_api() -> dict:
+    """
+    Prueba de humo. Recorre la MISMA cadena de modelos que usa analizar(),
+    asi que el resultado refleja lo que de verdad pasara en un barrido.
+    """
+    if not config.GEMINI_API_KEY:
+        return {"ok": False, "detalle": "GEMINI_API_KEY no esta configurada"}
+
+    cola = [config.GEMINI_MODEL] + [
+        m for m in config.GEMINI_MODELES_ALTERNATIVOS
+        if m and m != config.GEMINI_MODEL
+    ]
+    problemas = []
+    for m in cola:
+        try:
+            cliente = _get_cliente()
+            cliente.models.generate_content(
+                model=m, contents="Responde solo: OK",
+                config={"max_output_tokens": 2048},
+            )
+            if m == config.GEMINI_MODEL:
+                return {"ok": True, "detalle": f"OK - {m} responde", "modelo": m}
+            # El principal estaba saturado pero hay respaldo: esto es una
+            # nota, no un fallo. El escaneo va a funcionar igual.
+            problemas.append(f"{config.GEMINI_MODEL}: 503 saturado")
+            return {
+                "ok": True,
+                "detalle": f"OK via {m} ({config.GEMINI_MODEL} esta saturado)",
+                "modelo": m,
+                "degradado": True,
+                "avisos": problemas,
+            }
+        except Exception as e:
+            texto = str(e)
+            if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
+                return {
+                    "ok": False,
+                    "detalle": "Cuota de Google agotada (429). Se reinicia a "
+                               "medianoche del Pacifico. La clave SI funciona.",
+                    "cuota": True,
+                }
+            if "401" in texto or "UNAUTHENTICATED" in texto:
+                return {"ok": False, "detalle": f"401: {texto[:200]}"}
+            problemas.append(f"{m}: 503 saturado")
+            continue
+
+    return {
+        "ok": False,
+        "detalle": "Todos los modelos estan saturados (503): "
+                   + ", ".join(problemas),
+        "saturado": True,
+    }
+
+
+def _construir_config():
+    """Config tolerant: si la version instalada de google-genai no conoce
+    thinking_config, se sigue sin el en vez de reventar."""
+    from google.genai import types
+    base = {
+        "temperature": config.GEMINI_TEMPERATURE,
+        "response_mime_type": "application/json",
+        "max_output_tokens": config.GEMINI_MAX_OUTPUT_TOKENS,
+    }
+    try:
+        return types.GenerateContentConfig(
+            **base,
+            thinking_config=types.ThinkingConfig(
+                thinking_budget=config.GEMINI_THINKING_BUDGET
+            ),
+        )
+    except Exception:
+        return types.GenerateContentConfig(**base)
+
+
+def verificar_api() -> dict:
     """Prueba de humo. Se usa en /selftest."""
     if not config.GEMINI_API_KEY:
         return {"ok": False, "detalle": "GEMINI_API_KEY no configurada"}
