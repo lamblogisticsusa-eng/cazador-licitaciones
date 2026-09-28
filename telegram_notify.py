@@ -20,6 +20,7 @@ PROBLEMAS DEL CODIGO ORIGINAL QUE ESTE MODULO ARREGLA:
 from __future__ import annotations
 
 import html
+import re
 import logging
 
 import requests
@@ -53,6 +54,34 @@ def _pedir(metodo: str, payload: dict) -> dict | None:
         return None
 
 
+def _corte_seguro(linea: str, corte: int, limite: int) -> int:
+    """
+    Ajusta un punto de corte para que no caiga DENTRO de una etiqueta HTML.
+
+    _trocear corta en un espacio, y ese espacio puede caer dentro de un
+    <a href="..."> largo. La primera mitad del trozo queda con la etiqueta sin
+    cerrar y Telegram rechaza el mensaje. Si hay un "<" abierto sin cerrar en
+    el punto de corte, el corte se retrasa hasta antes de ese "<".
+
+    Garantiza devolver un valor > 0. Si no hay ningun sitio seguro (por
+    ejemplo una sola linea que empieza con "<" y nunca cierra antes del
+    limite), se corta en el limite aunque haya que partir la etiqueta: es un
+    caso rarísimo, _sanear_html escapa el "<" roto del trozo y Telegram lo
+    acepta. Lo que NO puede pasar es devolver 0, porque entonces el bucle de
+    troceado no avanza y se queda colgado para siempre.
+    """
+    abierto = linea.rfind("<", 0, corte)
+    if abierto == -1:
+        return corte
+    cerrado = linea.find(">", abierto, corte)
+    if cerrado == -1:
+        nuevo = linea.rfind(" ", 0, abierto)
+        if nuevo > 0:
+            return nuevo
+        return min(limite, max(1, corte))
+    return corte
+
+
 def _trocear(texto: str, limite: int = LIMITE_TELEGRAM - RESERVA) -> list[str]:
     """Divide respetando saltos de linea y, a falta de ellos, palabras."""
     if len(texto) <= limite:
@@ -63,6 +92,10 @@ def _trocear(texto: str, limite: int = LIMITE_TELEGRAM - RESERVA) -> list[str]:
             corte = linea.rfind(" ", 0, limite)
             if corte <= 0:
                 corte = limite
+            # Un corte en un espacio puede caer dentro de una etiqueta, si la
+            # linea es un <a href="..."> largo. La primera mitad quedaria con
+            # la etiqueta sin cerrar y Telegram rechaza el trozo entero.
+            corte = _corte_seguro(linea, corte, limite)
             if actual:
                 trozos.append(actual)
                 actual = ""
@@ -84,20 +117,127 @@ def enviar(chat_id: str, texto: str, html_mode: bool = True) -> bool:
         log.error("No hay TELEGRAM_CHAT_ID de destino.")
         return False
     ok = True
+    degradado = False
     for trozo in _trocear(texto):
-        payload = {"chat_id": chat_id, "text": trozo}
+        cuerpo = _sanear_html(trozo) if html_mode else trozo
+        payload = {"chat_id": chat_id, "text": cuerpo}
         if html_mode:
             payload["parse_mode"] = "HTML"
             payload["disable_web_page_preview"] = True
         res = _pedir("sendMessage", payload)
-        if res is None:
+        if res is None and html_mode:
             # Reintento en texto plano: si falla por HTML, asi al menos llega.
-            if html_mode:
-                plano = {"chat_id": chat_id, "text": trozo}
-                res = _pedir("sendMessage", plano)
-            if res is None:
-                ok = False
-    return ok
+            # Pero se avisa, porque llega SIN negritas, SIN links y SIN
+            # cursivas. Antes esto pasaba inadvertido: enviar() devolvia True
+            # y el usuario recibia un bloque gris creyendo que era normal.
+            log.error(
+                "Telegram rechazo el HTML; se reenvia en texto plano. Llega, "
+                "pero sin formato ni links. Revisa _sanear_html y las "
+                "constantes de kyo.py."
+            )
+            plano = {"chat_id": chat_id, "text": cuerpo}
+            res = _pedir("sendMessage", plano)
+            degradado = True
+        if res is None:
+            ok = False
+    return ok and not degradado
+
+
+# Etiquetas que Telegram acepta en parse_mode=HTML. Todo lo demas se escapa:
+# un "<" suelto es un intento de etiqueta y hace que Telegram rechace el
+# mensaje ENTERO con un 400, sin enviar nada.
+#
+# Esto viene de un fallo real del 28-sep-2026: la firma de Kyomoto era
+# "... (˶>ᴗ<˶) ⁾" y el "<" de "ᴗ<" lo leia Telegram como el inicio de una
+# etiqueta. Resultado:
+#   Bad Request: can't parse entities: Unsupported start tag "\u02f6)"
+# La ficha no llegaba, y como enviar() reintenta en texto plano y devolvia
+# True, el sistema decia "ok" mientras mandaba un bloque gris sin formato.
+_ETIQUETAS_OK = re.compile(
+    r"^</?([a-z][a-z0-9-]*)"
+    r"(?:\s[^<>]*?)?/?>$",
+    re.IGNORECASE,
+)
+# Las que Telegram acepta de verdad en parse_mode=HTML. Las demas, aunque
+# tengan forma de etiqueta, se escapan: "unsupported start tag" tambien es un
+# 400 que tira el mensaje entero.
+_ETIQUETAS_TELEGRAM = {"b", "i", "u", "s", "a", "code", "pre",
+                       "blockquote", "tg-spoiler"}
+
+
+def _sanear_html(texto: str) -> str:
+    """
+    Deja el HTML en un estado que Telegram acepta, aunque el texto venga
+    roto. Red de seguridad, no sustituto de _esc: los campos sueltos de
+    Gemini siguen pasando por _esc, que escapa ampersand y comillas.
+
+    Hace tres cosas:
+
+    1. Escapa cualquier "<" que no abra una etiqueta de las que Telegram
+       acepta. Ese era el fallo real: la firma "(\u02f6>\u1d17\u02f6)" traia un
+       "<" suelto y Telegram rechazaba la ficha entera con
+       "Unsupported start tag".
+    2. Escapa tambien el ">" del mismo fragmento, para que se vea el texto tal
+       cual y no dependa de que un ">" suelto sea legal.
+    3. Cierra las etiquetas que se hayan quedado abiertas al final. Una "<b>"
+       sin su "</b>" tambien es un 400, y aqui no se nota mirando el texto.
+
+    No toca las entidades ya escapadas (&lt;, &gt;, &amp;): no empiezan por
+    "<", y el recorrido solo mira los "<".
+    """
+    if "<" not in texto:
+        return texto
+
+    partes = []
+    abiertas: list[str] = []
+    i = 0
+    largo = len(texto)
+    while i < largo:
+        j = texto.find("<", i)
+        if j == -1:
+            partes.append(texto[i:])
+            break
+        partes.append(texto[i:j])
+        # Telegram corta en el primer ">", asi que se busca ese y no mas lejos.
+        k = texto.find(">", j)
+        if k == -1:
+            partes.append("&lt;")
+            i = j + 1
+            continue
+
+        trozo = texto[j:k + 1].strip()
+        m = _ETIQUETAS_OK.match(trozo)
+        nombre = (m.group(1) or "").lower() if m else ""
+        cerrar = trozo.startswith("</")
+        # Un "/>" final no abre nada: es un cierre disfrazado de apertura.
+        auto_cierra = trozo.endswith("/>")
+
+        if not m or nombre not in _ETIQUETAS_TELEGRAM:
+            partes.append("&lt;" + texto[j + 1:k] + "&gt;")
+        elif cerrar:
+            if nombre in abiertas:
+                # Anidamiento imperfecto como "<b>a<i>b</b>": el </b> cierra la
+                # de fuera, pero la <i> de dentro se queda abierta y Telegram
+                # rechaza el mensaje. Se emiten los cierres de lo que se
+                # descarta antes del que cierra de verdad.
+                while abiertas and abiertas[-1] != nombre:
+                    partes.append(f"</{abiertas.pop()}>")
+                if abiertas:
+                    abiertas.pop()
+                partes.append(trozo)
+            else:
+                partes.append("&lt;" + texto[j + 1:k] + "&gt;")
+        else:
+            if not auto_cierra:
+                abiertas.append(nombre)
+            partes.append(trozo)
+        i = k + 1
+
+    # Lo que quedo abierto se cierra aqui. Sin esto, "<b>texto" sin cierre
+    # haria que Telegram rechazase el mensaje entero.
+    while abiertas:
+        partes.append(f"</{abiertas.pop()}>")
+    return "".join(partes)
 
 
 def _esc(valor) -> str:
@@ -262,7 +402,10 @@ def formatear_analisis(a: dict) -> str:
 
     L.append("")
     L.append(f"<i>{kyo.CIERRE}</i>")
-    return "\n".join(L)
+    # Ultima red: aunque alguien escribiera un "<" a mano en una constante,
+    # la ficha sale con el HTML valido. Sin esto, un solo angulo suelto
+    # rechazaba el mensaje ENTERO con un 400 y la ficha no llegaba.
+    return _sanear_html("\n".join(L))
 
 
 def aviso_error(chat_id: str, titulo: str, detalle: str) -> None:

@@ -19,7 +19,10 @@ SALUDOS = {
     "ninguna": "Kyomoto sigue escaneando ✿",
 }
 
-CIERRE = "Kyomoto passandote la info para que tu llegue a tiempo (⁠˶>ᴗ<˶) ⁾"
+CIERRE = (
+    "Kyomoto passandote la info para que tu llegue a tiempo "
+    "(˶ ᴗ ˶) ⁾"
+)
 
 EMOCIONES = {
     "riesgo_bajo": "todo tranquilo (｡•̀ᴗ-)✧",
