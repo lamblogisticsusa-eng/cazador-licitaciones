@@ -47,11 +47,15 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Ante un 503 Kyomoto prueba el siguiente de esta lista en vez de esperar.
 # La saturacion es por modelo, no de la cuenta: por eso el respaldo existe.
+# gemini-3.5-flash-lite NO esta, y es a proposito: con la config real del
+# escaneo (response_mime_type + thinking_config) devuelve 400 INVALID_ARGUMENT.
+# Acepta un config simple y rechaza el que usa Kyomoto, asi que en la cadena
+# solo servia para gastar un intento en cada 503.
+#
 # El orden va de mas rapido a mas lento segun lo medido.
 GEMINI_MODELES_ALTERNATIVOS = os.getenv(
     "GEMINI_MODELES_ALTERNATIVOS",
-    "gemini-3.8-flash,gemini-3.5-flash-lite,gemini-flash-latest,"
-    "gemini-3.5-flash,gemini-3.7-flash",
+    "gemini-3.8-flash,gemini-flash-latest,gemini-3.5-flash,gemini-3.7-flash",
 ).replace(" ", "").split(",")
 
 # --- Ventana de busqueda en SAM.gov ---

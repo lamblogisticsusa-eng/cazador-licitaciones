@@ -175,11 +175,21 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     # Ahora se bajan solo las que pueden entrar al presupuesto de Gemini, con
     # margen: el resto espera su turno en el siguiente barrido.
     presupuesto = quota.estado()
-    cupos = min(config.MAX_A_GEMINI, presupuesto["restantes"])
-    objetivo = [o for _, o in provisionales[: max(cupos + 4, 6)]]
+    # Cuantos analisis van a ocurrir de verdad. Antes se calculaba con
+    # MAX_A_GEMINI (4) cuando el escaneo real acababa haciendo 1 solo: se
+    # pedian 8 descripciones y se usaba 1. Seis por barrido, doce barridos,
+    # setenta y dos descripciones al dia para nada.
+    previstos = max(1, min(
+        quota.por_barrido(), config.MAX_A_GEMINI, presupuesto["restantes"]
+    ))
+    # Margen sobre lo previsto: parte se cae por el rango de USD y parte por
+    # el filtro final, y no se avisara a Gemini de esas.
+    extra = max(2, previstos // 2)
+    objetivo = [o for _, o in provisionales[: previstos + extra]]
     _log(
         f"Pre-puntaje por titulo: {len(provisionales)} sobre el piso; "
-        f"necesito {cupos} analisis asi que bajo {len(objetivo)} descripciones"
+        f"van a ser {previstos} analisis asi que bajo {len(objetivo)} "
+        f"descripciones"
     )
 
     # ---- Fase B ----
@@ -277,7 +287,27 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
 
     top = min(len(puntuadas), config.MAX_A_GEMINI,
               quota.por_barrido(), presupuesto["restantes"])
-    a_analizar = puntuadas[:top]
+
+    # A Gemini no se le manda un aviso sin descripcion. Un titulo suelto no
+    # alcanza para calcular costo por unidad ni margen: el modelo responderia
+    # inventando numeros, que es peor que no responder. Se separan y se avisa
+    # si con eso no alcanza para llenar los cupos.
+    con_texto = [it for it in puntuadas if it[2].strip()]
+    sin_texto = len(puntuadas) - len(con_texto)
+    top = min(top, len(con_texto))
+    a_analizar = con_texto[:top]
+    if sin_texto:
+        _log(
+            f"{sin_texto} sobre el piso sin descripcion todavia (no se avisa a "
+            f"Gemini: solo tienen titulo)"
+        )
+    if not a_analizar:
+        _log("Ningun aviso con descripcion completa todavia. Se reintentara.")
+        resumen["errores"].append(
+            "Los avisos que pasan el filtro todavia no tienen descripcion "
+            "descargada. Se reintentan en el proximo barrido."
+        )
+        return resumen
     resumen["analizadas"] = len(a_analizar)
     avisar(
         f"🧠 Analizando {top} con Gemini "
@@ -332,7 +362,6 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             store.marcar(nid, opp.get("title", ""), viable=True, puntaje=puntos)
             viables.append((puntos, a))
             resumen["viables"] += 1
-            _log(f"   [OK] VIABLE [{puntos}]: {opp.get('title', '')[:62]}")
 
     # Si la cuota de Google se agoto a mitad del barrido, se abandona el resto:
     # cada reintento solo gasta mas cuota y retrasa el dia siguiente.
@@ -344,7 +373,24 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             f"{len(viables)} viables; el resto queda pendiente para manana."
         )
 
-    viables.sort(key=lambda x: x[0], reverse=True)
+    # "Las mejores" se ordenan por margen NETO, que es la metrica de decision
+    # de verdad, y no solo por el puntaje previo del filtro: un aviso con
+    # puntaje 9 y margen neto 13% es peor negocio que uno de 8 con 28%.
+    def _clave(item):
+        puntos, a = item
+        neto = a.get("margen_neto_porcentaje")
+        if not isinstance(neto, (int, float)):
+            neto = -1.0
+        return (neto, puntos)
+
+    viables.sort(key=_clave, reverse=True)
+    for puntos, a in viables:
+        neto = a.get("margen_neto_porcentaje")
+        _log(
+            f"   [OK] VIABLE [{puntos}] margen neto "
+            f"{neto if isinstance(neto, (int, float)) else '?'}%: "
+            f"{a['title'][:52]}"
+        )
     resumen["analisis"] = [a for _, a in viables]
     top = viables[: config.MAX_NOTIFICACIONES]
     if len(viables) > config.MAX_NOTIFICACIONES:

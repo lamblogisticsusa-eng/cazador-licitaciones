@@ -88,14 +88,48 @@ print(f"  Alternos  : {', '.join(alternos)}")
 # alcanzaba: habia que probar los que existen.
 check("El principal es el que respondio al sondear (3.6)",
       principal == "gemini-3.6-flash", f"-> {principal}")
-check("Hay al menos cinco alternos", len(alternos) >= 5, f"-> {len(alternos)}")
+check("Hay al menos tres alternos", len(alternos) >= 3, f"-> {len(alternos)}")
 check("El principal NO esta repetido en los alternos",
       principal not in alternos)
-check("No incluye gemini-flash-lite, que no existe",
+# Medido el 28-sep con la config real: contesta "OK" a un config simple y
+# devuelve 400 INVALID_ARGUMENT con el del escaneo. En la cadena solo servia
+# para gastar un intento.
+check("NO incluye gemini-3.5-flash-lite, que da 400",
+      "gemini-3.5-flash-lite" not in alternos)
+check("NO incluye gemini-flash-lite, que no existe",
       "gemini-flash-lite" not in alternos)
 check("No hay entradas vacias", all(m for m in config.GEMINI_MODELES_ALTERNATIVOS))
 check("La version subio a 2.1.0", config.KYOMOTO_VERSION == "2.1.0",
       f"-> {config.KYOMOTO_VERSION}")
+
+print()
+print("=" * 70)
+print("2b) CADA BARRIDO USA LA CUOTA, NO LA REPARTE ENTRE 12")
+print("=" * 70)
+import quota as _quota
+
+barridos = int(24 / config.INTERVALO_HORAS)
+reparto = max(1, config.PRESUPUESTO_GEMINI_DIARIO // barridos)
+por_barrido = _quota.por_barrido()
+print(f"  presupuesto : {config.PRESUPUESTO_GEMINI_DIARIO}/dia")
+print(f"  barridos    : {barridos} (cada {config.INTERVALO_HORAS:g}h)")
+print(f"  antes       : {reparto} por barrido (20 // 12)")
+print(f"  ahora       : {por_barrido} por barrido")
+# El bug: 20 // 12 == 1, o sea una sola licitacion cada dos horas y once
+# llamadas de la cuota perdidas solas al reiniciar.
+check("El reparto viejo habria dado 1 (el bug)", reparto == 1,
+      f"-> {reparto}")
+check("Ahora analiza al menos 2 por barrido", por_barrido >= 2,
+      f"-> {por_barrido}")
+check("Y nunca mas de MAX_A_GEMINI por barrido",
+      por_barrido <= config.MAX_A_GEMINI, f"-> {por_barrido}")
+# Con el piso de 2 y 12 barridos se piden 24, pero el tope diario de 20
+# sigue mandando por separado: no se puede gastar de mas.
+check("Los barridos piden mas de lo que la cuota permite (queda topado "
+      "por el tope diario)", por_barrido * barridos > config.PRESUPUESTO_GEMINI_DIARIO,
+      f"-> {por_barrido * barridos} vs {config.PRESUPUESTO_GEMINI_DIARIO}")
+check("El tope diario sigue siendo la fuente de verdad",
+      config.PRESUPUESTO_GEMINI_DIARIO >= por_barrido)
 
 print()
 print("=" * 70)

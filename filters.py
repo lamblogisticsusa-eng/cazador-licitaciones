@@ -205,7 +205,7 @@ _MONEDA = re.compile(
     r"(?:NTE|not[\s\-]?to[\s\-]?exceed(?:ed)?|estimated(?:[\s\-]?value)?|"
     r"max(?:imum)?|up[\s\-]?to|ceiling|total|contract[\s\-]?value|budget|"
     r"award|estimated[\s\-]?at|value[\s\-]?of)"
-    r"[^0-9$]{0,40}\$?\s*([0-9][0-9,\.]{3,})",
+    r"[^0-9$]{0,40}\$?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?|[0-9]{4,}(?:\.[0-9]{1,2})?)",
     re.IGNORECASE,
 )
 _MONEDA_SUELTA = re.compile(r"\$\s*([0-9][0-9,\.]{4,})")
@@ -218,6 +218,49 @@ _CANTIDAD = re.compile(
     r"shipments?|making\s|total\s+(?:items|pieces|units|lots))",
     re.IGNORECASE,
 )
+
+
+def _a_numero(bruto: str) -> float | None:
+    """
+    Convierte el texto de un monto en float, sin inventarse un factor.
+
+    SAM.gov escribe "85,000.00" (coma de miles, punto decimal) y casi siempre
+    seguido de un punto que cierra la frase. Una regex demasiado codiciosa se
+    traga ese punto final y termina intentando leer "85,000.00.": al partirlo
+    por puntos salen tres trozos, no cae en la rama de los centavos y el
+    numero se va a "8500000", cien veces el monto real.
+
+    Reglas, en orden:
+      - se ignoran todo menos digitos, comas y puntos
+      - los separadores del final no son decimales: "85,000.00." es 85,000
+      - un punto solo es decimal si lo siguen uno o dos digitos
+      - las comas son siempre separadores de miles (SAM.gov es de EE.UU.)
+    Devuelve None si no queda un numero usable.
+    """
+    s = re.sub(r"[^0-9.,]", "", bruto or "")
+    # "85,000.00." -> "85,000.00"  (el punto final cierra la frase, no es decimal)
+    s = s.rstrip(".,")
+    if not s or not any(ch.isdigit() for ch in s):
+        return None
+
+    if "." in s:
+        entero, _, decimal = s.rpartition(".")
+        # Un punto con 3+ digitos detras es de miles ("1.000.000"), no decimal.
+        if len(decimal) in (1, 2) and entero:
+            # float() no acepta comas: hay que quitarlas SIEMPRE, tanto en la
+            # parte entera como en la decimal. Sin esto "85,000.00" levanta
+            # ValueError y el monto se pierde entero.
+            s = f"{entero.replace(',', '')}.{decimal}"
+        else:
+            s = re.sub(r"[^0-9]", "", s)
+    else:
+        s = re.sub(r"[^0-9]", "", s)
+
+    try:
+        valor = float(s)
+    except ValueError:
+        return None
+    return valor or None
 
 
 def valor_declarado(descripcion: str) -> tuple[float | None, str]:
@@ -236,23 +279,28 @@ def valor_declarado(descripcion: str) -> tuple[float | None, str]:
     for patron in (_MONEDA, _MONEDA_SUELTA):
         for m in patron.finditer(descripcion):
             previo = descripcion[max(0, m.start() - 20):m.start()]
-            digitos = re.sub(r"[^0-9.]", "", m.group(1))
-            if digitos.count(".") > 1:
-                digitos = re.sub(r"[^0-9]", "", digitos)
-            partes = digitos.split(".")
-            if len(partes) == 2 and len(partes[1]) in (2, 3):
-                valor = float(partes[0] + "." + partes[1])
-            else:
-                valor = float(re.sub(r"[^0-9]", "", digitos) or 0)
+            valor = _a_numero(m.group(1))
+            if valor is None:
+                continue
 
             if valor < 1_000 or valor > 50_000_000:
                 continue
 
-            # "Estimated quantity 2.000 ; Not to Exceed 350,000.00": el 2.000 es
-            # un conteo de piezas, no el contrato. La palabra de cantidad solo
-            # descalifica cuando el numero es CHICO: si es grande, es dinero,
-            # aunque la palabra "quantity" este cerca.
-            if valor < 10_000 and _CANTIDAD.search(previo):
+            # "Estimated quantity 2,000 ; Not to Exceed 350,000.00": el 2,000 es
+            # un conteo de piezas, no el contrato.
+            #
+            # La palabra de cantidad se busca en el texto ANTES y DENTRO del
+            # match, no solo antes. Antes solo se miraba `previo`, o sea los 20
+            # caracteres previos al INICIO del match, pero el match arranca en
+            # la palabra clave ("Estimated quantity 2,000"), asi que "quantity"
+            # quedaba dentro del match y no se veia. Resultado: "Estimated
+            # quantity 2,000 units" se tomaba por un contrato de USD 2,000 y,
+            # como queda bajo MIN_USD, la licitacion buena se descartaba sola.
+            #
+            # Solo descalifica cuando el numero es CHICO: si es grande, es
+            # dinero, aunque la palabra "quantity" este cerca.
+            contexto = previo + " " + m.group(0)
+            if valor < 10_000 and _CANTIDAD.search(contexto):
                 continue
 
             inicio = max(0, m.start() - 35)

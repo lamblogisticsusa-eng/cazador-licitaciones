@@ -178,9 +178,19 @@ def presupuesto_ajustado() -> int:
 
 def por_barrido() -> int:
     """
-    Cuantas llamadas usar en UN barrido. Se reparten a lo largo del dia para
-    no gastar todo de golpe y para que, si un barrido falla, los siguientes
-    cubran la cuota.
+    Cuantas llamadas usar en UN barrido.
+
+    Antes era presupuesto_ajustado() // barridos. Con 20 de presupuesto y
+    barrido cada 2h eso da 1: Kyomoto analizaba UNA licitacion cada 2 horas y
+    el resto del presupuesto se perdia solo al reiniciar a medianoche del
+    Pacifico. Repartir a partes iguales tiene sentido cuando el presupuesto es
+    un ritmo, pero aqui es un TECHO: lo que no se usa, se pierde.
+
+    Ahora pide lo necesario para trabajar bien cada barrido, con un piso de 2
+    y sin pasar de MAX_A_GEMINI. El tope diario sigue mandando por separado
+    (queda() y el calculo de top en el escaner), asi que esto no puede gastar
+    de mas: solo deja de desperdiciar la cuota.
     """
     barridos = max(1, int(24 / max(config.INTERVALO_HORAS, 0.5)))
-    return max(1, presupuesto_ajustado() // barridos)
+    techo = min(presupuesto_ajustado() // barridos, config.MAX_A_GEMINI)
+    return max(2, techo)
