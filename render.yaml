@@ -22,12 +22,12 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-3.8-flash
+        value: gemini-3.6-flash
       # Si el modelo principal responde 503 "alta demanda", Kyomoto prueba
       # estos en orden. Medido el 28-sep-2026: 3.7-flash estaba saturado
       # mientras 3.8, 3.6, flash-latest y 3.5-flash-lite respondian bien.
       - key: GEMINI_MODELES_ALTERNATIVOS
-        value: "gemini-3.6-flash,gemini-flash-latest,gemini-3.5-flash-lite"
+        value: "gemini-3.8-flash,gemini-3.5-flash-lite,gemini-flash-latest,gemini-3.5-flash,gemini-3.7-flash"
       - key: GEMINI_ESPERA_503
         value: "20"
       # Objetivo: 10 licitaciones VIABLES al dia. Se piden 20 analisis porque

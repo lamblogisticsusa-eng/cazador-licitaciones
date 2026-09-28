@@ -19,7 +19,11 @@ if faltan:
     print("Faltan: " + ", ".join(faltan))
     sys.exit(2)
 
-os.environ.setdefault("GEMINI_MODEL", "gemini-3.8-flash")
+# NO se fija GEMINI_MODEL aqui a proposito. Antes ponia
+# os.environ.setdefault("GEMINI_MODEL", "gemini-3.8-flash"), que pisaba el
+# default de config.py y hacia que este script probara un modelo distinto del
+# que corre el bot. Un diagnostic tool que no reproduce el problema no sirve
+# para diagnosticar. Que use lo que diga config.py.
 os.environ["DRY_RUN"] = "1"
 # Escritura minima por la primera corrida: no tiene sentido gastar 20
 # analisis sin saber primero que hay.

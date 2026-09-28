@@ -6,7 +6,7 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
-KYOMOTO_VERSION = "2.0.0"
+KYOMOTO_VERSION = "2.1.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -33,20 +33,25 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 SAM_API_KEY = os.getenv("SAM_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+# Sondeo del 28-sep-2026, dos veces en el mismo dia:
+#
+#   00:20 Chile   3.8 OK 5.1s | 3.7 503 | 3.6 OK 4.2s | 3.5 26.1s
+#                 3.5-lite OK 0.7s | flash-latest OK 8.3s | flash-lite NO EXISTE
+#   09:00 Chile   3.8 503 | 3.7 503 | 3.6 OK 4.1s | 3.5 503
+#                 3.5-lite 503 | flash-latest 503
+#
+# O sea: la saturacion cambia por completo en nueve horas y puede dejar 5 de 6
+# modelos caidos a la vez. Por eso la lista de respaldo incluye TODOS los
+# conocidos, no solo tres: con 5 caidos, tres no alcanzaban.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
-# Si el modelo configurado responde 503 "alta demanda", Kyomoto prueba el
-# siguiente de esta lista en vez de esperar. Medido el 28-sep-2026:
-#   gemini-3.8-flash    5.1s
-#   gemini-3.7-flash    503 saturado
-#   gemini-3.6-flash    4.2s
-#   gemini-3.5-flash   26.1s
-#   gemini-3.5-flash-lite 0.7s
-#   gemini-flash-latest 8.3s
+# Ante un 503 Kyomoto prueba el siguiente de esta lista en vez de esperar.
 # La saturacion es por modelo, no de la cuenta: por eso el respaldo existe.
+# El orden va de mas rapido a mas lento segun lo medido.
 GEMINI_MODELES_ALTERNATIVOS = os.getenv(
     "GEMINI_MODELES_ALTERNATIVOS",
-    "gemini-3.6-flash,gemini-flash-latest,gemini-3.5-flash-lite",
+    "gemini-3.8-flash,gemini-3.5-flash-lite,gemini-flash-latest,"
+    "gemini-3.5-flash,gemini-3.7-flash",
 ).replace(" ", "").split(",")
 
 # --- Ventana de busqueda en SAM.gov ---

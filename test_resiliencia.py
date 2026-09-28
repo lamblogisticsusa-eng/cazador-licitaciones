@@ -92,6 +92,9 @@ ERR_503 = (
 )
 ERR_429 = "429 RESOURCE_EXHAUSTED. {'error': {'code': 429}}"
 ERR_401 = "401 UNAUTHENTICATED. {'error': {'code': 401}}"
+# Medido el 28-sep-2026: gemini-3.5-flash-lite contestaba "OK" al smoke test
+# pero devolvia esto con el prompt de verdad.
+ERR_400 = "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Request contains an invalid argument.', 'status': 'INVALID_ARGUMENT'}}"
 
 principal = ga.config.GEMINI_MODEL
 alternos = ga.config.GEMINI_MODELES_ALTERNATIVOS
@@ -150,6 +153,61 @@ r, err, usados = _analizar({principal: ERR_401})
 check("Con 401 lanza un error", err is not None)
 if err is not None:
     check("Y no prueba otros modelos", len(set(usados)) == 1, f"-> {usados}")
+print()
+
+print("=" * 70)
+print("5) UN 400 NO SE REINTENTA: SE CAMBIA DE MODELO")
+print("=" * 70)
+# El 400 no es transitorio. Reintentarlo da el mismo 400 y quema 70 segundos.
+r, _err, usados = _analizar({m: ERR_400 for m in (principal, alternos[0])})
+print(f"  Probados: {' -> '.join(usados)}")
+check("Ante un 400 no repite el mismo modelo",
+      len(usados) == len(set(usados)), f"-> {usados}")
+check("Cambia al siguiente de la lista",
+      usados[:2] == [principal, alternos[0]] and len(usados) >= 3,
+      f"-> {usados}")
+check("Y sale con exito", isinstance(r, dict))
+
+r, err, usados = _analizar({m: ERR_400 for m in todos})
+msg = str(err or "")
+check("Si todos dan 400 lanza un error", err is not None, f"-> devolvio {r}")
+if err is not None:
+    check("Dice que es 400, no saturacion", "400" in msg)
+    check("Aclara que NO es la clave", "no es tu clave" in msg.lower())
+    check("Dice que no es un problema de cuota", "cuota" in msg.lower())
+    check("No se llama a si mismo 'saturado'", "saturados" not in msg.lower())
+    check("No repite ningun modelo", len(usados) == len(set(usados)),
+          f"-> {usados}")
+print()
+
+print("=" * 70)
+print("6) EL SMOKE TEST USA LA MISMA CONFIG QUE EL ESCANEO REAL")
+print("=" * 70)
+import ast as _ast
+import io as _io
+
+_f = _io.open(ga.__file__, encoding="utf-8").read()
+_arbol = _ast.parse(_f)
+_fn = next(n for n in _arbol.body
+           if isinstance(n, _ast.FunctionDef) and n.name == "verificar_api")
+# Solo el CODIGO, sin el docstring: el docstring menciona justamente el dict
+# literal que se prohibe, para explicar el bug. Buscarlo ahi daria un falso
+# positivo.
+_llamadas = [
+    _ast.unparse(n) for n in _ast.walk(_fn)
+    if isinstance(n, _ast.Call)
+    # Es cliente.models.generate_content: una Attribute, no un Name suelto.
+    and getattr(n.func, "attr", "") == "generate_content"
+]
+check("verificar_api llama a _construir_config()",
+      any("_construir_config()" in c for c in _llamadas),
+      f"-> generate_content recibe: {_llamadas}")
+check("Y no manda un config literal",
+      not any('"max_output_tokens"' in c for c in _llamadas),
+      f"-> generate_content recibe: {_llamadas}")
+check("Y el prompt exige JSON, como el escaneo real",
+      any("JSON" in _ast.unparse(n) for n in _ast.walk(_fn)
+          if isinstance(n, _ast.Constant) and isinstance(n.value, str)))
 print()
 
 print("=" * 70)

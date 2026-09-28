@@ -116,8 +116,16 @@ def _construir_config():
 
 def verificar_api() -> dict:
     """
-    Prueba de humo. Recorre la MISMA cadena de modelos que usa analizar(),
-    asi que el resultado refleja lo que de verdad pasara en un barrido.
+    Prueba de humo. Recorre la MISMA cadena de modelos que usa analizar() Y
+    CON LA MISMA CONFIG, para que el resultado refleje lo que de verdad pasara
+    en un barrido.
+
+    Importante: usa _construir_config(), no un dict a mano. El 28-sep-2026 el
+    smoke test mandaba config={"max_output_tokens": 2048} mientras el escaneo
+    real mandaba la config completa con response_mime_type y thinking_config.
+    Resultado: gemini-3.5-flash-lite pasaba el smoke test con "OK" y devolvia
+    400 INVALID_ARGUMENT con el prompt de verdad. Un test que usa una config
+    distinta no prueba lo que dice probar.
     """
     if not config.GEMINI_API_KEY:
         return {"ok": False, "detalle": "GEMINI_API_KEY no esta configurada"}
@@ -126,25 +134,26 @@ def verificar_api() -> dict:
         m for m in config.GEMINI_MODELES_ALTERNATIVOS
         if m and m != config.GEMINI_MODEL
     ]
-    problemas = []
+    caidos = []
+    incompatibles = []
     for m in cola:
         try:
             cliente = _get_cliente()
             cliente.models.generate_content(
-                model=m, contents="Responde solo: OK",
-                config={"max_output_tokens": 2048},
+                model=m,
+                contents='Responde solo con la palabra OK, en JSON: {"ok": true}',
+                config=_construir_config(),
             )
             if m == config.GEMINI_MODEL:
                 return {"ok": True, "detalle": f"OK - {m} responde", "modelo": m}
-            # El principal estaba saturado pero hay respaldo: esto es una
-            # nota, no un fallo. El escaneo va a funcionar igual.
-            problemas.append(f"{config.GEMINI_MODEL}: 503 saturado")
+            # El principal estaba caido pero hay respaldo: es una nota, no un
+            # fallo. El escaneo va a funcionar igual.
             return {
                 "ok": True,
-                "detalle": f"OK via {m} ({config.GEMINI_MODEL} esta saturado)",
+                "detalle": f"OK via {m} ({config.GEMINI_MODEL} no responde)",
                 "modelo": m,
                 "degradado": True,
-                "avisos": problemas,
+                "avisos": caidos + incompatibles,
             }
         except Exception as e:
             texto = str(e)
@@ -157,51 +166,22 @@ def verificar_api() -> dict:
                 }
             if "401" in texto or "UNAUTHENTICATED" in texto:
                 return {"ok": False, "detalle": f"401: {texto[:200]}"}
-            problemas.append(f"{m}: 503 saturado")
+            if "400" in texto or "INVALID_ARGUMENT" in texto:
+                incompatibles.append(f"{m}: 400, no acepta la peticion")
+            else:
+                caidos.append(f"{m}: 503 saturado")
             continue
 
     return {
         "ok": False,
-        "detalle": "Todos los modelos estan saturados (503): "
-                   + ", ".join(problemas),
-        "saturado": True,
+        "detalle": (
+            "Ningun modelo sirve ahora mismo. "
+            f"Saturados (503): {', '.join(caidos) or 'ninguno'}. "
+            f"Incompatibles (400): {', '.join(incompatibles) or 'ninguno'}"
+        ),
+        "saturado": bool(caidos),
+        "incompatible": bool(incompatibles),
     }
-
-
-def _construir_config():
-    """Config tolerant: si la version instalada de google-genai no conoce
-    thinking_config, se sigue sin el en vez de reventar."""
-    from google.genai import types
-    base = {
-        "temperature": config.GEMINI_TEMPERATURE,
-        "response_mime_type": "application/json",
-        "max_output_tokens": config.GEMINI_MAX_OUTPUT_TOKENS,
-    }
-    try:
-        return types.GenerateContentConfig(
-            **base,
-            thinking_config=types.ThinkingConfig(
-                thinking_budget=config.GEMINI_THINKING_BUDGET
-            ),
-        )
-    except Exception:
-        return types.GenerateContentConfig(**base)
-
-
-def verificar_api() -> dict:
-    """Prueba de humo. Se usa en /selftest."""
-    if not config.GEMINI_API_KEY:
-        return {"ok": False, "detalle": "GEMINI_API_KEY no configurada"}
-    try:
-        cliente = _get_cliente()
-        cliente.models.generate_content(
-            model=config.GEMINI_MODEL,
-            contents="Responde solo con la palabra OK",
-            config={"max_output_tokens": 2048},
-        )
-        return {"ok": True, "detalle": f"OK - modelo {config.GEMINI_MODEL} responde"}
-    except Exception as e:
-        return {"ok": False, "detalle": f"{type(e).__name__}: {str(e)[:300]}"}
 
 
 def _construir_prompt(opp: dict, descripcion: str, lugar: str) -> str:
@@ -371,6 +351,7 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
 
     ultimo_error = None
     intentos_429 = 0
+    incompatibles = []
     # El 503 es por MODELO, no de la cuenta. Medido el 28-sep-2026:
     #   gemini-3.8-flash  OK 5.1s        gemini-3.6-flash    OK 4.2s
     #   gemini-3.7-flash  503 saturado    gemini-3.5-flash   OK 26.1s
@@ -450,12 +431,35 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
 
             # --- 404: modelo retirado o inexistente. ---
             if "no longer available" in texto.lower() or "not_found" in texto.lower():
+                incompatibles.append(f"{modelo}: no existe")
                 if indice + 1 < len(cola):
                     indice += 1
                     continue
                 raise GeminiError(
-                    f"El modelo '{modelo}' no existe o no esta disponible para esta "
-                    f"cuenta. Prueba: python sondear_modelos.py"
+                    "Ningun modelo de la lista existe para esta cuenta: "
+                    + "; ".join(incompatibles) + ".\n"
+                    "Sondea los disponibles con: python sondear_modelos.py"
+                ) from e
+
+            # --- 400: el modelo no acepta la peticion. ---
+            # NO es transitorio: es que ese modelo no sirve con esta config
+            # (thinking_budget, response_mime_type, tokens...). Reintentarlo
+            # igual da el mismo 400 y quema tiempo. Se cambia de modelo.
+            #
+            # Medido el 28-sep-2026: gemini-3.5-flash-lite respondia "OK" al
+            # smoke test pero devolvia 400 INVALID_ARGUMENT con el prompt real.
+            if "400" in texto or "INVALID_ARGUMENT" in texto:
+                incompatibles.append(f"{modelo}: no acepta la peticion (400)")
+                if indice + 1 < len(cola):
+                    log.warning("400 en %s. Cambio a %s.", modelo, cola[indice + 1])
+                    indice += 1
+                    continue
+                raise GeminiError(
+                    "Ningun modelo de la lista acepta la peticion (400 "
+                    "INVALID_ARGUMENT): " + "; ".join(incompatibles) + ".\n"
+                    "No es tu clave ni un problema de cuota. Suele ser que el "
+                    "modelo no admite alguna opcion de la config. Prueba: "
+                    "python sondear_modelos.py"
                 ) from e
 
             log.warning("Gemini fallo (intento %s): %s", intento + 1, texto[:200])
