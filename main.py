@@ -290,28 +290,39 @@ async def _selftest(destino, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     g = d["gem"]
     cuerpo_gem = telegram_notify._esc(g["detalle"][:400])
+    det = g["detalle"]
     if g["ok"]:
         L.append(f"✅ <b>Gemini</b>: {cuerpo_gem}")
+    elif "503" in det or "UNAVAILABLE" in det or "high demand" in det:
+        L.append(f"⏳ <b>Gemini</b>: {cuerpo_gem}")
     else:
-        det = g["detalle"]
-        if "429" in det or "RESOURCE_EXHAUSTED" in det:
-            # Esto NO es un error de configuracion. Es el tope del plan gratis.
-            L.append(f"⚠️ <b>Gemini</b>: {cuerpo_gem}")
-        else:
-            L.append(f"❌ <b>Gemini</b>: {cuerpo_gem}")
+        L.append(f"❌ <b>Gemini</b>: {cuerpo_gem}")
     cuerpo = "\n".join(L)
 
     # ---- Consejo segun el fallo real ----
-    if not g["ok"] and ("429" in g["detalle"] or "RESOURCE_EXHAUSTED" in g["detalle"]):
+    if g["ok"]:
+        pass
+    elif "503" in det or "UNAVAILABLE" in det or "high demand" in det:
+        # Este es el caso mas comun y NO es un problema de configuracion.
+        cuerpo += (
+            "\n\n<b>Esto no es un error, amo.</b> Tu clave está perfecta. "
+            "Es temporal: Google dice que ese modelo específico tiene mucha "
+            "demanda ahora mismo.\n"
+            "Kyomoto ya intenta con otros modelos solo, así que en el "
+            "próximo barrido puede que sí analice.\n"
+            "<i>Si pasa seguido, revisa con /cuota o cambia GEMINI_MODEL a "
+            "gemini-3.6-flash, que estaba libre cuando medimos.</i>"
+        )
+    elif "429" in det or "RESOURCE_EXHAUSTED" in det:
         cuerpo += (
             "\n\n<b>Esto no es un error, amo.</b> Es el límite del plan "
             "gratis de Google: se agotó la cuota de hoy.\n"
             "Se reinicia sola a las <b>00:00 del Pacífico</b> "
-            "(≈ 03:00 hora de Chile). Lo que no alcancé queda pendiente para "
+            "(≈ 03:00 hora de Chile). Lo que no alcanzó queda pendiente para "
             "mañana, no se pierde nada.\n"
             "<i>Para ver el detalle: /cuota</i>"
         )
-    elif not g["ok"]:
+    elif "401" in det or "UNAUTHENTICATED" in det:
         cuerpo += (
             "\n\n<b>Que hacer con Gemini</b>\n"
             "   1. Copiala completa con el boton de copiar de AI Studio.\n"
@@ -319,6 +330,12 @@ async def _selftest(destino, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "una clave restringida a tu IP local falla ahi.\n"
             "   3. Verifica que la API Generative Language este habilitada.\n"
             "   Prueba sin gastar nada: <code>python probar_clave.py</code>"
+        )
+    else:
+        cuerpo += (
+            "\n\n<b>Comodiagnosticar Gemini</b>\n"
+            "   <code>python sondear_modelos.py</code> — dice que modelos "
+            "responden ahora mismo."
         )
     if not d["sam"]["ok"]:
         cuerpo += (

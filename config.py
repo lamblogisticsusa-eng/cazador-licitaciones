@@ -31,6 +31,20 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
+# Si el modelo configurado responde 503 "alta demanda", Kyomoto prueba el
+# siguiente de esta lista en vez de esperar. Medido el 28-sep-2026:
+#   gemini-3.8-flash    5.1s
+#   gemini-3.7-flash    503 saturado
+#   gemini-3.6-flash    4.2s
+#   gemini-3.5-flash   26.1s
+#   gemini-3.5-flash-lite 0.7s
+#   gemini-flash-latest 8.3s
+# La saturacion es por modelo, no de la cuenta: por eso el respaldo existe.
+GEMINI_MODELES_ALTERNATIVOS = os.getenv(
+    "GEMINI_MODELES_ALTERNATIVOS",
+    "gemini-3.6-flash,gemini-flash-latest,gemini-3.5-flash-lite",
+).replace(" ", "").split(",")
+
 # --- Ventana de busqueda en SAM.gov ---
 # 10 dias: ademas de los avisos nuevos, entra todo lo que se publico durante
 # el fin de semana y el lunes siguiente. Los sabados y domingos se publica
@@ -102,6 +116,10 @@ GEMINI_REINTENTOS_429 = _int("GEMINI_REINTENTOS_429", 1)
 
 GEMINI_TEMPERATURE = _float("GEMINI_TEMPERATURE", 0.2)
 GEMINI_THINKING_BUDGET = _int("GEMINI_THINKING_BUDGET", 0)
+# Espera ante un 503 antes de cambiar de modelo. Lasweapon documented
+# documentan los picos como temporales, pero en la practica duran minutos,
+# no segundos. Cambiar de modelo es mas rapido que esperar.
+GEMINI_ESPERA_503 = _float("GEMINI_ESPERA_503", 20.0)
 # El plan gratis de Gemini es muy justo de facto: cada llamada cuenta. Cuanto mas
 # corto el prompt y mas corta la salida, mas avisos entran por barrido.
 # 3000 caracteres de descripcion basta para decidir y para estimar precio;

@@ -132,12 +132,18 @@ if mensaje.editado:
     cuerpo = mensaje.editado
     check("Dice que SAM.gov no esta bien",
           "SAM.gov" in cuerpo and ("429" in cuerpo or "Tope" in cuerpo or "❌" in cuerpo))
-    check("No dice 'todo en orden' si algo falla",
-          not cuerpo.rstrip().endswith("Kyomoto puede trabajar")
-          or "Todo en orden" in cuerpo)
-    check("Y da una accion concreta",
-          "render" in cuerpo.lower() or "2026-09-28" in cuerpo or "14:00" in cuerpo
-          or "cuota" in cuerpo.lower())
+    check("No dice 'todo en orden' si algo falla", "Todo en orden" not in cuerpo)
+    # "Accion concreta" = dice QUE cambiar o QUE comando correr. No se buscan
+    # palabras exactas porque el consejo correcto depende del fallo.
+    acciones = (
+        "SAM_API_KEY", "GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+        "sondear_modelos.py", "probar_clave.py", "PYTHON_VERSION",
+    )
+    check("Y dice que revisar o que comando correr",
+          any(a in cuerpo for a in acciones),
+          f"-> ninguna de {acciones} aparece")
+    check("El consejo de SAM.gov menciona la variable",
+          "SAM_API_KEY" in cuerpo or "API pública" in cuerpo)
 
 for s in ("", "-wal", "-shm"):
     try:

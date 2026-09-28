@@ -297,74 +297,98 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
 
     ultimo_error = None
     intentos_429 = 0
-    for intento in range(config.MAX_REINTENTOS):
+    # El 503 es por MODELO, no de la cuenta. Medido el 28-sep-2026:
+    #   gemini-3.8-flash  OK 5.1s        gemini-3.6-flash    OK 4.2s
+    #   gemini-3.7-flash  503 saturado    gemini-3.5-flash   OK 26.1s
+    # Por eso se prueban alternativas en vez de esperar: los picos duran
+    # minutos y hay modelos libres casi siempre.
+    cola = [config.GEMINI_MODEL] + [
+        m for m in config.GEMINI_MODELES_ALTERNATIVOS
+        if m and m != config.GEMINI_MODEL
+    ]
+    indice = 0
+    # Suficientes intentos para recorrer TODA la cola mas margen para los
+    # errores que no sean de saturacion.
+    total_intentos = max(config.MAX_REINTENTOS, len(cola) + 1)
+
+    for intento in range(total_intentos):
+        modelo = cola[indice]
         try:
             respuesta = cliente.models.generate_content(
-                model=config.GEMINI_MODEL,
+                model=modelo,
                 contents=prompt,
                 config=_construir_config(),
             )
+            if modelo != config.GEMINI_MODEL:
+                log.info("Va con %s: el de verdad iba saturado", modelo)
             break
         except Exception as e:
             ultimo_error = e
             texto = str(e)
 
             # --- 429: la credencial es valida, se acabo la cuota. ---
+            # La cuota es de la CUENTA, no del modelo: cambiar no ayuda.
             if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
                 intentos_429 += 1
                 if intentos_429 > config.GEMINI_REINTENTOS_429:
                     raise GeminiError(
-                        f"Se agoto la cuota de Gemini (429 RESOURCE_EXHAUSTED).\n"
-                        f"La clave SI funciona: esto es un limite del plan, no del "
-                        f"codigo. Opciones:\n"
-                        f"  - Bajar MAX_A_GEMINI (ahora {config.MAX_A_GEMINI}) y/o subir "
-                        f"GEMINI_PAUSA_SEG (ahora {config.GEMINI_PAUSA_SEG:g}s).\n"
-                        f"  - Activar facturacion en https://aistudio.google.com para "
-                        f"levantar el limite.\n"
-                        f"Este aviso NO se marco como visto: se reintentara en el "
-                        f"proximo barrido."
+                        "Se agoto la cuota de Gemini (429 RESOURCE_EXHAUSTED).\n"
+                        "La clave SI funciona: esto es un limite del plan, no del "
+                        "codigo.\n"
+                        f"  - Bajar MAX_A_GEMINI (ahora {config.MAX_A_GEMINI}) y/o "
+                        f"subir GEMINI_PAUSA_SEG (ahora {config.GEMINI_PAUSA_SEG:g}s).\n"
+                        "  - Activar facturacion en https://aistudio.google.com para "
+                        "levantar el limite.\n"
+                        "Los avisos NO se marcan como vistos: se reintentan en el "
+                        "proximo barrido."
                     ) from e
                 log.warning("429 de cuota. Pausa %.0fs.", config.GEMINI_PAUSA_SEG * 3)
                 time.sleep(config.GEMINI_PAUSA_SEG * 3)
                 continue
 
-            # --- 503: el modelo esta saturado. ---
+            # --- 503: el modelo esta saturado. Probar el siguiente. ---
             if "503" in texto or "UNAVAILABLE" in texto:
-                log.warning("503 saturacion del modelo. Pausa %.0fs.", config.GEMINI_PAUSA_SEG * 2)
-                time.sleep(config.GEMINI_PAUSA_SEG * 2)
-                if intento + 1 >= config.MAX_REINTENTOS:
-                    raise GeminiError(
-                        f"El modelo {config.GEMINI_MODEL} esta saturado (503). "
-                        "Es transitorio: se reintentara en el proximo barrido."
-                    ) from e
-                continue
+                if indice + 1 < len(cola):
+                    log.warning("503 en %s. Cambio a %s.", modelo, cola[indice + 1])
+                    indice += 1
+                    time.sleep(2)
+                    continue
+                raise GeminiError(
+                    "Todos los modelos de Gemini estan saturados (503): "
+                    + ", ".join(cola) + ".\n"
+                    "Es temporal y NO es tu clave ni tu codigo: Google tiene "
+                    "mucha demanda ahora mismo. Kyomoto reintentara en el proximo "
+                    "barrido, y lo que no se analice no se pierde."
+                ) from e
 
-            # --- 401: la credencial no es reconocida. ---
+            # --- 401: la credencial no es reconocida. No cambiar de modelo. ---
             if "401" in texto or "UNAUTHENTICATED" in texto:
                 raise GeminiError(
                     "Google respondio 401: no reconoce GEMINI_API_KEY como "
                     "credencial valida para la API de Gemini.\n"
-                    "Causas probables, en orden:\n"
                     "1. La clave se copio incompleta (~53 caracteres con un punto; "
                     "un solo caracter mal da 401). Copiala con el boton de copiar.\n"
                     "2. La clave tiene restriccion de IP. Render usa IPs dinamicas, "
                     "asi que una clave restringida a tu IP local falla ahi.\n"
-                    "3. La API Generative Language no esta habilitada en el proyecto.\n"
-                    "Verificalo sin escribir la clave: python probar_clave.py"
+                    "3. La API Generative Language no esta habilitada.\n"
+                    "Verificalo sin escribirla: python probar_clave.py"
                 ) from e
 
-            # --- 404 / modelo retirado. ---
+            # --- 404: modelo retirado o inexistente. ---
             if "no longer available" in texto.lower() or "not_found" in texto.lower():
+                if indice + 1 < len(cola):
+                    indice += 1
+                    continue
                 raise GeminiError(
-                    f"El modelo '{config.GEMINI_MODEL}' no le sirve a esta cuenta. "
-                    f"Usa 'gemini-3.8-flash'. Detalle: {texto[:200]}"
+                    f"El modelo '{modelo}' no existe o no esta disponible para esta "
+                    f"cuenta. Prueba: python sondear_modelos.py"
                 ) from e
 
             log.warning("Gemini fallo (intento %s): %s", intento + 1, texto[:200])
             time.sleep(2 ** intento)
     else:
         raise GeminiError(
-            f"Gemini fallo tras {config.MAX_REINTENTOS} intentos: "
+            f"Gemini fallo tras {total_intentos} intentos: "
             f"{type(ultimo_error).__name__}: {str(ultimo_error)[:250]}"
         ) from ultimo_error
 
