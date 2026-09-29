@@ -148,11 +148,28 @@ print()
 print("=" * 70)
 print("3) EL 429 YA NO DUERME SI OTRO ESTA ESPERANDO")
 print("=" * 70)
-# Con el 429 y sin cortacircuitos: una pausa de GEMINI_PAUSA_SEG*3 = 6s.
+# OJO, cambiado el 29-sep-2026. Antes, con 429 en el principal, el bot
+# dormia 6s aqui. Ahora el tope es POR MODELO, asi que un 429 hace pasar al
+# siguiente de la lista y no duerme nada. La espera queda solo para cuando la
+# lista ENTERA agoto la cuota, que es el caso de verdad.
+todos_cc = [ga.config.GEMINI_MODEL] + [
+    m for m in ga.config.GEMINI_MODELES_ALTERNATIVOS
+    if m and m != ga.config.GEMINI_MODEL
+]
+r, err, llamadas, dt = _correr({m: ERR_429 for m in todos_cc})
+print(f"  TODOS sin cuota, sin cortacircuito: {llamadas} llamadas, {dt:.1f}s")
+check("Sin cortacircuito SI duerme alguna vez al final", dt >= 1.0,
+      f"-> {dt:.1f}s")
+check("Y prueba los 5 modelos antes de rendirse",
+      llamadas >= len(todos_cc), f"-> {llamadas} para {len(todos_cc)} modelos")
+
+# Un 429 en UN solo modelo ya no duerme: se pasa al siguiente, que puede
+# tener cuota. Esa es la mejora.
 r, err, llamadas, dt = _correr({ga.config.GEMINI_MODEL: ERR_429})
-print(f"  sin cortacircuitos: {llamadas} llamadas, {dt:.1f}s "
-      f"(una espera de {ga.config.GEMINI_PAUSA_SEG * 3:.0f}s)")
-check("Sin cortacircuito SI duerme la pausa", dt >= 5.0, f"-> {dt:.1f}s")
+print(f"  solo el principal sin cuota: {llamadas} llamadas, {dt:.1f}s")
+check("Un 429 en un solo modelo NO duerme (pasa al siguiente)",
+      dt < 5.0, f"-> {dt:.1f}s")
+check("Y se recupera con el siguiente modelo", err is None, f"-> {err}")
 
 # Con el cortacircuitos ya encendido: ni una llamada, ni una espera.
 estado = {"parado": True}

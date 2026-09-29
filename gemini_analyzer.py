@@ -94,24 +94,55 @@ def _get_cliente():
     return _cliente
 
 
-def _construir_config():
-    """Config tolerant: si la version instalada de google-genai no conoce
-    thinking_config, se sigue sin el en vez de reventar."""
+_SIN_PENSAR = None
+
+
+def _construir_config(sin_pensar: bool = False):
+    """
+    Config de la llamada a Gemini.
+
+    `sin_pensar=True` omite el campo thinking_budget. Hace falta porque
+    algunos modelos lo rechazan con 400 INVALID_ARGUMENT: medido el
+    29-sep-2026 con gemini-3.5-flash-lite, que acepta response_mime_type y
+    temperature pero no thinking_budget=0.
+
+    Y ese modelo era justamente el unico con cuota libre ese dia, asi que
+    sin esto el bot se quedaba sin nada que analizar. Cuando un 400 sale de aqui,
+    se reintenta una vez sin el campo: se pierde un poco de razonamiento pero
+    se desbloquea el modelo entero.
+    """
+    global _SIN_PENSAR
     from google.genai import types
-    base = {
-        "temperature": config.GEMINI_TEMPERATURE,
-        "response_mime_type": "application/json",
-        "max_output_tokens": config.GEMINI_MAX_OUTPUT_TOKENS,
-    }
+
+    if sin_pensar:
+        try:
+            return types.GenerateContentConfig(
+                temperature=config.GEMINI_TEMPERATURE,
+                response_mime_type="application/json",
+                max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS,
+            )
+        except Exception:
+            return types.GenerateContentConfig(
+                max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS
+            )
+
     try:
         return types.GenerateContentConfig(
-            **base,
+            temperature=config.GEMINI_TEMPERATURE,
+            response_mime_type="application/json",
+            max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS,
             thinking_config=types.ThinkingConfig(
                 thinking_budget=config.GEMINI_THINKING_BUDGET
             ),
         )
     except Exception:
-        return types.GenerateContentConfig(**base)
+        # Si la version instalada de google-genai no conoce thinking_config,
+        # se sigue sin el en vez de reventar.
+        return types.GenerateContentConfig(
+            temperature=config.GEMINI_TEMPERATURE,
+            response_mime_type="application/json",
+            max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS,
+        )
 
 
 def verificar_api() -> dict:
@@ -135,6 +166,7 @@ def verificar_api() -> dict:
         if m and m != config.GEMINI_MODEL
     ]
     caidos = []
+    sin_cuota = []
     incompatibles = []
     for m in cola:
         try:
@@ -158,12 +190,11 @@ def verificar_api() -> dict:
         except Exception as e:
             texto = str(e)
             if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
-                return {
-                    "ok": False,
-                    "detalle": "Cuota de Google agotada (429). Se reinicia a "
-                               "medianoche del Pacifico. La clave SI funciona.",
-                    "cuota": True,
-                }
+                # El tope es por modelo: se sigue con el siguiente, que puede
+                # tener cuota todavia. Antes se rendia aqui y declaraba el
+                # fallo con el primer 429, aunque quedaran modelos libres.
+                sin_cuota.append(m)
+                continue
             if "401" in texto or "UNAUTHENTICATED" in texto:
                 return {"ok": False, "detalle": f"401: {texto[:200]}"}
             if "400" in texto or "INVALID_ARGUMENT" in texto:
@@ -175,12 +206,15 @@ def verificar_api() -> dict:
     return {
         "ok": False,
         "detalle": (
-            "Ningun modelo sirve ahora mismo. "
+            "Ningun modelo de la lista sirve ahora mismo.\n"
+            f"Sin cuota (429): {', '.join(sin_cuota) or 'ninguno'}. "
             f"Saturados (503): {', '.join(caidos) or 'ninguno'}. "
-            f"Incompatibles (400): {', '.join(incompatibles) or 'ninguno'}"
+            f"Incompatibles (400): {', '.join(incompatibles) or 'ninguno'}.\n"
+            "La cuota se reinicia a medianoche del Pacifico y es POR MODELO."
         ),
         "saturado": bool(caidos),
         "incompatible": bool(incompatibles),
+        "cuota": bool(sin_cuota),
     }
 
 
@@ -218,6 +252,25 @@ def _detalle_de_cuota(texto_error: str) -> str:
     if len(partes) == 1:
         return ""
     return "\n".join(partes) + "\n"
+
+
+def _modelos_sin_cuota(probados: list) -> str:
+    """
+    Dice QUE modelos se quedaron sin cuota, no solo que "se agoto".
+
+    El tope es por modelo, asi que puede pasar que 3.8-flash y flash-latest no
+    respondan y 3.5-flash-lite si. Decirlo es la diferencia entre un misterio
+    y un diagnostico: el usuario puede ir a /cuota y entender que hay que
+    esperar a medianoche del Pacifico, no cambiar nada.
+    """
+    if not probados:
+        return ""
+    # Sin repetir: un mismo modelo puede anotarse dos veces si dio 429 al
+    # primer intento y al reintentar sin thinking_budget, y al usuario le
+    # pareceria que hay dos iguales en la lista.
+    unicos = list(dict.fromkeys(probados))
+    lineas = ["Modelos que ya agotaron su cuota hoy: " + ", ".join(unicos) + "."]
+    return "\n".join(lineas) + "\n"
 
 
 def _construir_prompt(opp: dict, descripcion: str, lugar: str) -> str:
@@ -409,10 +462,14 @@ def analizar(
         if m and m != config.GEMINI_MODEL
     ]
     indice = 0
+    # Modelos que ya respondieron 429: se anotan para poder decir
+    # al usuario cuales se quedaron sin cuota en vez de un 'agotado' generico.
+    ya_probados: list[str] = []
     # Suficientes intentos para recorrer TODA la cola mas margen para los
     # errores que no sean de saturacion.
     total_intentos = max(config.MAX_REINTENTOS, len(cola) + 1)
 
+    sin_pensar = False
     for intento in range(total_intentos):
         # Si otro hilo ya descubririo que se acabo la cuota, no se llama a
         # Google ni se duerme: se sale ahora. El unico modo de que un hilo
@@ -429,7 +486,7 @@ def analizar(
             respuesta = cliente.models.generate_content(
                 model=modelo,
                 contents=prompt,
-                config=_construir_config(),
+                config=_construir_config(sin_pensar=sin_pensar),
             )
             if modelo != config.GEMINI_MODEL:
                 log.info("Va con %s: el de verdad iba saturado", modelo)
@@ -438,16 +495,36 @@ def analizar(
             ultimo_error = e
             texto = str(e)
 
-            # --- 429: la credencial es valida, se acabo la cuota. ---
-            # La cuota es de la CUENTA, no del modelo: cambiar no ayuda.
+            # --- 429: este MODELO se quedo sin cuota. ---
+            # El tope es POR MODELO, no de la cuenta. Medido el 29-sep-2026:
+            # gemini-3.5-flash-lite respondia mientras gemini-3.8-flash y
+            # gemini-flash-latest ya estaban sin cuota. Si fuera de la cuenta,
+            # cuando uno se agota se agotan todos.
+            #
+            # Antes de arreglar esto, el bot se rendia en el primer 429 y
+            # tiraba la llamada entera, dejando sin usar todos los modelos que
+            # si tenian cuota.
             if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
                 intentos_429 += 1
+                ya_probados.append(modelo)
+                if indice + 1 < len(cola):
+                    siguiente = cola[indice + 1]
+                    log.warning(
+                        "429 en %s (este modelo ya agoto su cuota). "
+                        "Cambio a %s.", modelo, siguiente,
+                    )
+                    indice += 1
+                    intentos_429 = 0
+                    time.sleep(1)
+                    continue
                 if intentos_429 > config.GEMINI_REINTENTOS_429:
                     raise GeminiError(
-                        "Se agoto la cuota de Google (429 RESOURCE_EXHAUSTED).\n"
+                        "Se agotaron TODOS los modelos de la lista (429).\n"
                         "Tu clave SI funciona: esto es el tope del plan gratis, no "
-                        "un error del codigo.\n"
+                        "un error del codigo. Se reinicia a las 00:00 del "
+                        "Pacifico (~03:00 hora de Chile).\n"
                         + _detalle_de_cuota(texto)
+                        + _modelos_sin_cuota(ya_probados)
                         + "\n\nCOMO SOLUCIONARLO\n"
                         "   1. Activa facturacion en https://aistudio.google.com "
                         "(Settings > Billing). Eso quita el tope gratis de "
@@ -521,6 +598,22 @@ def analizar(
             # Medido el 28-sep-2026: gemini-3.5-flash-lite respondia "OK" al
             # smoke test pero devolvia 400 INVALID_ARGUMENT con el prompt real.
             if "400" in texto or "INVALID_ARGUMENT" in texto:
+                # El 400 mas frecuente es thinking_budget=0, y es facil de
+                # arreglar: se reintenta el MISMO modelo sin ese campo antes
+                # de pasar al siguiente. Antes de perder un modelo entero por
+                # un campo que se puede apagar, se prueba apagandolo.
+                #
+                # Se hace una sola vez: si ya se reintento sin pensar y vuelve
+                # a fallar, es que el problema es otro y hay que cambiar de
+                # modelo. Sin este guardia seria un bucle infinito.
+                if not sin_pensar:
+                    sin_pensar = True
+                    log.info(
+                        "%s rechazo la peticion (400). Reintento sin "
+                        "thinking_budget.", modelo,
+                    )
+                    continue
+
                 incompatibles.append(f"{modelo}: no acepta la peticion (400)")
                 if indice + 1 < len(cola):
                     log.warning("400 en %s. Cambio a %s.", modelo, cola[indice + 1])

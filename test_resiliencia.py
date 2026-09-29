@@ -158,8 +158,22 @@ msg = str(err or "")
 check("Con 429 lanza un error", err is not None, f"-> devolvio {r}")
 if err is not None:
     check("Dice que la clave SI funciona", "clave SI funciona" in msg)
-    check("Y se queda en un solo modelo (la cuota es de la cuenta)",
-          len(set(usados)) == 1, f"-> {usados}")
+    # CAMBIADO el 29-sep-2026. Este test afirmaba que la cuota era de la
+    # cuenta, asi que cambiar de modelo no servia de nada. Se midio lo
+    # contrario preguntandole a los 6 modelos a la vez:
+    #
+    #     gemini-3.5-flash-lite   DISPONIBLE
+    #     gemini-3.8-flash        SIN CUOTA
+    #     gemini-flash-latest     SIN CUOTA
+    #
+    # Si el tope fuera de la cuenta, cuando uno se agota se agotan todos. El
+    # tope es POR MODELO, asi que el 429 tiene que avanzar por la lista igual
+    # que el 503 y el 404.
+    check("Con el 429 avanza a otros modelos (el tope es por modelo)",
+          len(set(usados)) >= 3, f"-> {usados}")
+    check("Y el error nombra cuales se quedaron sin cuota",
+          all(m in msg for m in set(usados)),
+          f"-> faltan {[m for m in set(usados) if m not in msg]}")
 
 r, err, usados = _analizar({principal: ERR_401})
 check("Con 401 lanza un error", err is not None)
@@ -170,14 +184,18 @@ print()
 print("=" * 70)
 print("5) UN 400 NO SE REINTENTA: SE CAMBIA DE MODELO")
 print("=" * 70)
-# El 400 no es transitorio. Reintentarlo da el mismo 400 y quema 70 segundos.
+# El 400 no es transitorio, pero Suele ser una opcion de la config que se
+# puede apagar. Medido el 29-sep: gemini-3.5-flash-lite rechazaba
+# thinking_budget=0 con 400 INVALID_ARGUMENT, y era el unico modelo con
+# cuota libre ese dia. Perderlo entero por un campo apagable era tirar un
+# modelo por la ventana, asi que ahora reintenta el MISMO modelo una vez sin
+# ese campo.
 r, _err, usados = _analizar({m: ERR_400 for m in (principal, alternos[0])})
 print(f"  Probados: {' -> '.join(usados)}")
-check("Ante un 400 no repite el mismo modelo",
-      len(usados) == len(set(usados)), f"-> {usados}")
-check("Cambia al siguiente de la lista",
-      usados[:2] == [principal, alternos[0]] and len(usados) >= 3,
-      f"-> {usados}")
+check("Ante un 400 reintenta el mismo modelo una vez",
+      usados[0] == usados[1] == principal, f"-> {usados}")
+check("Y tras ese reintento cambia de modelo",
+      len(set(usados)) >= 2, f"-> {usados}")
 check("Y sale con exito", isinstance(r, dict))
 
 r, err, usados = _analizar({m: ERR_400 for m in todos})
@@ -188,8 +206,12 @@ if err is not None:
     check("Aclara que NO es la clave", "no es tu clave" in msg.lower())
     check("Dice que no es un problema de cuota", "cuota" in msg.lower())
     check("No se llama a si mismo 'saturado'", "saturados" not in msg.lower())
-    check("No repite ningun modelo", len(usados) == len(set(usados)),
-          f"-> {usados}")
+    # Con el 400 hay UN reintento por modelo (para apagar thinking_budget), asi
+    # que cada uno puede aparecer dos veces. Lo que no puede es tres.
+    from collections import Counter
+    _c = Counter(usados)
+    check("Cada modelo se prueba como mucho 2 veces",
+          all(v <= 2 for v in _c.values()), f"-> {dict(_c)}")
 print()
 
 print()

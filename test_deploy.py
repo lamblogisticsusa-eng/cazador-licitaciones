@@ -100,7 +100,7 @@ check("el error menciona la respuesta de SAM.gov",
 # DRY_RUN no debe enviar nada real.
 check("DRY_RUN activo", config.DRY_RUN is True)
 
-# El token falso no debe清的ser usado en la importacion.
+# El token falso no debe ser usado en la importacion.
 check("El import de main no hace llamadas de red", True, "(solo flask + ptb)")
 print()
 
