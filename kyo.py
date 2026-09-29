@@ -20,7 +20,7 @@ SALUDOS = {
 }
 
 CIERRE = (
-    "Kyomoto passandote la info para que tu llegue a tiempo "
+    "Kyomoto pasandote la info para que tu llegue a tiempo "
     "(˶ ᴗ ˶) ⁾"
 )
 

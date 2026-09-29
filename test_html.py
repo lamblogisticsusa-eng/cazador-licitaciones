@@ -144,7 +144,8 @@ while True:
     i = k + 1
 check("La ficha no tiene ninguna etiqueta sospechosa", not sospechosos,
       f"-> {sospechosos[:3]}")
-check("Y la firma aparece", "Kyomoto passandote" in html)
+check("Y la firma aparece", "Kyomoto pasandote" in html)
+check("Y bien escrita", "passandote" not in html)
 
 # Las etiquetas del formulario siguen balanceadas.
 for et, cierre in (("b", "/b"), ("i", "/i"), ("code", "/code"), ("a ", "/a")):

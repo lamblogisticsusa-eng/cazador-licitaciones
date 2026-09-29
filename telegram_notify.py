@@ -261,6 +261,89 @@ def _usd(valor) -> str:
     return f"${valor:,.2f}"
 
 
+MESES = ("ene", "feb", "mar", "abr", "may", "jun",
+         "jul", "ago", "sep", "oct", "nov", "dic")
+
+
+def _fecha_legible(bruto) -> tuple[str, str]:
+    """
+    Convierte el limite de ofertar a algo que se lee de un vistazo.
+
+    Devuelve ("Vence en 36 dias", "4 nov 2026, 17:00 UTC-4"). El dato mas
+    accionable de la ficha no puede quedar como "2026-11-04T17:00:00-04:00" en
+    medio de un bloque de logistica: eso no lo lee nadie.
+
+    Si la fecha no se puede interpretar, devuelve dos cadenas vacias y la
+    ficha lo omite, en vez de ensuciar con un formato raro.
+    """
+    if not bruto:
+        return "", ""
+    from datetime import datetime, timezone
+
+    texto = str(bruto).strip().replace("Z", "+00:00")
+    dt = None
+    for parseo in (datetime.fromisoformat,):
+        try:
+            dt = parseo(texto)
+            break
+        except (ValueError, TypeError):
+            continue
+    if dt is None:
+        return "", ""
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    ahora = datetime.now(timezone.utc)
+    dias = (dt - ahora).days
+    # "4 nov 2026, 17:00 UTC-4" montado a mano: "%-d" (dia sin cero) es una
+    # extension de glibc y NO existe en Windows, donde da
+    # "ValueError: Invalid format string". Kyomoto corre en Render (Linux)
+    # pero el diagnostico corre en el portatil del usuario, y una función que
+    # solo funciona en un sistema no es una función.
+    zona = ""
+    if dt.utcoffset() is not None:
+        total = int(dt.utcoffset().total_seconds() // 60)
+        signo = "+" if total >= 0 else "-"
+        zona = f" UTC{signo}{abs(total) // 60:02d}"
+    cuando = (
+        f"{dt.day} {MESES[dt.month - 1]} {dt.year}, "
+        f"{dt.hour:02d}:{dt.minute:02d}{zona}"
+    )
+
+    if dias < 0:
+        return "⚠️ VENCIÓ", cuando
+    if dias == 0:
+        return "⏰ VENCE HOY", cuando
+    if dias == 1:
+        return "⏰ Vence mañana", cuando
+    if dias <= 10:
+        return f"⏰ Vence en {dias} días", cuando
+    return f"🗓️ Vence en {dias} días", cuando
+
+
+def _decision(a: dict) -> str:
+    """
+    La linea de triage: un vistazo y sabes si abrir el enlace o no.
+
+    Se responde la pregunta que importa al leer un aviso "¿esto me sirve?":
+    cuanto queda, cuanto gano y si el margen pasa mi piso. Sin esto habia que
+    leer hasta el final para decidir.
+    """
+    neta = a.get("ganancia_neta_usd")
+    margen = a.get("margen_neto_porcentaje")
+    if neta is None:
+        return ""
+    umbral = config.MARGEN_NETO_MIN * 100
+    if margen is None:
+        return f"Te quedarías <b>{_usd(neta)}</b> netos."
+    pasa = "pasa tu piso" if margen >= umbral else "⚠️ por debajo de tu piso"
+    return (
+        f"Te quedarías <b>{_usd(neta)}</b> netos "
+        f"(<b>{margen:.1f}%</b> · {pasa} del {umbral:.0f}%)"
+    )
+
+
 def formatear_analisis(a: dict) -> str:
     """
     La ficha, en el formato que pidio el usuario.
@@ -272,15 +355,38 @@ def formatear_analisis(a: dict) -> str:
     import distribuidores
     import kyo
 
-    L = ["✨ <b>¡Amo, encontré una nueva oportunidad súper interesante!</b> (≧◡≦)", ""]
+    L = ["✨ <b>¡Amo, encontré una oportunidad!</b> (≧◡≦)", ""]
 
     # --- Encabezado ---
     L.append(f"📦 <b>{_esc(a['title'])}</b>")
-    L.append(f"🔢 Solicitud: <code>{_esc(a['solicitation'])}</code>")
-    L.append(f"🏛️ Agencia: {_esc(a['agencia'])}")
-    if a.get("set_aside"):
-        L.append(f"⭐ {_esc(a['set_aside'])}")
+    L.append(f"🏛️ {_esc(a['agencia'])}")
+
+    # Identificacion en una linea. El NAICS dice si es producto fisico y el
+    # PSC que clase de compra es, que es justo lo que hay que comprobar antes
+    # de perder la tarde.
+    _codes = [f"🏷️ {_esc(a['set_aside'])}"] if a.get("set_aside") else []
+    if a.get("naics"):
+        _codes.append(f"NAICS {_esc(a['naics'])}")
+    if a.get("psc"):
+        _codes.append(f"PSC {_esc(a['psc'])}")
+    if _codes:
+        L.append(" · ".join(_codes))
+
+    L.append(f"🆔 Solicitud: <code>{_esc(a['solicitation'])}</code>")
+
+    # La fecha va ARRIBA. Es el dato que decide si hay tiempo, y antes vivia
+    # en el bloque de logistica con formato ISO crudo.
+    urgency,cuando = _fecha_legible(a.get("limite"))
+    if urgency:
+        L.append(f"<b>{urgency}</b> · {cuando}")
     L.append("")
+
+    # La linea de decision: cuanto gano y si pasa mi piso. Sin esto habia que
+    # leer la ficha entera para saber si valia la pena abrir el enlace.
+    d = _decision(a)
+    if d:
+        L.append(f"💵 {d}")
+        L.append("")
 
     # --- Descripcion del producto ---
     L.append("📝 <b>Descripción del Producto:</b>")
@@ -361,7 +467,9 @@ def formatear_analisis(a: dict) -> str:
         a.get("lugar_entrega") or "",
     )
     etiqueta, url = d["principal"]
-    L.append(f'🔎 <a href="{_esc(url)}">{_esc(etiqueta)}</a>')
+    # La etiqueta ya trae su propio emoji; anteponer otro lo duplicaba y se
+    # leia como "🔎 🔎 Buscar en Google".
+    L.append(f'<a href="{_esc(url)}">{_esc(etiqueta)}</a>')
     for nombre, u, nota in d["sitios"][:4]:
         L.append(f"• <a href=\"{_esc(u)}\">🏬 {_esc(nombre)}</a> — <i>{_esc(nota)}</i>")
     L.append("")
@@ -372,8 +480,8 @@ def formatear_analisis(a: dict) -> str:
     # --- Logistica y contacto ---
     L.append("📍 <b>Entrega:</b>")
     L.append(f"• Destino: {_esc(a['lugar_entrega'])}")
-    L.append(f"• Límite para ofertar: <code>{_esc(a['limite'])}</code>")
-    L.append(f"• Contacto: {_esc(a['contacto'])}")
+    if a.get("contacto"):
+        L.append(f"• Contacto: {_esc(a['contacto'])}")
     if a.get("sin_descripcion"):
         L.append("")
         L.append(
@@ -387,8 +495,10 @@ def formatear_analisis(a: dict) -> str:
             L.append(f"• {_esc(p)}")
     if a.get("nivel_riesgo"):
         L.append("")
+        # Sin el "·" esto se leia como una frase enredada: "Riesgo: MEDIO
+        # ojo con esto, hay que revisar".
         L.append(
-            f"Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b> "
+            f"⚠️ Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b> · "
             f"{kyo.emoji_riesgo(a['nivel_riesgo'])}"
         )
     L.append("")

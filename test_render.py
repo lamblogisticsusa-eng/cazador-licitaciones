@@ -75,7 +75,10 @@ check("Escapa el ampersand", "&amp; mas" in html or "&amp;" in html)
 check("Conserva el enlace de SAM.gov", 'href="https://sam.gov/workspace' in html)
 check("Muestra los 3 numeros financieros", html.count("$") >= 5)
 check("Avisa que falta la descripcion", "no publicó descripción" in html)
-check("Muestra limite y destino", "2026-10-10" in html and "Portland" in html)
+# La fecha ya no sale en ISO crudo: se muestra en humano y con los dias que
+# faltan, que es lo unico que deja decidir si todavia hay tiempo.
+check("Muestra limite y destino", "10 oct 2026" in html and "Portland" in html)
+check("Y dice cuantos dias quedan", "Vence en" in html)
 check("Terminos de busqueda en <code>", "<code>wholesale mechanical seal usa" in html)
 print()
 

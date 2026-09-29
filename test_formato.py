@@ -91,11 +91,11 @@ def check(nombre, cond, extra=""):
 
 
 for etiqueta_txt, esperado in (
-    ("Saludo kawaii", "¡Amo, encontré una nueva oportunidad súper interesante!"),
+    ("Saludo kawaii", "¡Amo, encontré una oportunidad!"),
     ("Emoji feliz", "≧◡≦"),
     ("Paquete de emojis", "📦"),
-    ("Solicitud", "🔢 Solicitud:"),
-    ("Agencia", "🏛️ Agencia:"),
+    ("Solicitud", "🆔 Solicitud:"),
+    ("Agencia", "🏛️ Department of the Air Force"),
     ("Descripcion", "📝 <b>Descripción del Producto:</b>"),
     ("Analisis financiero", "💰 <b>Análisis Financiero Estimado:</b>"),
     ("Presupuesto", "• Presupuesto Est. Gobierno:"),
