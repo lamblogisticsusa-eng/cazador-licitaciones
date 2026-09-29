@@ -79,6 +79,26 @@ def _coincide(texto: str, diccionario: set) -> int:
     return sum(1 for palabra in diccionario if palabra in texto)
 
 
+def _es_psc_producto(psc: str) -> bool:
+    """
+    True si el PSC es un codigo de 4 digitos valido.
+
+    Un PSC bien formado significa que hay una CLASIFICACION de producto o
+    servicio, y en la practica de la compra tangible es lo que se ve. Se
+    acepta el rango entero 1000-9999 a proposito: una lista blanca obliga a
+    ir anoadiendo codigos a mano cada vez que aparece uno, y los que faltan
+    son precisamente los que no se 㬂 a escribir (piezas navales, material de
+    construccion, cableado), que son los buenos para este negocio.
+
+    No es un veto: quien llama decide el peso, y aqui son +1. Las familias
+    que si son servicios (5800 software, 9710 consulting) las filtran las
+    palabras del titulo y Gemini al leer la especificacion.
+    """
+    if not psc or len(psc) != 4 or not psc.isdigit():
+        return False
+    return config.PSC_MINIMO <= int(psc) <= config.PSC_MAXIMO
+
+
 def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     """
     Devuelve (puntaje, motivos). Los motivos se muestran en /debug para que
@@ -101,10 +121,22 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
         motivos.append(f"NAICS {naics_de(opp)} = sin clasificar")
 
     # --- PSC ---
+    # Cualquier PSC bien formado (4 digitos, 1000-9999) es senal de que hay
+    # producto tangible de por medio. Antes solo sumaban los ~25 codigos de la
+    # lista blanca, y se perdian los que nadie escribio ahi: 2915 (partes
+    # navales), 4520 (materiales de construccion), 6010 (cableado), 8125
+    # (aislamiento)... que son justo los que se compran y revenden.
+    #
+    # Sigue siendo un +1 y nunca un veto. El veto de servicio lo ponen las
+    # palabras del titulo y Gemini, que lee la especificacion completa.
     psc = str(opp.get("classificationCode") or "").strip()
-    if psc in config.PSC_BIENES:
+    if _es_psc_producto(psc):
         puntos += 1
-        motivos.append(f"PSC {psc} = tangible")
+        motivos.append(
+            f"PSC {psc} = tangible"
+            + ("" if psc in config.PSC_BIENES else " (fuera de la lista, "
+               "pero todo PSC de 4 digitos cuenta)")
+        )
 
     # --- Palabras clave ---
     hits_prod = _coincide(titulo, config.PALABRAS_PRODUCTO)

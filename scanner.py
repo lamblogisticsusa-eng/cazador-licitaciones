@@ -424,6 +424,15 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
                 continue
 
             store.marcar(nid, opp.get("title", ""), viable=True, puntaje=puntos)
+            # El analisis completo se persiste aqui, y no antes, porque es el
+            # unico momento en que existe entero. Sin esto, /pdf no tendria de
+            # donde sacar los datos para armar la orden de compra: al terminar
+            # el barrido, el analisis se iba con la memoria del proceso.
+            try:
+                import store as _st
+                _st.guardar_analisis(a)
+            except Exception as _e:
+                log.warning("No se pudo guardar el analisis de %s: %s", nid[:8], _e)
             viables.append((puntos, a))
             resumen["viables"] += 1
 

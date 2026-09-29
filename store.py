@@ -212,6 +212,114 @@ def rango_buscado(desde: str, hasta: str) -> bool:
         return f is not None
 
 
+def guardar_analisis(analisis: dict) -> None:
+    """
+    Persiste el analisis completo de Gemini de un aviso VIABLE.
+
+    Antes no se guardaba: store.marcar() solo anotaba el id, el titulo, si
+    era viable y el puntaje. Todo lo demas (producto, cantidades, precios,
+    margen) vivia en memoria durante el barrido y se perdia al terminar. Sin
+    esto, /pdf no tendria de donde sacar los datos para armar la orden de
+    compra.
+
+    Se guarda como JSON y no con columnas sueltas a proposito: el esquema de
+    Gemini cambia cada vez que se toca el prompt (ayer se le anadio
+    query_google_proveedores). Con columnas fijas habria que migrar la tabla
+    cada vez; con un TEXT que guarda el JSON, cualquier campo nuevo se
+    guarda solo.
+
+    Solo se guarda lo viable. Un descarte no genera ninguna orden de compra.
+    """
+    if not isinstance(analisis, dict):
+        return
+    import json as _json
+
+    nid = str(analisis.get("notice_id") or "").strip()
+    if not nid:
+        return
+    init_db()
+    try:
+        with _lock, _conexion() as c:
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS analisis_guardados ("
+                "  notice_id TEXT PRIMARY KEY,"
+                "  fecha TEXT NOT NULL,"
+                "  viable INTEGER NOT NULL DEFAULT 1,"
+                "  cuerpo TEXT NOT NULL)"
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO analisis_guardados"
+                "(notice_id, fecha, viable, cuerpo) VALUES (?,?,1,?)",
+                (nid, _ahora(), _json.dumps(analisis, ensure_ascii=False)[:60000]),
+            )
+    except sqlite3.Error as e:
+        print(f"[store] No se pudo guardar el analisis de {nid}: {e}")
+
+
+def _leer_analisis(fila) -> dict:
+    if not fila:
+        return {}
+    import json as _json
+    try:
+        return _json.loads(fila[0]) or {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def analisis_recientes(limite: int = 10) -> list[dict]:
+    """Los analisis viables guardados, del mas nuevo al mas viejo."""
+    init_db()
+    try:
+        with _lock, _conexion() as c:
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS analisis_guardados ("
+                "  notice_id TEXT PRIMARY KEY,"
+                "  fecha TEXT NOT NULL,"
+                "  viable INTEGER NOT NULL DEFAULT 1,"
+                "  cuerpo TEXT NOT NULL)"
+            )
+            filas = c.execute(
+                "SELECT cuerpo FROM analisis_guardados "
+                "WHERE viable = 1 ORDER BY fecha DESC LIMIT ?",
+                (max(1, int(limite)),),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for f in filas:
+        a = _leer_analisis(f)
+        if a:
+            out.append(a)
+    return out
+
+
+def buscar_por_solicitud(texto: str) -> dict:
+    """
+    Busca un analisis guardado por numero de solicitud de SAM.gov.
+
+    Acepta coincidencia parcial, porque el usuario puede escribirlo sin los
+    guiones o con distinta capitalizacion. Con la busqueda exacta fallaria
+    justo en el uso normal.
+    """
+    if not texto:
+        return {}
+    limpio = str(texto).strip().upper()
+    if not limpio:
+        return {}
+    # Primero exacta, luego parcial: la exacta es la rapida y la correcta.
+    for a in analisis_recientes(limite=60):
+        if str(a.get("solicitation") or "").strip().upper() == limpio:
+            return a
+        if str(a.get("notice_id") or "").strip().upper() == limpio:
+            return a
+    for a in analisis_recientes(limite=60):
+        for campo in ("solicitation", "notice_id", "title"):
+            v = str(a.get(campo) or "").upper()
+            if v and (limpio in v or v in limpio):
+                return a
+    return {}
+
+
 def marcar_rango(desde: str, hasta: str) -> None:
     init_db()
     with _lock, _conexion() as c:

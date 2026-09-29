@@ -99,6 +99,7 @@ def _crear_app() -> Application:
     app.add_handler(CommandHandler("puntajes", cmd_puntajes))
     app.add_handler(CommandHandler("etiqueta", cmd_etiqueta))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("pdf", cmd_pdf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_texto))
     # Los botones del menu. Sin este handler, Telegram muestra "botón muerto".
     app.add_handler(CallbackQueryHandler(cmd_boton, pattern=r"^k:"))
@@ -531,6 +532,121 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _argtexto(update: Update) -> str:
+    """
+    Los argumentos del comando, como texto plano.
+
+    Se usa en vez de ctx.args porque /pdf acepta "ID | Nombre del
+    proveedor", con un pipe en medio, y el pipe llega partido en varias
+    palabras. Unirlo aqui deja el comando mas comodo de escribir.
+    """
+    try:
+        return " ".join(update.message.text.split()[1:]).strip()
+    except (AttributeError, IndexError):
+        return ""
+
+
+async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /pdf [ID] - genera el Purchase Order en PDF y lo manda al chat.
+
+    Sin ID lista los avisos analizados que hay disponibles. Con ID genera el
+    documento. Se puede añadir "| Nombre del distribuidor" para dejar el
+    proveedor puesto.
+    """
+    import io as _io
+
+    import pdf_generator as pdfg
+    import store
+
+    args = _argtexto(update)
+    chat_id = str(update.effective_chat.id)
+
+    def _falta(texto):
+        update.message.reply_text(texto, parse_mode=ParseMode.HTML)
+
+    # --- Sin argumentos: que hay disponible ---
+    if not args:
+        vistos = store.analisis_recientes(limite=10)
+        if not vistos:
+            _falta(
+                "📄 <b>Aun no hay ningun aviso analizado</b>\n\n"
+                "El Purchase Order se genera a partir del analisis de una "
+                "oportunidad. Todavia no hay ninguno guardado.\n\n"
+                "En cuanto Kyomoto te mande la primera ficha, el numero de "
+                "solicitud de esa ficha es el que va aqui:\n"
+                "<code>/pdf W9127N26QA145</code>\n\n"
+                "Ojo: se genera a las 2 h del primer barrido, no de "
+                "inmediato."
+            )
+            return
+        lineas = ["📄 <b>Purchase Orders que puedo generar</b>\n"]
+        for a in vistos:
+            titulo = (a.get("title") or "")[:56]
+            sol = a.get("solicitation") or a.get("notice_id") or "?"
+            lineas.append(f"• <code>{telegram_notify._esc(sol)}</code> — {telegram_notify._esc(titulo)}")
+        lineas.append("")
+        lineas.append("Escribe <code>/pdf NUMERO</code> para generar el de ese.")
+        _falta("\n".join(lineas))
+        return
+
+    # --- Con argumentos: proveedor opcional tras "|" ---
+    if "|" in args:
+        id_buscado, proveedor_nombre = args.split("|", 1)
+        id_buscado = id_buscado.strip()
+        proveedor_nombre = proveedor_nombre.strip()
+    else:
+        id_buscado, proveedor_nombre = args.strip(), ""
+
+    analisis = store.buscar_por_solicitud(id_buscado)
+    if not analisis:
+        vistos = store.analisis_recientes(limite=6)
+        extra = ""
+        if vistos:
+            extra = "\n\n<b>Disponibles ahora:</b>\n" + "\n".join(
+                f"• <code>{telegram_notify._esc(a.get('solicitation') or '?')}</code>"
+                for a in vistos
+            )
+        _falta(
+            f"🤍 No encuentro ningun aviso con la solicitud "
+            f"<code>{telegram_notify._esc(id_buscado)}</code>.{extra}"
+        )
+        return
+
+    estado = update.message.reply_text("📄 Generando el Purchase Order...")
+    try:
+        datos = pdfg.desde_analisis(
+            analisis, {"nombre": proveedor_nombre} if proveedor_nombre else None
+        )
+        pdf_bytes = pdfg.generar_po(datos)
+        nombre = pdfg.nombre_archivo(datos.get("numero_po") or id_buscado)
+        await estado.edit_text(
+            f"✅ Listo: <code>{telegram_notify._esc(nombre)}</code>\n\n"
+            f"Comprueba el proveedor antes de mandarlo: el que escribe en el "
+            f"documento es el que va a recibirlo.",
+            parse_mode=ParseMode.HTML,
+        )
+        await update.message.reply_document(
+            document=_io.BytesIO(pdf_bytes),
+            filename=nombre,
+            caption=(
+                f"📄 <b>Purchase Order</b>\n"
+                f"SAM.gov: <code>{telegram_notify._esc(id_buscado)}</code>\n"
+                f"Si falta el proveedor: <code>/pdf {telegram_notify._esc(id_buscado)} "
+                f"| Nombre del distribuidor</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        log.exception("No se pudo generar el PDF")
+        await estado.edit_text(
+            f"❌ No pude generar el PDF: "
+            f"<code>{telegram_notify._esc(str(exc)[:200])}</code>\n\n"
+            "Dilo y lo miro.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
 async def cmd_boton(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Cada boton del menu hace lo mismo que su comando equivalente."""
     import kyo
@@ -574,11 +690,12 @@ async def cmd_boton(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                               menu_msg=q.message)
         return
 
-    if accion == "etiqueta":
+    if accion == "pdf":
         await q.message.reply_text(
-            "🏷 Escribe <code>/etiqueta NUMERO-DE-SOLICITUD</code>\n\n"
-            "El numero aparece en la ficha de cada oportunidad, asi:\n"
-            "<code>W9127N26QA145</code>",
+            "📄 Escribe <code>/pdf NUMERO-DE-SOLICITUD</code>\n\n"
+            "El numero sale en cada ficha, asi:\n"
+            "<code>/pdf W9127N26QA145</code>\n\n"
+            "Escribe solo <code>/pdf</code> y te digo cuales hay.",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -721,7 +838,14 @@ def main() -> None:
 
     app.run_polling(
         drop_pending_updates=True,
-        allowed_updates=["message"],
+        # "message" son los comandos y el texto. "callback_query" son las
+        # pulsaciones de los botones del menu. Sin esta segunda entrada,
+        # Telegram NO entrega los botones: se ven, se pueden pulsar, y no
+        # pasa nada. Es el unico motivo por el que los botones estaban
+        # muertos aunque el handler estuviera bien registrado.
+        # Si algun dia se anade un handler de otro tipo, hay que anadirlo aqui
+        # tambien, o tendra el mismo fallo en silencio.
+        allowed_updates=["message", "callback_query"],
     )
 
 

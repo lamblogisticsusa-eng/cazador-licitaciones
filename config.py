@@ -6,11 +6,11 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
-# 2.3.1 = prompt permisivo (ya no descarta por entrega fisica ni empaque
-# militar), ficha de Telegram mas corta con la abreviatura de la agencia y
-# la fecha de decision arriba, y el enlace de distribuidores usando el
-# termino optimizado que genera Gemini.
-KYOMOTO_VERSION = "2.3.1"
+# 2.4.0 = los botones del menu vuelven a responder (allowed_updates no
+# traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
+# PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
+# Purchase Order en PDF con el comando /pdf.
+KYOMOTO_VERSION = "2.4.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -218,7 +218,27 @@ NAICS_SERVICIOS = {
     "921", "922", "923", "926", "927", "928", "931", "932", "941", "942",
 }
 
-# Clasificacion PSC (4 digitos) que suele ser producto tangible. Senal debil (+1).
+# Clasificacion PSC (Product and Service Classification), 4 digitos.
+#
+# ANTES: una lista blanca de ~25 codigos. Solo esos sumaban, y un PSC valido
+# fuera de la lista no.contribuia en nada. Ejemplos que se perdian:
+#   2915 maquinaria y partes navales   <- piezas de repuesto, el nucleo
+#   4520 materiales de construccion
+#   6010 cableado electrico
+#   8125 relleno de aislamiento
+#
+# AHORA: PSC_BIENES se mantiene como lista de los codigos mas frecuentes, que
+# sirve para el detalle del log, pero el filtro acepta CUALQUIER codigo de 4
+# digitos valido. Ver filtros.py::_es_psc_producto.
+#
+# Se mantiene como senal DEBIL (+1) y nunca como veto. Que un codigo no este
+# en la lista no significa que el aviso sea un servicio: significa que nadie
+# lo escribio.
+#
+# Las familias que si son servicios (5800 software, 9710 consulting,
+# C1xx-C2xx construccion) siguen sin vetar: eso lo deciden las palabras de
+# servicio del titulo y Gemini al leer la especificacion. Este cambio relaja
+# el veto, no lo sustituye.
 PSC_BIENES = {
     "5330",  # suministros y consumibles generales
     "5340",  # utiles de dibujo y taller
@@ -233,16 +253,33 @@ PSC_BIENES = {
     "7065",  # componentes electronicos
     "7100",  # equipo general
     "7120",  # instrumentos de medida
-    "7190",  # mantenimiento de equipo
-    "7220",  # equipo de proceso
-    "7240",  # equipos de computacion
-    "7360",  # mobiliario y equipos de oficina
-    "7410",  # maquinaria de construccion
-    "7420",  # maquinaria de extraccion
-    "7450",  # vehiculos industriales
-    "7510",  # transporte de carga
-    "7690",  # miscelaneos de fabricacion
+    "7210",  # equipos de pruebas
+    "7310",  # equipos de ingenieria
+    "7330",  # utilidades de ingenieria
+    "7360",  # maquinas herramientas
+    "7400",  # estructuras y componentes
+    "7410",  # construccion y mineria
+    "7430",  # ingenieria estructural
+    "7510",  # ferreteria
+    "7610",  # climatizacion
+    "7670",  # servicios de construccion
+    "7690",  # servicios auxiliares
+    "9140",  # preparacion del terreno
+    "9900",  # suministros varios
 }
+
+# Rango valido de un PSC federal. Cuatro digitos, 1000 a 9999.
+PSC_MINIMO = 1000
+PSC_MAXIMO = 9999
+
+# --- Purchase Order en PDF (ver pdf_generator.py) ---
+# Carta, con margenes en pulgadas. Se dejan-generosos porque el PDF lleva
+# membrete (logo) arriba y firma abajo, y con margenes de 0.5" el bloque de
+# texto se comia el logo.
+PDF_MARGEN_IZQUIERDO = 0.75
+PDF_MARGEN_DERECHO = 0.75
+PDF_MARGEN_SUPERIOR = 0.45
+PDF_MARGEN_INFERIOR = 0.45
 
 # ==========================================================================
 #  DESCALIFICADORES QUE APRENDI DE LOS ANALISIS REALES

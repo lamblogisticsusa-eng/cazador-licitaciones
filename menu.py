@@ -21,7 +21,7 @@ def teclado(activo: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📋 Por qué descarté", callback_data=PREFIJO + "puntajes"),
         ],
         [
-            InlineKeyboardButton("🏷 Etiqueta PDF", callback_data=PREFIJO + "etiqueta"),
+            InlineKeyboardButton("🏷 Etiqueta PDF", callback_data=PREFIJO + "pdf"),
             InlineKeyboardButton("🩺 Autodiagnóstico", callback_data=PREFIJO + "selftest"),
         ],
     ]

@@ -1,0 +1,20 @@
+COLOCA AQUI EL LOGO DE LA EMPRESA
+=================================
+
+Nombre que busca pdf_generator.py:   logo_lamb.png
+
+El logo que adjuntaste en el chat es un PNG con fondo casi blanco y
+la marca L.A.M.B. en azul (#1B3B6F) y gris (#5B6770), con un oso
+corriendo sobre una flecha. Guárdalo aqui con ese nombre y el
+Purchase Order lo usa automaticamente.
+
+OTROS NOMBRES QUE BUSCA, EN ESTE ORDEN:
+  1. El que diga la variable de entorno LOGO_PATH
+  2. assets/logo_lamb.png
+  3. assets/logo.png
+
+Si no hay ninguna de las tres, el PDF NO falla: dibuja un marcador
+con las iniciales L.A.M.B. para que se vea que falta.
+
+TAMANO: el PDF lo escala solo a 1.85 x 0.72 pulgadas, en la esquina
+superior derecha. Un PNG de 500 px o mas se ve bien.
