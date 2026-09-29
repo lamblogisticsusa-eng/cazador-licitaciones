@@ -56,11 +56,36 @@ FABRICANTES = [
 ]
 
 
+# Palabras que piden informacion en vez de dar productos. Si el usuario
+# busca "how to buy gate valve cheap" en lugar de "6 inch cast steel gate
+# valve wholesale distributor", la pagina que sale es de tutoriales, no de
+# proveedores.
+# OJO: "wholesale" y "distributor" NO van aqui a proposito. Son las que
+# hacen que los resultados sean de mayoristas, que es donde esta el margen.
+_INSTRUCCION = re.compile(
+    r"\b(how to|where to|can i|buy|cheap|cheapest|near me|precio|price|prices|"
+    r"cost|costs|review|reviews|for sale|cheap near)\b",
+    re.IGNORECASE,
+)
+
+
 def _limpiar(termino: str) -> str:
-    """Deja solo lo que sirve para una busqueda."""
-    t = re.sub(r"[^\w\s\-.,/&+]", " ", str(termino or ""))
+    """
+    Deja solo lo que sirve para una busqueda.
+
+    Quita comillas y demas signos raros, y comas por estetica. Lo que de
+    verdad no puede quedar son las comillas dobles: rompen el HTML de la
+    ficha y hacen que Telegram rechace el mensaje entero con un 400.
+    """
+    t = re.sub(r"[^\w\s\-/&+]", " ", str(termino or ""))
     t = re.sub(r"\s+", " ", t).strip()
     return t[:80]
+
+
+def _sin_instruccion(termino: str) -> str:
+    """Quita las palabras que piden informacion en vez de dar productos."""
+    t = _INSTRUCCION.sub(" ", str(termino or ""))
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def google(consulta: str) -> str:
@@ -71,9 +96,16 @@ def busqueda_sitio(dominio: str, termino: str) -> str:
     return google(f'{termino} site:{dominio}')
 
 
-def para_oportunidad(terminos: list[str], producto: str = "", pais_destino: str = "") -> dict:
+def para_oportunidad(terminos: list[str], producto: str = "",
+                     pais_destino: str = "",
+                     query_google_proveedores: str = "") -> dict:
     """
     Arma el bloque de distribuidores para la ficha.
+
+    query_google_proveedores es el termino optimizado que pidio Gemini. Si
+    viene, el enlace principal lo usa tal cual, porque sale de la
+    especificacion completa y no solo del nombre del producto. Si no viene,
+    se arma la consulta como antes. En los dos casos hay enlace.
 
     Devuelve:
         {
@@ -81,6 +113,7 @@ def para_oportunidad(terminos: list[str], producto: str = "", pais_destino: str 
           "sitios":    [(etiqueta, url, nota)],  # site: a directorios de USA
           "terminos":  [...],                    # para copiar y pegar
           "fabricantes": [...],
+          "consulta_gemini": str,                # el termino que se uso, o ""
         }
     """
     limpio = [_limpiar(t) for t in (terminos or []) if _limpiar(t)]
@@ -110,8 +143,21 @@ def para_oportunidad(terminos: list[str], producto: str = "", pais_destino: str 
     if ciudad:
         consultas.append(f'{especifico} distributor {ciudad}')
 
+    # El termino de Gemini tiene prioridad sobre la consulta armada aqui.
+    # Se limpia con el MISMO criterio que el resto, porque si no el enlace se
+    # rompe: una coma o una comilla dentro del termino hacen que Google no
+    # entienda la URL. Y el "price" se añade si no viene ya, para que el
+    # usuario vea precios de mayoreo y no solo catalogos.
+    consulta_gemini = _sin_instruccion(_limpiar(query_google_proveedores))
+    if consulta_gemini:
+        consulta_principal = consulta_gemini
+        if not re.search(r"\b(price|precio|cost)\b", consulta_gemini, re.I):
+            consulta_principal += " price"
+    else:
+        consulta_principal = f"{especifico} wholesale distributor usa price"
+
     principal = ("🔎 Buscar en Google (siempre funciona)",
-                 google(f'{especifico} wholesale distributor usa price'))
+                 google(consulta_principal))
 
     sitios = []
     for nombre, dominio, nota in DIRECTORIOS[:5]:
@@ -129,6 +175,10 @@ def para_oportunidad(terminos: list[str], producto: str = "", pais_destino: str 
         "fabricantes": fabricantes,
         "terminos": limpio or [especifico],
         "consultas": consultas,
+        # Se devuelve para que el log y las pruebas puedan ver si el termino
+        # optimizado llego o no. Sin esto, un aviso con el campo vacio y otro
+        # con el campo puesto darian un enlace identico y no se distinguirian.
+        "consulta_gemini": consulta_gemini,
     }
 
 

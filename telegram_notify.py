@@ -344,119 +344,220 @@ def _decision(a: dict) -> str:
     )
 
 
+# Abreviaturas de las agencias federales de EE.UU. que mas contratos publican.
+# Se usan en la linea del producto, que tiene que caber en una sola linea: el
+# nombre completo ("Department of the Air Force / Wright-Patterson AFB")
+# duplicaria lo que dice la linea de agencia justo debajo.
+_ABREVIATURAS = {
+    "department of the air force": "USAF",
+    "air force": "USAF",
+    "department of the navy": "USN",
+    "navy": "USN",
+    "naval": "USN",
+    "department of the army": "ARMY",
+    "army": "ARMY",
+    "marine corps": "USMC",
+    "department of defense": "DOD",
+    "defense logistics agency": "DLA",
+    "defense health agency": "DHA",
+    "national security agency": "NSA",
+    "space force": "USSF",
+    "coast guard": "USCG",
+    "general services administration": "GSA",
+    "general services": "GSA",
+    "department of veterans affairs": "VA",
+    "department of homeland security": "DHS",
+    "department of energy": "DOE",
+    "department of agriculture": "USDA",
+    "department of commerce": "DOC",
+    "department of justice": "DOJ",
+    "department of the interior": "DOI",
+    "department of transportation": "DOT",
+    "department of state": "DOS",
+    "national aeronautics and space administration": "NASA",
+    "environmental protection agency": "EPA",
+    "nuclear regulatory commission": "NRC",
+    "national archives and records": "NARA",
+    "government publishing office": "GPO",
+    "small business administration": "SBA",
+    "federal communications commission": "FCC",
+    "bureau of prisons": "BOP",
+    "drug enforcement administration": "DEA",
+    "federal bureau of investigation": "FBI",
+    "national science foundation": "NSF",
+}
+
+# Palabras que no cuentan para sacar iniciales: "Department of the" no es
+# informacion, es relleno.
+_RELLENO = {"of", "the", "for", "and", "de", "del", "la", "of"}
+
+
+def _agencia_corta(agencia) -> str:
+    """
+    Abreviatura de la agencia para la linea del producto.
+
+    Tres formas, en orden:
+      1. La abreviatura conocida del diccionario. Cubre lo que de verdad
+         publica contratos en SAM.gov.
+      2. Una sigla que ya venga entre parentesis en el propio nombre, que es
+         justo como lo escribe SAM.gov: "Department of the Navy (NAVSEA)".
+      3. Iniciales de las palabras con contenido. Es la red de seguridad para
+         una agencia que no este en el diccionario.
+
+    Sin esto, la linea del producto seria larguisima con el nombre entero y
+    mas el nombre entero otra vez en la linea siguiente.
+    """
+    if not agencia:
+        return "GOV"
+    texto = str(agencia).strip()
+    bajo = texto.lower()
+
+    # 1) diccionario
+    for nombre, abreviado in _ABREVIATURAS.items():
+        if nombre in bajo:
+            return abreviado
+
+    # 2) sigla ya presente entre parentesis
+    import re as _re
+
+    m = _re.search(r"\(([A-Z][A-Z0-9&./\- ]{1,14})\)", texto)
+    if m:
+        return m.group(1).strip()
+
+    # 3) iniciales de las palabras con contenido
+    palabras = [
+        p for p in _re.findall(r"[A-Za-z]+", bajo)
+        if p not in _RELLENO
+    ]
+    if not palabras:
+        return "GOV"
+    if len(palabras) == 1:
+        return palabras[0][:5].upper()
+    return "".join(p[0] for p in palabras[:5]).upper()
+
+
+def _descripcion_corta(a: dict) -> str:
+    """
+    Una sola frase con el producto, el modelo, la cantidad y la especificacion
+    clave, en ese orden. Todo en un parrafo: el diseno pedido tiene una sola
+    linea de descripcion, y partirla en dos obligaba a leer de un bloque al
+    otro.
+    """
+    partes = []
+    producto = (a.get("producto") or "").strip()
+    if producto:
+        partes.append(producto)
+
+    modelo = (a.get("modelo_especifico") or "").strip()
+    cantidad = a.get("cantidad_total")
+    unidad = (a.get("unidad_medida") or "").strip()
+
+    extras = []
+    if modelo:
+        extras.append(modelo)
+    if cantidad and unidad:
+        extras.append(f"{_cantidad(cantidad)} {unidad}")
+    elif cantidad:
+        extras.append(f"{_cantidad(cantidad)} unidades")
+
+    if extras:
+        if partes:
+            partes[0] = f"{partes[0]} ({', '.join(extras)})"
+        else:
+            partes.append("(" + ", ".join(extras) + ")")
+
+    spec = (a.get("especificacion_tecnica_clave") or "").strip()
+    if spec:
+        if partes:
+            partes[0] += f". {spec}"
+        else:
+            partes.append(spec)
+
+    return ". ".join(partes) if partes else "Sin descripcion publicada."
+
+
+def _usd_texto(valor) -> str:
+    """
+    Monto con el signo y los decimales, SIN la palabra USD detras.
+
+    El formato pedido escribe "~$85,000.00 USD" y "$74,500.00 USD", o sea el
+    texto y la unidad separadas. _usd() devuelve solo "$85,000.00", asi que
+    aqui se añade el separador para poder pegarle el " USD" que pide el
+    diseno sin que quede pegado.
+    """
+    if valor is None:
+        return "N/E"
+    return f"${valor:,.2f}"
+
+
 def formatear_analisis(a: dict) -> str:
     """
-    La ficha, en el formato que pidio el usuario.
+    La ficha, en el formato exacto que pidio el usuario.
 
-    Regla de oro: la cuenta se sostiene. Si el bot dice que vas a ofertar
-    $74,500, la ganancia se mide contra $74,500 y no contra el presupuesto
-    del gobierno, porque lo que entra a tu cuenta es lo que ofertaste.
+    Pensada para leerla de un vistazo y decidir si abrir el enlace: que es,
+    quien la pide, cuanto se gana, a cuanto se ofrece, donde comprar y donde
+    esta la ficha original.
+
+    Regla de oro, y no es negociable: la cuenta se sostiene. Si el bot dice que
+    vas a ofertar $74,500, la ganancia se mide contra $74,500 y no contra el
+    presupuesto del gobierno, porque lo que entra a tu cuenta es lo que
+    ofertaste. Medirla contra el presupuesto infla el margen y hace que
+   Finish
+    ofertas por debajo de tu propia ganancia.
     """
     import distribuidores
     import kyo
 
-    L = ["✨ <b>¡Amo, encontré una oportunidad!</b> (≧◡≦)", ""]
+    L = ["✨ <b>¡Amo, encontré una nueva oportunidad súper interesante!</b> (≧◡≦)", ""]
 
-    # --- Encabezado ---
-    L.append(f"📦 <b>{_esc(a['title'])}</b>")
-    L.append(f"🏛️ {_esc(a['agencia'])}")
-
-    # Identificacion en una linea. El NAICS dice si es producto fisico y el
-    # PSC que clase de compra es, que es justo lo que hay que comprobar antes
-    # de perder la tarde.
-    _codes = [f"🏷️ {_esc(a['set_aside'])}"] if a.get("set_aside") else []
-    if a.get("naics"):
-        _codes.append(f"NAICS {_esc(a['naics'])}")
-    if a.get("psc"):
-        _codes.append(f"PSC {_esc(a['psc'])}")
-    if _codes:
-        L.append(" · ".join(_codes))
-
-    L.append(f"🆔 Solicitud: <code>{_esc(a['solicitation'])}</code>")
-
-    # La fecha va ARRIBA. Es el dato que decide si hay tiempo, y antes vivia
-    # en el bloque de logistica con formato ISO crudo.
-    urgency,cuando = _fecha_legible(a.get("limite"))
-    if urgency:
-        L.append(f"<b>{urgency}</b> · {cuando}")
+    # --- Que es y de quien ---
+    # La abreviatura va delante del producto para que la linea se escanee de
+    # un vistazo: "USAF - Generadores 50kW" dice mas que el nombre entero, y el
+    # nombre entero va justo debajo, que es donde toca leerlo.
+    #
+    # Si el titulo ya empieza por esa misma abreviatura, no se antepone: sale
+    # "USAF - USAF - Suministro de Repuestos", que es ruido. El nombre del
+    # titulo tal cual viene de Gemini y a veces ya trae la agencia.
+    _corta = _agencia_corta(a.get("agencia"))
+    _titulo = str(a["title"]).strip()
+    if _titulo[:len(_corta) + 1].upper().startswith(_corta + "-") or \
+       _titulo[:len(_corta) + 1].upper().startswith(_corta + " "):
+        L.append(f"📦 <b>{_esc(_titulo)}</b>")
+    else:
+        L.append(f"📦 <b>{_esc(_corta)} - {_esc(_titulo)}</b>")
+    L.append(f"🔢 Solicitud: <code>{_esc(a['solicitation'])}</code>")
+    L.append(f"🏛️ Agencia: {_esc(a['agencia'])}")
     L.append("")
-
-    # La linea de decision: cuanto gano y si pasa mi piso. Sin esto habia que
-    # leer la ficha entera para saber si valia la pena abrir el enlace.
-    d = _decision(a)
-    if d:
-        L.append(f"💵 {d}")
-        L.append("")
 
     # --- Descripcion del producto ---
     L.append("📝 <b>Descripción del Producto:</b>")
-    descripcion = _esc(a.get("producto") or "")
-    if a.get("modelo_especifico"):
-        descripcion += f" ({_esc(a['modelo_especifico'])})"
-    cantidad = a.get("cantidad_total")
-    unidad = a.get("unidad_medida") or "EA"
-    if cantidad:
-        descripcion += f" — {_cantidad(cantidad)} {_esc(str(unidad))}"
-    L.append(descripcion)
-    if a.get("especificacion_tecnica_clave"):
-        L.append(f"<i>{_esc(a['especificacion_tecnica_clave'])}</i>")
+    L.append(_esc(_descripcion_corta(a)))
     L.append("")
 
     # --- Analisis financiero ---
+    # El "~" no es decorativo: el presupuesto y el costo los estima Gemini a
+    # partir de la especificacion, no salen de una cifra oficial. La ganancia
+    # neta NO lleva "~" porque si se calcula, y ponerlo seria mentir sobre lo
+    # unico que sale cerrado.
     L.append("💰 <b>Análisis Financiero Estimado:</b>")
-    L.append(f"• Presupuesto Est. Gobierno: <b>{_usd(a['valor_contrato_usd'])}</b>")
-    L.append(f"• Costo Est. Proveedor/Distribuidor: <b>{_usd(a['costo_total_usd'])}</b>")
-    L.append(
-        f"• Ganancia Neta Proyectada: <b>{_usd(a['ganancia_neta_usd'])}</b>"
-        + (f" ({a['margen_neto_porcentaje']:.1f}% de margen neto)"
-           if a.get("margen_neto_porcentaje") is not None else "")
-    )
+    L.append(f"• Presupuesto Est. Gobierno: ~{_usd_texto(a['valor_contrato_usd'])} USD")
+    L.append(f"• Costo Est. Proveedor: ~{_usd_texto(a['costo_total_usd'])} USD")
+    _margen = a.get("margen_neto_porcentaje")
+    L.append(f"• Ganancia Neta Proyectada: "
+             f"<b>{_usd_texto(a['ganancia_neta_usd'])}</b> USD"
+             + (f" ({_margen:.1f}% de margen)" if _margen is not None else ""))
     L.append("")
 
-    # --- La cuenta por unidad ---
-    if a.get("cantidad_total") and a.get("precio_unitario_costo"):
-        L.append("🔢 <b>La cuenta por unidad:</b>")
-        L.append(f"• Comprar cada una: <b>{_usd(a['precio_unitario_costo'])}</b>")
-        L.append(f"• Precio de catálogo: <b>{_usd(a['precio_unitario_mercado'])}</b>")
-        L.append(f"• Ofertar cada una: <b>{_usd(a['precio_unitario_oferta'])}</b>")
-        L.append(f"• <b>Ganancia por unidad: {_usd(a['ganancia_por_unidad'])}</b>")
-        L.append("")
-
-    # --- Desglose del margen, con el factoring a la vista ---
-    margen_bruto = a.get("margen_bruto_porcentaje")
-    margen_neto = a.get("margen_neto_porcentaje")
-    if margen_bruto is not None:
-        L.append("🏦 <b>De dónde sale el margen:</b>")
-        L.append(
-            f"• Ganancia bruta: <b>{_usd(a['ganancia_total_usd'])}</b> "
-            f"({margen_bruto:.1f}%)"
-        )
-        L.append(
-            f"• Factoring ({config.FACTORING_PCT * 100:.1f}%): "
-            f"<b>-{_usd(a['costo_factoring_usd'])}</b>"
-        )
-        L.append(
-            f"• <b>Neta real: {_usd(a['ganancia_neta_usd'])}</b>"
-            + (f" ({margen_neto:.1f}% neto)" if margen_neto is not None else "")
-        )
-        L.append(
-            f"<i>Objetivo: {config.MARGEN_BRUTO_MIN * 100:.0f}%–"
-            f"{config.MARGEN_BRUTO_MAX * 100:.0f}% bruto, "
-            f"mínimo {config.MARGEN_NETO_MIN * 100:.0f}% neto.</i>"
-        )
-        L.append("")
-
     # --- Estrategia de oferta ---
+    # La explicacion va en la MISMA linea, entre parentesis: es el "por que" de
+    # ese numero, y separarla obligaba a saltar de un bloque a otro.
     L.append("🎯 <b>Estrategia de Oferta Sugerida:</b>")
-    L.append(f"• Precio Sugerido para Licitar: <b>{_usd(a['precio_oferta_sugerido_usd'])}</b>")
-    if a.get("razonamiento_oferta"):
-        L.append(f"({_esc(a['razonamiento_oferta'])})")
-    elif a.get("estrategia_oferta"):
-        L.append(f"({_esc(a['estrategia_oferta'])})")
-    if a.get("margen_por_distribuidor"):
-        L.append("")
-        L.append("💡 <b>Dónde está el mejor margen:</b>")
-        L.append(_esc(a["margen_por_distribuidor"]))
+    _expl = (a.get("razonamiento_oferta") or a.get("estrategia_oferta") or "").strip()
+    _linea = (f"• Precio Sugerido para Licitar: "
+              f"<b>{_usd_texto(a['precio_oferta_sugerido_usd'])}</b> USD")
+    if _expl:
+        _linea += f" ({_esc(_expl)})"
+    L.append(_linea)
     L.append("")
 
     # --- Distribuidores ---
@@ -465,48 +566,25 @@ def formatear_analisis(a: dict) -> str:
         a.get("busquedas_distribuidores") or [],
         a.get("producto") or "",
         a.get("lugar_entrega") or "",
+        a.get("query_google_proveedores") or "",
     )
     etiqueta, url = d["principal"]
     # La etiqueta ya trae su propio emoji; anteponer otro lo duplicaba y se
     # leia como "🔎 🔎 Buscar en Google".
     L.append(f'<a href="{_esc(url)}">{_esc(etiqueta)}</a>')
-    for nombre, u, nota in d["sitios"][:4]:
-        L.append(f"• <a href=\"{_esc(u)}\">🏬 {_esc(nombre)}</a> — <i>{_esc(nota)}</i>")
-    L.append("")
-    L.append("<i>Para buscar a mano:</i>")
-    L.append(f"<code>{_esc(distribuidores.texto_plano(d['terminos']))}</code>")
     L.append("")
 
-    # --- Logistica y contacto ---
-    L.append("📍 <b>Entrega:</b>")
-    L.append(f"• Destino: {_esc(a['lugar_entrega'])}")
-    if a.get("contacto"):
-        L.append(f"• Contacto: {_esc(a['contacto'])}")
+    # --- Aviso que hay que leer si aplica ---
     if a.get("sin_descripcion"):
+        L.append("⚠️ <i>SAM.gov no publicó descripción de este aviso; las cifras "
+                 "son estimaciones. Antes de ofertar, léelo en el enlace.</i>")
         L.append("")
-        L.append(
-            f"⚠️ <i>SAM.gov no publicó descripción de este aviso; las cifras "
-            f"son estimaciones. Antes de ofertar, léelo en el enlace.</i>"
-        )
-    if a.get("preguntas_criticas"):
-        L.append("")
-        L.append(f"❓ <b>{kyo.PREGUNTA_ANTES}</b>")
-        for p in a["preguntas_criticas"]:
-            L.append(f"• {_esc(p)}")
-    if a.get("nivel_riesgo"):
-        L.append("")
-        # Sin el "·" esto se leia como una frase enredada: "Riesgo: MEDIO
-        # ojo con esto, hay que revisar".
-        L.append(
-            f"⚠️ Riesgo: <b>{_esc(a['nivel_riesgo'].upper())}</b> · "
-            f"{kyo.emoji_riesgo(a['nivel_riesgo'])}"
-        )
-    L.append("")
 
     # --- Enlace ---
     L.append("🔗 <b>Enlace Directo SAM.gov:</b>")
     if a.get("ui_link"):
-        L.append(f"📄 <a href=\"{_esc(a['ui_link'])}\"><b>Ver Ficha Completa de la Licitación</b></a>")
+        L.append(f"📄 <a href=\"{_esc(a['ui_link'])}\">"
+                 "<b>Ver Ficha Completa de la Licitación</b></a>")
     else:
         L.append("📄 Ver Ficha Completa de la Licitación")
 

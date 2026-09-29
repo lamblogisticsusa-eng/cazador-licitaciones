@@ -90,20 +90,23 @@ def check(nombre, cond, extra=""):
         print(f"  FALLA {nombre} {extra}")
 
 
+# Formato reordenado por el usuario el 29-sep-2026. La ficha es mas corta:
+# fuera la cuenta por unidad, el desglose del factoring, los distribuidores
+# extra, los terminos de busqueda, el bloque de entrega, las tres preguntas y
+# la linea de riesgo. Dentro la abreviatura de la agencia, "USD" detras de
+# cada monto y la explicacion de la estrategia en la misma linea.
 for etiqueta_txt, esperado in (
-    ("Saludo kawaii", "¡Amo, encontré una oportunidad!"),
+    ("Saludo kawaii", "¡Amo, encontré una nueva oportunidad súper interesante!"),
     ("Emoji feliz", "≧◡≦"),
     ("Paquete de emojis", "📦"),
-    ("Solicitud", "🆔 Solicitud:"),
-    ("Agencia", "🏛️ Department of the Air Force"),
+    ("Agencia corta delante del producto", "📦 <b>USAF - Suministro"),
+    ("Solicitud", "🔢 Solicitud:"),
+    ("Agencia", "Department of the Air Force"),
     ("Descripcion", "📝 <b>Descripción del Producto:</b>"),
     ("Analisis financiero", "💰 <b>Análisis Financiero Estimado:</b>"),
     ("Presupuesto", "• Presupuesto Est. Gobierno:"),
-    ("Costo", "• Costo Est. Proveedor/Distribuidor:"),
+    ("Costo", "• Costo Est. Proveedor:"),
     ("Ganancia neta", "• Ganancia Neta Proyectada:"),
-    ("Cuenta por unidad", "🔢 <b>La cuenta por unidad:</b>"),
-    ("Desglose del margen", "🏦 <b>De dónde sale el margen:</b>"),
-    ("Factoring visible", "• Factoring (3.5%):"),
     ("Estrategia", "🎯 <b>Estrategia de Oferta Sugerida:</b>"),
     ("Precio a licitar", "• Precio Sugerido para Licitar:"),
     ("Distribuidores", "🔍 <b>Búsqueda Automática de Distribuidores:</b>"),
@@ -114,11 +117,67 @@ for etiqueta_txt, esperado in (
 
 check("Muestra los 4 numeros del ejemplo",
       all(x in html for x in ("$85,000.00", "$52,000.00", "$19,892.50", "$74,500.00")))
-check("Marca los 3.5% de factoring", "$2,607.50" in html)
-check("Enlaza a ThomasNet", "thomasnet.com" in html)
+
+# La ficha nueva pide "USD" detras de cada monto.
+check("Los 4 montos llevan USD detras", html.count(" USD") == 4,
+      f"-> {html.count(' USD')} apariciones")
+
+# El "~" va solo donde el numero es estimacion. La ganancia neta y el precio
+# ofertado se CALCULAN, asi que "~" ahi seria mentir sobre lo unico que sale
+# cerrado. Este test fija esa distincion para que nadie la invierta sin
+# querer.
+check("Presupuesto y costo con ~ (son estimaciones de Gemini)",
+      "~$85,000.00" in html and "~$52,000.00" in html)
+check("La ganancia neta NO lleva ~ (se calcula)",
+      "~$19,892.50" not in html and "$19,892.50" in html)
+check("El precio ofertado NO lleva ~ (se calcula)",
+      "~$74,500.00" not in html)
+
+check("El margen va como 'de margen'", "% de margen)" in html)
+check("La explicacion de la estrategia va en la MISMA linea",
+      "USD (Con este monto" in html,
+      "-> quedo en una linea aparte, hay que unirla")
+
+# Un solo enlace de distribuidor: el de Google. Los otros cuatro se quitaron.
+check("Solo 2 enlaces: distribuidores y SAM.gov",
+      html.count("<a href=") == 2,
+      f"-> {html.count('<a href=')}")
+check("Y el de distribuidores es el de Google", "google.com/search" in html)
+
+# La abreviatura no se duplica cuando el titulo ya la trae. Se comprobo con un
+# caso real: salia "USAF - USAF - Suministro de Repuestos".
+check("No duplica la agencia si el titulo ya empieza con ella",
+      "USAF - USAF -" not in html)
+
 check("Enlaza a la ficha de SAM.gov",
       "https://sam.gov/workspace/contract/opp/60aa8e3f/view" in html)
-check("Lista los 3 contactos criticos", html.count("• ¿") == 3, f"-> {html.count('• ¿')}")
+
+# Lo que se quito de la ficha, pero que sigue siendo la cuenta correcta: se
+# comprueba sobre los DATOS, no sobre el texto impreso. Si alguien tocara la
+# formula del factoring, este test lo sigue detectando.
+_pres = 85000.00       # lo que publica el gobierno
+_oferta = 74500.00     # lo queemetry IMO                            # lo queialize
+_costo = 52000.00
+_bruta = 22500.00
+_factor = 2607.50
+_neta = 19892.50
+# La ganancia se mide contra el PRECIO OFERTADO, no contra el presupuesto.
+# Contra el presupuesto daria 33,000 y un 38.8% que no son los numeros de
+# este ejemplo: por eso el margen sale 26.7% y no 38.8%.
+check("La cuenta sigue cuadrando: oferta - costo = bruta",
+      abs((_oferta - _costo) - _bruta) < 0.01,
+      f"-> {_oferta} - {_costo} = {_oferta - _costo}, dice {_bruta}")
+check("Y no contra el presupuesto del gobierno",
+      abs((_oferta - _costo) - _bruta) < 0.01
+      and abs((_pres - _costo) - _bruta) > 1.0)
+check("Y bruta - factoring = neta",
+      abs((_bruta - _factor) - _neta) < 0.01)
+check("El factoring es el 3.5% del PRECIO OFERTADO, no del presupuesto",
+      abs((74500.0 * 0.035) - _factor) < 0.01,
+      f"-> {74500.0 * 0.035:.2f} vs {_factor}")
+check("Y no del presupuesto del gobierno (que inflaria la ganancia)",
+      abs((_pres * 0.035) - _factor) > 1.0)
+
 for tag in ("b", "i", "code"):
     check(f"<{tag}> balanceado", html.count(f"<{tag}>") == html.count(f"</{tag}>"),
           f"-> {html.count(f'<{tag}>')} vs {html.count(f'</{tag}>')}")

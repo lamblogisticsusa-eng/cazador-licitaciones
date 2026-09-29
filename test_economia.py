@@ -179,24 +179,85 @@ print("  (la IA deberia marcarlo viable=false; Kyomoto muestra la cuenta "
 print()
 
 print("=" * 70)
-print("5) LA FICHA MUESTRA TODO ESTO")
 print("=" * 70)
+print("5) LA FICHA MUESTRA ESTO, Y LOS MONTOS SON LOS DEL ANALISIS")
+print("=" * 70)
+# La cuenta por unidad y el desglose del factoring se quitaron del diseno el
+# 29-sep-2026: la ficha es mas corta y se lee de un vistazo. Pero los numeros
+# que imprime tienen que ser EXACTAMENTE los que salio el analisis, no una
+# cuenta paralela. Eso es lo que se comprueba aqui.
 html = tn.formatear_analisis(a)
-check("Cantidad en unidades", "50 EA" in html, f"-> no encontrado")
+
+# Lo que la ficha nueva si muestra.
+check("Cantidad en unidades", "50 EA" in html, "-> no encontrado")
 check("Modelo", "Dell Latitude 5450" in html)
-check("Costo unitario", "$1,200.00" in html)
-check("Precio de catalogo unitario", "$1,249.00" in html)
-check("Oferta unitaria", "$1,450.00" in html)
-check("Ganancia por unidad", "$250.00" in html)
 check("Valor del contrato", "$72,500.00" in html)
-check("Ganancia bruta", "$12,500.00" in html)
-check("Factoring restado", "$2,537.50" in html)
 check("Ganancia neta", "$9,962.50" in html)
-check("El objetivo de margen aparece", "15%" in html and "35%" in html)
-check("El minimo neto aparece", "12%" in html)
+check("Los montos con USD detras", html.count(" USD") == 4,
+      f"-> {html.count(' USD')}")
+check("Presupuesto y costo con ~ (son estimaciones)",
+      "~$72,500.00" in html and "~$60,000.00" in html)
+check("La ganancia neta sin ~ (se calcula)", "~$9,962.50" not in html)
+
+# La coherencia entre lo que dice el analisis y lo que imprime la ficha. Este
+# es el test que de verdad importa: si alguien tocara la cuenta que hace la
+# ficha, aqui se veria aunque las cifras se vieran bien sueltas.
+print()
+print("   La cuenta de la ficha sale del analisis, no se rehace:")
+for etiqueta, valor in (
+    ("valor_contrato_usd", "valor_contrato_usd"),
+    ("costo_total_usd", "costo_total_usd"),
+    ("ganancia_neta_usd", "ganancia_neta_usd"),
+    ("precio_oferta_sugerido_usd", "precio_oferta_sugerido_usd"),
+):
+    esperado = f"${a[valor]:,.2f}"
+    check(f"  {etiqueta} aparece con el valor del analisis ({esperado})",
+          esperado in html, f"-> la ficha podria estar mostrando otra cosa")
+
+# La cuenta sigue cerrando, aunque ya no se imprima el desglose. Sin esto, el
+# error del 38.8% podria volver sin que nada lo notara.
+print()
+print("   Y la cuenta sigue cuadrando (aunque no se imprima entera):")
+check("  Oferta - costo = ganancia bruta",
+      abs(a["precio_oferta_sugerido_usd"] - a["costo_total_usd"]
+          - a["ganancia_total_usd"]) < 0.01)
+check("  Bruta - factoring = neta",
+      abs(a["ganancia_total_usd"] - a["costo_factoring_usd"]
+          - a["ganancia_neta_usd"]) < 0.01)
+check("  El factoring es el 3.5% del PRECIO OFERTADO",
+      abs(a["precio_oferta_sugerido_usd"] * 0.035 - a["costo_factoring_usd"]) < 0.01)
+# En este caso el techo del gobierno y el precio ofertar son el MISMO numero
+# (50 x 1,450 = 72,500), por construccion del caso de prueba, asi que aqui no
+# se puede comprobar si el factoring se desconto sobre uno o sobre otro: las
+# dos bases coinciden. La comprobacion que si lo verifica esta en
+# test_ficha.py, donde el techo se dejo en 245,000 y la oferta en 230,000
+# precisamente para que la diferencia sea detectable.
+check("  El techo y la oferta coinciden en este caso, asi que la base es "
+      "indistinguible aqui",
+      a["valor_contrato_usd"] == a["precio_oferta_sugerido_usd"],
+      "-> si dejaran de coincidir, la comprobacion de la base si seria "
+      "posible y habria que habilitarla")
+check("  El margen neto se mide sobre la VENTA",
+      abs(a["ganancia_neta_usd"] / a["precio_oferta_sugerido_usd"] * 100
+          - a["margen_neto_porcentaje"]) < 0.1)
+
+# El objetivo de margen 15-35% y el "donde esta el mejor margen" se quitaron de
+# la IMPRESION, pero los filtros siguen en config.py y se siguen aplicando
+# antes de que un aviso llegue a Gemini. Se comprueba ahi.
+print()
+print("   Los filtros de margen siguen existiendo, en la configuracion:")
+import config as _cfg
+check("  Piso de margen bruto 15%", _cfg.MARGEN_BRUTO_MIN == 0.15)
+check("  Techo de margen bruto 35%", _cfg.MARGEN_BRUTO_MAX == 0.35)
+check("  Minimo neto 12%", _cfg.MARGEN_NETO_MIN == 0.12)
+
+# El usuario no tiene capital y usa factoring. Si la ficha empieza a pedir
+# capital, es un problema aunque no falle nada mas.
 check("NO pide capital (el usuario usa factoring)",
-      "capital" not in html.lower() and "tener disponible" not in html.lower())
-check("Y si explica el mejor margen", "mayorista conviene" in html)
+      "tener disponible" not in html.lower()
+      and "necesitas capital" not in html.lower(),
+      "-> la ficha esta pidiendo capital que el usuario no tiene")
+
 for tag in ("b", "code", "i"):
     check(f"<{tag}> balanceado", html.count(f"<{tag}>") == html.count(f"</{tag}>"))
 check("<a> balanceado", html.count("<a ") == html.count("</a>"))

@@ -488,6 +488,22 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         )
         _log(f"⚠️ Gemini fallo {len(fallos_gemini)} veces: {unicos[0][:200]}")
 
+    # ---- Linea de monitoreo del ciclo completo ----
+    # Los tres numeros, en el orden en que se va descartando, para saber en
+    # que capa mirar cuando no llega nada:
+    #   X grande y Y pequeno  -> el veto NAICS o el filtro de titulo
+    #   Y grande y Z en cero   -> Gemini esta rechazando todo
+    #   Z > 0 y notificadas 0  -> fallo al enviar (el bug del HTML)
+    _x = resumen.get("traidas", 0)
+    _y = resumen.get("puntuales", 0)
+    _z = resumen.get("viables", 0)
+    _conv = (_z / _y * 100) if _y else 0.0
+    print(
+        f"SAM.gov devueltos: {_x} | Pasaron filtro: {_y} | "
+        f"Aprobados por Gemini: {_z} "
+        f"(conversion {_conv:.1f}%, notificados {resumen.get('notificadas', 0)})"
+    )
+
     return resumen
 
 

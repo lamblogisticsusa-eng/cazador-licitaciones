@@ -6,12 +6,11 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
-# 2.3.0 = la cuota se cuenta por MODELO y no se tira a la basura: antes el
-# bot se limitaba a 2 analisis por barrido con un techo de 20 al dia, cuando
-# con 6 modelos el techo real es 120. Ademas, las descripciones vacias de
-# SAM.gov se cachean, y ya no se repiten los mismos avisos muertos bloqueando
-# el embudo.
-KYOMOTO_VERSION = "2.3.0"
+# 2.3.1 = prompt permisivo (ya no descarta por entrega fisica ni empaque
+# militar), ficha de Telegram mas corta con la abreviatura de la agencia y
+# la fecha de decision arriba, y el enlace de distribuidores usando el
+# termino optimizado que genera Gemini.
+KYOMOTO_VERSION = "2.3.1"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:

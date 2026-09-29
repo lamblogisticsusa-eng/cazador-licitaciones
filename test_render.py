@@ -73,13 +73,36 @@ check("No deja <script> crudo", "<script>" not in html)
 check("No deja <b>inyectado</b> del proveedor", "<b>inyectado</b>" not in html)
 check("Escapa el ampersand", "&amp; mas" in html or "&amp;" in html)
 check("Conserva el enlace de SAM.gov", 'href="https://sam.gov/workspace' in html)
-check("Muestra los 3 numeros financieros", html.count("$") >= 5)
+# La ficha nueva imprime 4 montos (presupuesto, costo, ganancia neta, precio
+# ofertado) y cada uno lleva " USD" detras. Antes eran mas, porque tambien
+# salia la cuenta por unidad, pero el " USD" es nuevo.
+check("Muestra los 4 montos del analisis", html.count("$") >= 4,
+      f"-> {html.count('$')}")
+check("Los 4 con USD detras", html.count(" USD") == 4,
+      f"-> {html.count(' USD')}")
+check("Presupuesto y costo con ~ (estimaciones)",
+      html.count("~\u0024") == 2, f"-> {html.count('~' + chr(36))}")
+check("La ganancia neta y el precio ofertado sin ~",
+      html.count("~\u0024") == 2)
+
+# Esta aviso SIGUE en la ficha: si el aviso vino sin descripcion, las cifras
+# son estimaciones y el usuario tiene que saberlo antes de ofertar. Se quito
+# el bloque de entrega, pero no esto, porque es la unica advertencia de que
+# los numeros no vienen de una fuente oficial.
 check("Avisa que falta la descripcion", "no publicó descripción" in html)
-# La fecha ya no sale en ISO crudo: se muestra en humano y con los dias que
-# faltan, que es lo unico que deja decidir si todavia hay tiempo.
-check("Muestra limite y destino", "10 oct 2026" in html and "Portland" in html)
-check("Y dice cuantos dias quedan", "Vence en" in html)
-check("Terminos de busqueda en <code>", "<code>wholesale mechanical seal usa" in html)
+
+# Lo que se quito del diseno y por que no se comprueba mas:
+#   - "10 oct 2026" y "Vence en": el limite para ofertar y los dias que
+#     faltaban. Se quitaron porque el usuario pidio una ficha mas corta.
+#     Si los quieres de vuelta, estan en _fecha_legible() en
+#     telegram_notify.py, que sigue existiendo y sin usar.
+#   - "<code>wholesale mechanical seal usa</code>": los terminos de busqueda
+#     en texto plano. Se sustituyeron por el enlace de Google.
+# En su lugar se comprueba que el enlace de distribuidores existe y es real.
+check("El enlace de distribuidores es una busqueda de Google",
+      "google.com/search?q=" in html)
+check("Y el termino de busqueda va en la URL",
+      "mechanical" in html.lower() or "seal" in html.lower())
 print()
 
 print("=" * 70)

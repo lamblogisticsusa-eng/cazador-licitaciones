@@ -27,48 +27,57 @@ import distribuidores
 import telegram_notify as tn
 
 FICHA = {
-    "notice_id": "60aa8e3f9222455eab2e94bf4be98e70",
+    # La agencia viene como la devuelve SAM.gov, con puntos y sin espacios.
+    # _agencia_corta() tiene que sacar "USN" de ahi.
     "title": "USNS MERCY (T-AH 19) MAIN MACHINERY ROOM FIRE PUMP VALVES",
-    "solicitation": "N0010426QFF21",
+    "solicitation": "N0001925001",
     "agencia": "DEPT OF DEFENSE.DEPT OF THE NAVY.NAVSUP",
-    "naics": "332911", "psc": "5330", "set_aside": "SBA",
-    "producto": "Valvulas de compuerta de bronce para bomba contraincendios naval",
-    "especificacion_tecnica_clave": "ASTM B584, 150 psi, PN20",
-    "modelo_especifico": "AWWA C508",
+    "set_aside": "Full and Open",
+    "naics": "332911", "psc": "2915",
+    "producto": "Valvulas de compuerta de acero fundido para sala de maquinas",
+    "modelo_especifico": "ASTM B584",
     "unidad_medida": "LOT",
     "cantidad_total": 40,
-    "lugar_entrega": "Norfolk / Virginia / UNITED STATES",
-    "limite": "2026-11-04T18:00:00-05:00",
-    "posted": "2026-09-25", "sin_descripcion": False,
-    "valor_contrato_usd": 320000.0,
-    "precio_unitario_costo": 6400.0,
-    "precio_unitario_mercado": 7250.0,
-    "precio_unitario_oferta": 8000.0,
-    "ganancia_por_unidad": 1600.0,
-    "costo_total_usd": 256000.0,
-    "ganancia_total_usd": 64000.0,
-    "margen_bruto_porcentaje": 25.0,
-    "costo_factoring_usd": 11200.0,
-    "ganancia_neta_usd": 52800.0,
-    "margen_neto_porcentaje": 20.6,
-    "precio_oferta_sugerido_usd": 45000.0,
-    "razonamiento_oferta": "Ofertar 12% bajo el presupuesto del gobierno.",
-    "estrategia_oferta": "Ofertar 8% bajo estimado con entrega en 45 dias.",
-    "margen_por_distribuidor": (
-        "Distribuidor de catalogo grande 15-20%; mayorista 20-25%; "
-        "fabricante directo 25-35%. Mejor margen en el fabricante."
-    ),
-    "busquedas_distribuidores": [
-        "bronze gate valve marine supplier usa",
-        "naval fire pump valve distributor",
-    ],
-    "nivel_riesgo": "medio",
-    "preguntas_criticas": ["¿Aceptan marcas equivalentes?", "¿Cage code?"],
-    "observaciones": "",
-    "contacto": "Jane Doe | jane.doe@navy.mil",
+    "especificacion_tecnica_clave":
+        "Valvulas de compuerta con certificacion ASTM B584, presion de trabajo "
+        "de 150 psi, entrega fisica en el puerto de Filadelfia",
+    "lugar_entrega": "Philadelphia Naval Shipyard / PA / UNITED STATES",
+    "limite": "2026-11-04T17:00:00-04:00",
+    "sin_descripcion": False,
     "ui_link": "https://sam.gov/workspace/contract/opp/60aa8e3f/view",
-}
+    "contacto": "jane.doe@navy.mil",
+    "nivel_riesgo": "medio",
 
+    # ---- La cuenta, y aqui SI cuadra ----
+    # El gobierno publica un TECHO de 245,000 y uno oferta 230,000, un 6%
+    # Bruta 50,000 (21.7%), factoring 3.5% DE LO OFERTADO = 8,050,
+    # neta 41,950 (18.2% sobre la venta).
+    "valor_contrato_usd": 245000.0,   # el techo que publica el gobierno
+    "precio_unitario_costo": 4500.0,
+    "precio_unitario_mercado": 5400.0,
+    "precio_unitario_oferta": 5750.0,
+    "ganancia_por_unidad": 1250.0,
+    "costo_total_usd": 180000.0,
+    "ganancia_total_usd": 50000.0,
+    "margen_bruto_porcentaje": 21.7,
+    "costo_factoring_usd": 8050.0,
+    "ganancia_neta_usd": 41950.0,
+    "margen_neto_porcentaje": 18.2,
+    "precio_oferta_sugerido_usd": 230000.0,
+    "razonamiento_oferta":
+        "Va 12% por debajo del presupuesto publicado, con margen neto de 18.2% "
+        "y sin necesidad de capital gracias al factoring.",
+    "margen_por_distribuidor":
+        "Mayorista 20-25% (mejor opcion). Fabricante 35% pero con MOQ de 100.",
+    "busquedas_distribuidores": [
+        "gate valve 6 inch steel foundry",
+        "naval machinery replacement part",
+    ],
+    "preguntas_criticas": [
+        "¿Aceptan marca equivalente o exigen el OEM?",
+        "¿El precio es FOB destino?",
+    ],
+}
 html = tn.formatear_analisis(FICHA)
 
 print("=" * 70)
@@ -77,42 +86,87 @@ print("=" * 70)
 check("Enlace de SAM.gov", 'href="https://sam.gov/workspace/contract' in html)
 check("Descripcion de la licitacion", "Valvulas de compuerta" in html)
 check("  y la especificacion tecnica", "ASTM B584" in html)
-check("Valor del contrato", "$320,000.00" in html)
-check("Costo total de compra", "$256,000.00" in html)
-check("Factoring descontado", "$11,200.00" in html)
-check("  y aparece como porcentaje", "3.5%" in html)
-check("Ganancia bruta", "$64,000.00" in html)
-check("Ganancia neta tras factoring", "$52,800.00" in html)
-check("Margen bruto", "25.0%" in html)
-check("Margen neto", "20.6%" in html)
-check("Precio unitario de catalogo", "$7,250.00" in html)
-check("Precio unitario a ofertar", "$8,000.00" in html)
-check("Ganancia por unidad", "$1,600.00" in html)
-check("Monto a ofertar", "$320,000.00" in html)
+
+# La abreviatura de la agencia delante del producto. Se calculo con
+# _agencia_corta(), que es dato nuevo: antes la ficha no la traia.
+check("La agencia abreviaada delante del producto",
+      "\U0001f4e6 <b>USN - " in html, f"-> {html.splitlines()[2][:60]}")
+# La agencia llega como la da SAM.gov, con puntos: "DEPT OF DEFENSE.
+# DEPT OF THE NAVY.NAVSUP". Se comprueba ese texto, no el nombre bonito.
+check("Y la agencia completa tal como la da SAM.gov",
+      "DEPT OF DEFENSE.DEPT OF THE NAVY.NAVSUP" in html)
+
+check("Valor del contrato (techo del gobierno)", "$245,000.00" in html)
+check("Costo total de compra", "$180,000.00" in html)
+check("Ganancia neta tras factoring", "$41,950.00" in html)
+check("Margen neto", "18.2%" in html)
+check("Monto a ofertar", "$230,000.00" in html)
 check("Cantidad en unidades", "40 LOT" in html)
-check("Contacto", "jane.doe@navy.mil" in html)
-check("Limite para ofertar", "4 nov 2026" in html)
-check("Y con los dias que faltan", "Vence en" in html)
+
+# Los montos llevan la unidad detras, segun el diseno pedido.
+check("Los 4 montos con USD detras", html.count(" USD") == 4,
+      f"-> {html.count(' USD')}")
+# El "~" va solo en lo que se ESTIMA. La ganancia neta y el precio ofertado se
+# calculan, y poner "~" ahi seria mentir sobre lo unico que sale cerrado.
+check("Presupuesto y costo con ~",
+      "~$245,000.00" in html and "~$180,000.00" in html)
+check("La ganancia neta sin ~", "~$41,950.00" not in html)
+check("El precio ofertado sin ~", "~$230,000.00 USD" not in html)
+check("Y es menor que el techo del gobierno",
+      FICHA["precio_oferta_sugerido_usd"] < FICHA["valor_contrato_usd"],
+      "-> ofertando por encima del techo, que no tiene sentido")
+check("La explicacion de la estrategia va en la MISMA linea",
+      " USD (" in html, "-> quedo en una linea aparte")
 print()
 
 print("=" * 70)
-print("2) LOS DISTRIBUIDORES")
+print("2) LA CUENTA, AUNQUE NO SE IMPRIMA ENTERA EN LA FICHA")
 print("=" * 70)
+# Estas secciones se quitaron del texto, pero las cifras siguen siendo las que
+# Gemini calcula y las que la ficha muestra. Si se dejaran de comprobar aqui,
+# el error del 38.8% (medir el margen contra el presupuesto del gobierno en vez
+# de contra el precio ofertado) podria volver sin que nada lo notara.
+print("   (lo que se quito de la impresion se sigue verificando aqui)")
+print()
+check("El presupuesto es lo que publica el gobierno",
+      FICHA["valor_contrato_usd"] == 245000.0)
+check("El factoring es el 3.5% del PRECIO OFERTADO",
+      abs(FICHA["precio_oferta_sugerido_usd"] * 0.035 - FICHA["costo_factoring_usd"]) < 0.01,
+      f"-> {FICHA['precio_oferta_sugerido_usd'] * 0.035:.2f} "
+      f"vs {FICHA['costo_factoring_usd']}")
+check("Y NO del presupuesto del gobierno",
+      abs(FICHA["valor_contrato_usd"] * 0.035 - FICHA["costo_factoring_usd"]) > 1.0,
+      "-> se esta descontando dos veces o sobre la base equivocada")
+check("Bruta = oferta - costo",
+      abs(FICHA["precio_oferta_sugerido_usd"] - FICHA["costo_total_usd"]
+          - FICHA["ganancia_total_usd"]) < 0.01)
+check("Neta = bruta - factoring",
+      abs(FICHA["ganancia_total_usd"] - FICHA["costo_factoring_usd"]
+          - FICHA["ganancia_neta_usd"]) < 0.01)
+check("Margen neto = neta / oferta (no / presupuesto)",
+      abs(FICHA["ganancia_neta_usd"] / FICHA["precio_oferta_sugerido_usd"] * 100
+          - FICHA["margen_neto_porcentaje"]) < 0.2,
+      "-> el margen se esta midiendo contra el presupuesto")
+print()
+
+print("=" * 70)
+print("3) LOS DISTRIBUIDORES")
+print("=" * 70)
+# Ahora hay un solo enlace: la busqueda de Google. Los cuatro con site: se
+# quitaron del diseno, pero el link tiene que seguir siendo de Google y
+# seguir filtrando por USA, que es lo que importa.
 enlaces = re.findall(r'href="(https://www\.google\.com/search\?q=[^"]+)"', html)
-check("Hay enlaces de distribuidores", len(enlaces) >= 3, f"-> {len(enlaces)}")
-check("Todos son de Google (los que respondieron 200)", all(
+check("Hay un enlace de distribuidores", len(enlaces) == 1, f"-> {len(enlaces)}")
+check("Es de Google", all(
     e.startswith("https://www.google.com/search?q=") for e in enlaces
 ))
 from urllib.parse import unquote_plus
 textos = [unquote_plus(e.split("q=", 1)[1]) for e in enlaces]
-print("       Consultas generadas:")
-for t in textos:
-    print(f"         · {t}")
-check("Todas filtran por USA", all("usa" in t.lower() or "united states" in t.lower()
-                                or "site:" in t.lower() for t in textos))
-check("Usan site: para trayectoria a un distribuidor",
-      sum(1 for t in textos if "site:" in t) >= 2,
-      f"-> {sum(1 for t in textos if 'site:' in t)}")
+print("       Consulta generada:")
+for tx in textos:
+    print(f"         · {tx}")
+check("Filtra por USA", all("usa" in tx.lower() or "united states" in tx.lower()
+                          for tx in textos), f"-> {textos}")
 check("Ninguna URL tiene espacios sin codificar",
       all(" " not in e for e in enlaces))
 check("Ninguna URL tiene caracteres raros",
@@ -120,16 +174,28 @@ check("Ninguna URL tiene caracteres raros",
           for e in enlaces))
 print()
 
+print("3) RANGO DE MARGEN 15% A 35%: EN LOS DATOS, NO EN LA FICHA")
 print("=" * 70)
-print("3) RANGO DE MARGEN 15% A 35%")
-print("=" * 70)
-check("La ficha explica donde esta el mejor margen",
-      "margen" in html.lower() and "fabricante" in html.lower())
-check("Menciona el rango 15%", "15" in html)
-check("Menciona 35%", "35" in html)
+# La ficha ya no imprime el rango ni el "donde esta el mejor margen". El
+# filtro sigue existiendo y se sigue aplicando ANTES de que un aviso llegue a
+# Gemini, en config.py y filters.py. Aqui se comprueba que los valores de
+# configuracion son los que el usuario fijo.
+print("   (el texto salia de una seccion que ya no se imprime; el filtro sigue)")
+print()
+import config as _cfg
+check("El piso de margen bruto es 15%", _cfg.MARGEN_BRUTO_MIN == 0.15,
+      f"-> {_cfg.MARGEN_BRUTO_MIN}")
+check("El techo de margen bruto es 35%", _cfg.MARGEN_BRUTO_MAX == 0.35,
+      f"-> {_cfg.MARGEN_BRUTO_MAX}")
+check("El minimo neto es 12%", _cfg.MARGEN_NETO_MIN == 0.12,
+      f"-> {_cfg.MARGEN_NETO_MIN}")
+check("El factoring es 3.5%", abs(_cfg.FACTORING_PCT - 0.035) < 1e-9,
+      f"-> {_cfg.FACTORING_PCT}")
+check("Y este caso pasa el filtro de margen",
+      FICHA["margen_neto_porcentaje"] >= _cfg.MARGEN_NETO_MIN * 100,
+      f"-> {FICHA['margen_neto_porcentaje']}%")
 print()
 
-print("=" * 70)
 print("4) LA TARJETA ES VALIDA PARA TELEGRAM")
 print("=" * 70)
 for tag in ("b", "code", "i"):

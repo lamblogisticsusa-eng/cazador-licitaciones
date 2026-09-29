@@ -63,6 +63,7 @@ ESQUEMA = {
     "estrategia_oferta": "str",
     "margen_por_distribuidor": "str",
     "busquedas_distribuidores": "[str]",
+    "query_google_proveedores": "str",
     "nivel_riesgo": "bajo|medio|alto",
     "preguntas_criticas": "[str]",
     "observaciones": "str",
@@ -281,18 +282,51 @@ una empresa unipersonal en CHILE que compra en Estados Unidos y despacha
 directamente al destino de entrega. NO realiza instalaciones,
 NO presta servicios, NO tiene personal en obra.
 
-REGLAS DE ELIMINACION (si se cumple cualquiera, viable = false)
-  1. Si es un servicio intangible, consultoria, personal, TI, software,
-     mantenimiento, construccion, limpieza, transporte o alquiler -> false.
-  2. Si el valor del contrato supera USD {config.TOPE_USD:,.0f} -> false.
-  3. Si el valor es menor a USD {config.MIN_USD:,.0f} -> false.
-  4. Si exige presencia en obra, licencia local, certificacion de contratista
-     local o que el proveedor sea residente en EE.UU. -> false.
-  5. Si el lugar de entrega esta fuera de Estados Unidos -> false.
-  6. Si la fecha limite para presentar oferta ya vencio -> false.
-  7. Si el margen NETO (despues de factoring) queda por debajo de
-     {config.MARGEN_NETO_MIN * 100:.0f}% -> false. Es el margen que de
-     verdad se lleva el cliente, y por debajo de eso no vale ofertar.
+REGLA PRINCIPAL
+
+  Si es una COMPRA o SUMINISTRO de PRODUCTO FISICO por menos de
+  USD {config.TOPE_USD:,.0f}, la respuesta es viable = true.
+
+  Ese es el negocio: revender producto fisico al gobierno de EE.UU. que se
+  compra en Estados Unidos. Todo lo demas son detalles que se resuelven
+  comprando bien.
+
+LO QUE SI DESCALIFICA (viable = false)
+
+  1. Que NO haya producto fisico que revender: consultoria, personal, TI,
+     software, mantenimiento, construccion, limpieza, transporte o alquiler.
+     Incluye los IDIQ de servicios y los contratos donde lo principal es una
+     prestacion y no una entrega de cosas.
+  2. Que el valor supere USD {config.TOPE_USD:,.0f} o sea menor a USD {config.MIN_USD:,.0f}.
+  3. Que exija INSTALACION en obra, licencia local, o que el proveedor sea
+     residente o establecido en EE.UU. Eso no lo puede hacer un proveedor
+     que compra en USA y despacha desde Chile.
+  4. Que la entrega sea fuera de Estados Unidos.
+  5. Que la fecha limite para presentar oferta ya vencio.
+  6. Que el margen NETO (despues de factoring) quede por debajo de
+     {config.MARGEN_NETO_MIN * 100:.0f}%. Este es el filtro de negocio de verdad: por debajo de eso no
+     vale la pena ofertar.
+
+LO QUE YA NO DESCALIFICA (importante: antes si lo hacia)
+
+  - "Entrega fisica directa en [base, instalacion, puerto]". ES LO NORMAL.
+    Comprar en USA y mandar al destino es exactamente lo que hace este
+    cliente. Antes esto se confundia con "presencia en obra" y se
+    descartaba la oportunidad, y con ella casi todas las piezas de repuesto,
+    que son el nucleo del negocio. Medido el 29-sep-2026: de 12 analisis
+    reales, uno se descarto solo por "entrega fisica".
+  - "Empaque militar", "MIL-STD", "gradiente militar", "packed for extended
+    storage", "preservacion a largo plazo". Es la ESPECIFICACION DEL
+    PRODUCTO, no una barrera para venderlo. El proveedor compra en USA y
+    recibe el producto como venga.
+  - Que el placo o el manual este en ingles.
+  - Que exija certificacion de calidad del FABRICANTE (ISO 9001, AS9100).
+    Se compra a un distribuidor que ya la tiene.
+  - Que sea un IDIQ o un contrato multiple de entrega. Es la forma mas
+    comun de comprar en el gobierno de EE.UU.
+
+  Ante la duda, si hay producto fisico y el margen sale, es viable = true.
+  Descartar de mas deja dinero sobre la mesa.
 
 MODELO ECONOMICO (esto es lo mas importante, hazlo bien)
 
@@ -346,9 +380,35 @@ SI ES VIABLE, ENTREGA:
                                  y ganar el contrato, asegurando una ganancia
                                  neta estimada de $22,500.00."
   busquedas_distribuidores      : 3-5 terminos EN INGLES con el sustantivo
-                                 tecnico del producto y el modelo, sin
-                                 palabras de instruccion.
-                                 Ej: "Dell Latitude 5450 wholesale distributor"
+                                  tecnico del producto y el modelo, sin
+                                  palabras de instruccion.
+                                  Ej: "Dell Latitude 5450 wholesale distributor"
+
+  query_google_proveedores      : UN solo termino de busqueda en ingles, el
+                                  MEJOR posible para encontrar
+                                  DISTRIBUIDORES de este producto concreto
+                                  en Google. Este es el que se convierte en
+                                  el enlace de la ficha, asi que tiene que
+                                  ser preciso, no generico:
+                                    - Usa lo que dice la ESPECIFICACION y no
+                                      el titulo: el tamano, el material, la
+                                      norma, el accionamiento. Si el titulo
+                                      dice "FIRE PUMP VALVES" y la
+                                      especificacion dice "6 inch cast
+                                      steel gate valve, ASTM A216, 150 psi",
+                                      el termino es "6 inch cast steel gate
+                                      valve wholesale distributor", no
+                                      "fire pump valves".
+                                    - Incluye "wholesale" o "distributor":
+                                      el cliente compra a un MAYORISTA, no al
+                                      fabricante, y ahi esta el margen.
+                                    - Anade "usa" o "united states": se
+                                      compra en Estados Unidos.
+                                    - Sin comillas, sin comas y sin
+                                      palabras de instruccion ("como
+                                      comprar", "precio"). Solo el
+                                      termino.
+                                    - De 3 a 10 palabras.
   margen_por_distribuidor       : como cambia la ganancia segun donde se
                                  compre, con el rango en cada caso:
                                  - catalogo grande: 15-20% bruto
@@ -379,6 +439,7 @@ Ejemplo, bidding 50 laptops:
   "costo_factoring_usd": 2310, "margen_neto_porcentaje": 5.6,
   "precio_oferta_sugerido_usd": 66000,
   "busquedas_distribuidores": ["Dell Latitude 5450 wholesale distributor usa"],
+    "query_google_proveedores": "laptop dell latitude 5450 wholesale distributor usa",
   "nivel_riesgo": "medio", "preguntas_criticas": ["..."], "observaciones": ""}}
 (NOTA: ese ejemplo sale con margen neto bajo y por tanto seria viable=false.
  Sirve solo para mostrar la forma, no el resultado esperado.)
@@ -726,6 +787,13 @@ def analizar(
         "estrategia_oferta": _limpiar_ia(datos.get("estrategia_oferta"))[:700],
         "razonamiento_oferta": _limpiar_ia(datos.get("razonamiento_oferta"))[:500],
         "busquedas_distribuidores": _lista(datos.get("busquedas_distribuidores")),
+    # El termino optimizado para el enlace de la ficha. Se limpian comillas y
+    # comas antes de guardarlo: si se cuela una comilla en el termino, el
+    # enlace de Google se rompe, y con ella la unica ayuda que tiene el
+    # usuario para localizar un proveedor.
+    "query_google_proveedores": _limpiar_ia(
+        str(datos.get("query_google_proveedores") or "").replace('"', "").replace(",", " ")
+    )[:90].strip(),
         "margen_por_distribuidor": _limpiar_ia(datos.get("margen_por_distribuidor"))[:600],
         "nivel_riesgo": _limpiar_ia(datos.get("nivel_riesgo") or "medio").lower()[:10],
         "preguntas_criticas": _lista(datos.get("preguntas_criticas")),
