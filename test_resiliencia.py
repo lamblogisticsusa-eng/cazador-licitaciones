@@ -141,7 +141,8 @@ check("Lanza un error cuando todos estan saturados", err is not None,
       f"-> devolvio {r}")
 print(f"  Probados: {len(set(usados))} modelos distintos")
 if err is not None:
-    check("Dice que es temporal", "temporal" in msg.lower())
+    check("Dice que es transitoria", "transitoria" in msg.lower()
+          or "temporal" in msg.lower())
     check("Aclara que NO es tu clave", "NO es tu clave" in msg)
     check("Dice que no se pierde nada", "no se pierde" in msg.lower())
     check("Nombra los modelos que probo", all(m in msg for m in todos),

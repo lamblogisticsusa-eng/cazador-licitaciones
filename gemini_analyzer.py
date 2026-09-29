@@ -465,6 +465,10 @@ def analizar(
     # Modelos que ya respondieron 429: se anotan para poder decir
     # al usuario cuales se quedaron sin cuota en vez de un 'agotado' generico.
     ya_probados: list[str] = []
+    # Los que respondieron 503 (saturados, no sin cuota). Se anotan aparte
+    # porque la causa y el remedio son distintos: uno espera a que se le pase
+    # la demanda, el otro a medianoche del Pacifico.
+    saturados: list[str] = []
     # Suficientes intentos para recorrer TODA la cola mas margen para los
     # errores que no sean de saturacion.
     total_intentos = max(config.MAX_REINTENTOS, len(cola) + 1)
@@ -552,17 +556,30 @@ def analizar(
 
             # --- 503: el modelo esta saturado. Probar el siguiente. ---
             if "503" in texto or "UNAVAILABLE" in texto:
+                saturados.append(modelo)
                 if indice + 1 < len(cola):
                     log.warning("503 en %s. Cambio a %s.", modelo, cola[indice + 1])
                     indice += 1
                     time.sleep(2)
                     continue
                 raise GeminiError(
-                    "Todos los modelos de Gemini estan saturados (503): "
-                    + ", ".join(cola) + ".\n"
-                    "Es temporal y NO es tu clave ni tu codigo: Google tiene "
-                    "mucha demanda ahora mismo. Kyomoto reintentara en el proximo "
-                    "barrido, y lo que no se analice no se pierde."
+                    "Ningun modelo de la lista sirve ahora mismo.\n"
+                    "   · Sin cuota (429): "
+                    + (", ".join(dict.fromkeys(ya_probados)) or "ninguno")
+                    + "\n   · Sin respuesta (503): "
+                    + (", ".join(dict.fromkeys(saturados)) or "ninguno")
+                    + "\n\n"
+                    + (
+                        "La cuota se agota POR MODELO y se reinicia a las 00:00 "
+                        "del Pacifico (~03:00 Chile). NO es tu clave ni el codigo: "
+                        "es el tope del plan gratis. Kyomoto reintentara en el "
+                        "proximo barrido y lo que no se analice no se pierde."
+                        if ya_probados
+                        else "Es la saturacion de Google, que es transitoria y "
+                        "cambia cada hora. NO es tu clave ni el codigo. Kyomoto "
+                        "reintentara en el proximo barrido y lo que no se analice "
+                        "no se pierde."
+                    )
                 ) from e
 
             # --- 401: la credencial no es reconocida. No cambiar de modelo. ---

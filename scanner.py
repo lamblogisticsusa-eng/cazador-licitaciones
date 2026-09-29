@@ -61,6 +61,33 @@ def _traer_candidatos(dias: int) -> tuple[list[dict], int, int]:
     return crudos, total, len(vistos)
 
 
+def _ya_sin_texto(opp: dict) -> bool:
+    """Ya se consulto a SAM.gov por este aviso y respondio que no hay texto."""
+    import store
+
+    return store.descripcion_consultada(opp["noticeId"]) and not store.leer_descripcion(
+        opp["noticeId"]
+    )
+
+
+def _sin_texto_en_ventana(candidatos: list) -> int:
+    """
+    Cuantos de estos candidatos ya se saben sin descripcion.
+
+    Solo mira la ventana que se va a usar: recorrer los 600 candidatos de cada
+    barrido para consultar la cache uno por uno no compensa, y aqui solo hace
+    falta una estimacion para abrir la ventana un poco mas.
+    """
+    import store
+
+    n = 0
+    for _, o in candidatos[:60]:
+        nid = o["noticeId"]
+        if store.descripcion_consultada(nid) and not store.leer_descripcion(nid):
+            n += 1
+    return n
+
+
 def _bajar_descripciones(candidatos: list[dict]) -> dict[str, str]:
     """
     Baja el texto real de los candidatos que quedan, con cache.
@@ -81,13 +108,25 @@ def _bajar_descripciones(candidatos: list[dict]) -> dict[str, str]:
 
     pendientes: list[dict] = []
     descripciones: dict[str, str] = {}
+    sin_texto = 0
     for o in candidatos:
         nid = o["noticeId"]
-        cacheada = store.leer_descripcion(nid)
-        if cacheada:
-            descripciones[nid] = cacheada
+        # Primero se pregunta si ya se consulto. Si ya se hizo y salio vacia
+        # (SAM.gov devuelve 404 para mas de la mitad de los avisos), no se
+        # vuelve a pagar la peticion: se cuenta aparte y se sigue. Antes se
+        # repreguntaban en cada barrido, para siempre.
+        if store.descripcion_consultada(nid):
+            descripciones[nid] = store.leer_descripcion(nid)
+            if not descripciones[nid]:
+                sin_texto += 1
         else:
             pendientes.append(o)
+
+    if sin_texto:
+        _log(
+            f"{sin_texto} de {len(candidatos)} sin descripcion en SAM.gov "
+            f"(404 de la propia API; se saltan sin gastar peticiones)"
+        )
 
     if not pendientes:
         _log(f"Las {len(descripciones)} descriciones salieron de la cache (0 peticiones)")
@@ -185,7 +224,21 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     # Margen sobre lo previsto: parte se cae por el rango de USD y parte por
     # el filtro final, y no se avisara a Gemini de esas.
     extra = max(2, previstos // 2)
-    objetivo = [o for _, o in provisionales[: previstos + extra]]
+
+    # Se piden algunos mas de los previstos porque parte se cae por el rango
+    # de USD. Y se salta a los que ya se sabe que no tienen descripcion: si no,
+    # un punte alto de un aviso con 404 se lleva el cupo de uno que si tiene
+    # texto, y el embudo se estanca. Medido el 29-sep: cinco barridos seguidos,
+    # cuatro descripciones por ronda, una sola con texto, y siempre las
+    # mismas. Cero viables por esto solo.
+    holgura = _sin_texto_en_ventana(provisionales)
+    ventana = provisionales[: previstos + extra + holgura]
+    objetivo = [o for _, o in ventana if not _ya_sin_texto(o)][: previstos + extra]
+    if holgura:
+        _log(
+            f"{holgura} de los primeros no tienen descripcion en SAM.gov; "
+            f"se amplia la ventana para compensar"
+        )
     _log(
         f"Pre-puntaje por titulo: {len(provisionales)} sobre el piso; "
         f"van a ser {previstos} analisis asi que bajo {len(objetivo)} "

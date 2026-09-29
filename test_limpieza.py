@@ -91,11 +91,14 @@ check("El principal es el que respondio al sondear (3.6)",
 check("Hay al menos tres alternos", len(alternos) >= 3, f"-> {len(alternos)}")
 check("El principal NO esta repetido en los alternos",
       principal not in alternos)
-# Medido el 28-sep con la config real: contesta "OK" a un config simple y
-# devuelve 400 INVALID_ARGUMENT con el del escaneo. En la cadena solo servia
-# para gastar un intento.
-check("NO incluye gemini-3.5-flash-lite, que da 400",
-      "gemini-3.5-flash-lite" not in alternos)
+# gemini-3.5-flash-lite daba 400 por thinking_budget=0. Ahora el 400
+# reintenta sin ese campo, asi que el modelo sirve y vuelve a la lista: el
+# 29-sep a la 01:35 del Pacifico era el UNICO con cuota libre, y sin el la
+# cadena entera se quedaba sin nada que probar.
+check("SI incluye gemini-3.5-flash-lite, que ya se puede usar",
+      "gemini-3.5-flash-lite" in alternos)
+check("Y va primero: es el mas rapido y el que menos se satura",
+      alternos[0] == "gemini-3.5-flash-lite", f"-> {alternos[0] if alternos else 'vacia'}")
 check("NO incluye gemini-flash-lite, que no existe",
       "gemini-flash-lite" not in alternos)
 check("No hay entradas vacias", all(m for m in config.GEMINI_MODELES_ALTERNATIVOS))

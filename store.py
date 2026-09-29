@@ -134,30 +134,64 @@ def guardar_etiqueta(notice_id: str, archivo: str) -> None:
         )
 
 
+# Centinela para "lo pregunte y SAM.gov no tiene descripcion". Hace falta
+# porque "" no sirve como marca: es falsy, asi que un "if not texto" la
+# confundiria con "aun no preguntado", que es exactamente lo que pasaba.
+SIN_DESCRIPCION = "\x00vacia"
+
+
 def cache_descripcion(notice_id: str, texto: str) -> None:
     """Guarda la descripcion para no volver a pagarla a la API.
 
     La API de SAM.gov tiene tope de peticiones por dia. Como se descarto una
     oportunidad puede volver al top en el siguiente barrido, cachear evita
     gastar la cuota en el mismo texto una y otra vez.
+
+    LA VACIA TAMBIEN SE GUARDA, y ese es el punto. Mas de la mitad de los
+    avisos devuelven 404 "Description Not Found" (medido el 29-sep-2026: 24 de
+    45). Antes se descartaban sin guardar, con lo cual se vuelven a pedir en
+    CADA barrido, para siempre, y ademas se quedan ocupando los cupos de
+    descarga de los avisos que si tienen texto. Medido ese mismo dia: cinco
+    barridos seguidos, cuatro descripciones por ronda y solo una con texto, las
+    cuatro siempre las mismas. El embudo no avanzaba.
+
+    El centinela SIN_DESCRIPCION es la unica forma de distinguirla de "aun no
+    se ha preguntado".
     """
-    if not texto:
-        return
     with _lock, _conexion() as c:
         c.execute(
             "INSERT OR REPLACE INTO cache_descripciones (notice_id, texto, guardado) "
             "VALUES (?,?,?)",
-            (notice_id, texto, _ahora()),
+            (notice_id, texto if texto else SIN_DESCRIPCION, _ahora()),
         )
 
 
 def leer_descripcion(notice_id: str) -> str:
+    """Texto cacheado, o "" si no hay. El centinela vuelve como ""."""
     init_db()
     with _lock, _conexion() as c:
         fila = c.execute(
             "SELECT texto FROM cache_descripciones WHERE notice_id = ?", (notice_id,)
         ).fetchone()
-    return fila[0] if fila else ""
+    if not fila:
+        return ""
+    return "" if fila[0] == SIN_DESCRIPCION else fila[0]
+
+
+def descripcion_consultada(notice_id: str) -> bool:
+    """
+    True si ya se le pregunto a SAM.gov por este aviso, tenga texto o no.
+
+    Es lo que evita volver a pagar una peticion por un aviso que ya respondio
+    404. Sin esto, la mitad de los avisos se repregunta en cada barrido, se
+    repiten en el log y ocupan los cupos de los que si sirven.
+    """
+    init_db()
+    with _lock, _conexion() as c:
+        fila = c.execute(
+            "SELECT 1 FROM cache_descripciones WHERE notice_id = ?", (notice_id,)
+        ).fetchone()
+    return fila is not None
 
 
 def limpiar_cache() -> int:

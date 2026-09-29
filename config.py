@@ -48,17 +48,24 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 # conocidos, no solo tres: con 5 caidos, tres no alcanzaban.
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
-# Ante un 503 Kyomoto prueba el siguiente de esta lista en vez de esperar.
-# La saturacion es por modelo, no de la cuenta: por eso el respaldo existe.
-# gemini-3.5-flash-lite NO esta, y es a proposito: con la config real del
-# escaneo (response_mime_type + thinking_config) devuelve 400 INVALID_ARGUMENT.
-# Acepta un config simple y rechaza el que usa Kyomoto, asi que en la cadena
-# solo servia para gastar un intento en cada 503.
+# Ante un 503 o un 429 Kyomoto prueba el siguiente de esta lista en vez de
+# rendirse. La saturacion es por modelo y la cuota tambien: medido el
+# 29-sep-2026, con 3.8-flash y flash-latest sin cuota mientras 3.5-flash-lite
+# respondia sin problema.
 #
-# El orden va de mas rapido a mas lento segun lo medido.
+# gemini-3.5-flash-lite VUELVE a la lista. Antes se salio porque con la config
+# real del escaneo daba 400 INVALID_ARGUMENT; se descubrio que la culpa era
+# thinking_budget=0 y que demas lo acepta todo. Como el 400 ahora reintenta sin
+# ese campo, el modelo entra. Y hacia falta: a las 01:35 del Pacifico de ese
+# dia era el UNICO con cuota libre, y sin el la cadena entera se quedaba sin
+# nada que probar.
+#
+# Va primero porque es el mas rapido (0,7s medidos) y el que menos se satura:
+# casi nadie lo usa, asi que su cuota aguanta mas.
 GEMINI_MODELES_ALTERNATIVOS = os.getenv(
     "GEMINI_MODELES_ALTERNATIVOS",
-    "gemini-3.8-flash,gemini-flash-latest,gemini-3.5-flash,gemini-3.7-flash",
+    "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-flash-latest,"
+    "gemini-3.5-flash,gemini-3.7-flash",
 ).replace(" ", "").split(",")
 
 # --- Ventana de busqueda en SAM.gov ---

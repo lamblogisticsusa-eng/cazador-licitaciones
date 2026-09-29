@@ -58,9 +58,19 @@ store.cache_descripcion("abc", "Sellos mecanicos de acero 316L, 500 EA")
 check("Guarda la descripcion", store.leer_descripcion("abc").startswith("Sellos"))
 check("Un id desconocido devuelve vacio", store.leer_descripcion("xyz") == "")
 store.cache_descripcion("vacio", "")
-check("No cachea textos vacios (se reintenta)", store.leer_descripcion("vacio") == "")
+# INVERTIDO el 29-sep-2026. Este test afirmaba que los textos vacios NO se
+# cacheaban, y ESO ERA EL BUG: como "" no distingue "no preguntado" de
+# "preguntado y vacio", un aviso con 404 Description Not Found se volvia a
+# preguntar en cada barrido, para siempre, y se llevaba los cupos de descarga
+# de los que si tienen texto. Medido: cinco barridos seguidos, cuatro
+# descripciones por ronda, una sola con texto, siempre las mismas.
+# Cero viables por eso solo.
+check("Un texto vacio se guarda como respuesta definitiva",
+      store.descripcion_consultada("vacio"))
+check("Y al leerlo devuelve vacio (no el centinela)",
+      store.leer_descripcion("vacio") == "")
 n = store.limpiar_cache()
-check("limpiar_cache devuelve el numero", n == 1, f"-> {n}")
+check("limpiar_cache cuenta tambien el vacio", n == 2, f"-> {n}")
 print()
 
 print("=" * 70)
