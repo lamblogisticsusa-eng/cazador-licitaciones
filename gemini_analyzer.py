@@ -341,10 +341,21 @@ def _num(valor):
         return None
 
 
-def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
+def analizar(
+    opp: dict,
+    descripcion: str,
+    lugar: str = "",
+    continuar=None,
+) -> dict:
     """
     Devuelve el analisis ya normalizado.
     Lanza GeminiError si la API falla (NUNCA confunde fallo con "no viable").
+
+    `continuar` es un callback opcional que devuelve bool. Se consulta antes
+    de cada intento: en False, la funcion se rinde al instante, sin llamar a
+    Google y sin esperar. Lo usa el escaner para propagar el cortacircuitos:
+    cuando un hilo recibe un 429, los demas se enteran por aqui en vez de
+    descubrir por su cuenta el mismo 429 y dormir cada uno lo suyo.
     """
     cliente = _get_cliente()
     prompt = _construir_prompt(opp, descripcion, lugar or filters.lugar_de_entrega(opp))
@@ -367,6 +378,16 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
     total_intentos = max(config.MAX_REINTENTOS, len(cola) + 1)
 
     for intento in range(total_intentos):
+        # Si otro hilo ya descubririo que se acabo la cuota, no se llama a
+        # Google ni se duerme: se sale ahora. El unico modo de que un hilo
+        # sepa lo que le paso a otro es preguntarselo.
+        if continuar is not None and not continuar():
+            raise GeminiError(
+                "Se abandono el resto del lote: otro aviso ya confirmo que la "
+                "cuota de Google se agoto (429).\n"
+                "Lo que no se analice no se pierde: queda pendiente para el "
+                "proximo barrido."
+            )
         modelo = cola[indice]
         try:
             respuesta = cliente.models.generate_content(
@@ -396,6 +417,12 @@ def analizar(opp: dict, descripcion: str, lugar: str = "") -> dict:
                         "levantar el limite.\n"
                         "Los avisos NO se marcan como vistos: se reintentan en el "
                         "proximo barrido."
+                    ) from e
+                # Si otro hilo ya esta esperando por lo mismo, no se suma una
+                # segunda espera: se rinde y deja que el lote se detenga.
+                if continuar is not None and not continuar():
+                    raise GeminiError(
+                        "Otro aviso ya confirmo que la cuota se agoto (429)."
                     ) from e
                 log.warning("429 de cuota. Pausa %.0fs.", config.GEMINI_PAUSA_SEG * 3)
                 time.sleep(config.GEMINI_PAUSA_SEG * 3)

@@ -318,10 +318,17 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     viables: list[tuple[int, dict]] = []
     throttle = threading.Semaphore(max(1, config.GEMINI_WORKERS))
     corto_por_cuota = False
+    # El cortacircuitos. Lo enciende el primer 429 y el resto del lote se
+    # detiene en el siguiente punto de control, en vez de que cada rama
+    # descubra por su cuenta lo mismo y duerma lo suyo.
+    sin_cuota = threading.Event()
+
+    def _continuar() -> bool:
+        return not sin_cuota.is_set()
 
     def _analizar(opp: dict, desc: str, lugar: str) -> dict:
         with throttle:
-            r = gemini_analyzer.analizar(opp, desc, lugar)
+            r = gemini_analyzer.analizar(opp, desc, lugar, continuar=_continuar)
             time.sleep(config.GEMINI_PAUSA_SEG)
             return r
 
@@ -344,6 +351,10 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
                 _log(f"   Gemini fallo en {nid[:8]}: {texto.splitlines()[0][:90]}")
                 if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
                     corto_por_cuota = True
+                    # Enciende el cortacircuitos: los hilos que aun quedan se
+                    # paran en su siguiente punto de control, sin gastar cuota
+                    # ni dormir por un 429 que ya se sabe.
+                    sin_cuota.set()
                     quota.gastar_fallo()
                 # NO se marca como vista: si fallo por cuota o saturacion, este
                 # aviso debe reintentarse en el proximo barrido.
@@ -369,7 +380,8 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         pendientes = len(futuros) - len(viables) - len(fallos_gemini)
         _log(f"Cuota de Google agotada. Se abandona el resto del barrido.")
         resumen["errores"].append(
-            f"Google corto la cuota a mitad del barrido. Se guardaron "
+            f"Google corto la cuota a mitad del barrido; Kyomoto paro las "
+            f"analisis que faltaban para no gastar mas. Se guardaron "
             f"{len(viables)} viables; el resto queda pendiente para manana."
         )
 

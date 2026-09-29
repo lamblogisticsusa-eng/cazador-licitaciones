@@ -99,7 +99,7 @@ check("NO incluye gemini-3.5-flash-lite, que da 400",
 check("NO incluye gemini-flash-lite, que no existe",
       "gemini-flash-lite" not in alternos)
 check("No hay entradas vacias", all(m for m in config.GEMINI_MODELES_ALTERNATIVOS))
-check("La version subio a 2.1.0", config.KYOMOTO_VERSION == "2.1.0",
+check("La version subio a 2.2.0", config.KYOMOTO_VERSION == "2.2.0",
       f"-> {config.KYOMOTO_VERSION}")
 
 print()

@@ -6,7 +6,10 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
-KYOMOTO_VERSION = "2.1.0"
+# 2.2.0 = montos leidos bien (el filtro USD descartaba las buenas), HTML a
+# prueba de Telegram con la firma arreglada, ficha reordenada con la fecha
+# arriba, y cortacircuitos para que un 429 no haga dormir a todo el lote.
+KYOMOTO_VERSION = "2.2.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:

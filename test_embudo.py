@@ -114,7 +114,10 @@ def _bajar_descripciones(candidatos):
     }
 
 
-def _analizar(opp, desc, lugar):
+# Acepta la firma completa de la real, incluido el cortacircuitos:
+# scanner la llama con continuar=... y un fake con la firma corta revienta
+# con TypeError, y el sintoma es "llego 0 a Gemini" sin explicacion.
+def _analizar(opp, desc, lugar, continuar=None):
     ANALIZADOS.append((opp["noticeId"], bool(desc.strip())))
     return {
         "notice_id": opp["noticeId"],
