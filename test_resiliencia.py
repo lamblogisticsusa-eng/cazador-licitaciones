@@ -65,6 +65,18 @@ class _C:
         self.models = _M(guion)
 
 
+# El 429 real de Google, con el detalle que solo aparece en la respuesta
+# completa. El limite del plan gratis son 20 llamadas al dia, y el bot debe
+# decir eso en vez de un "se agoto la cuota" que no explica nada.
+ERR_429_REAL = (
+    "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': "
+    "'You exceeded your current quota, please check your plan and billing "
+    "details. * Quota exceeded for metric: generativelanguage.googleapis.com/"
+    "generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash. "
+    "Please retry in 56.8s.', 'status': 'RESOURCE_EXHAUSTED'}}"
+)
+
+
 def _analizar(guion):
     """
     Devuelve (resultado_o_None, error_o_None, modelos_usados).
@@ -178,6 +190,32 @@ if err is not None:
     check("No se llama a si mismo 'saturado'", "saturados" not in msg.lower())
     check("No repite ningun modelo", len(usados) == len(set(usados)),
           f"-> {usados}")
+print()
+
+print()
+print("=" * 70)
+print("5b) EL 429 DICE EL LIMITE REAL, NO UN 'AGOTADO' GENERICO")
+print("=" * 70)
+# El plan gratis son 20 llamadas al dia, segun dice la respuesta de Google.
+# Kyomoto debe repetir ese numero, porque si no el usuario no entiende por que
+# no le llega nada y no sabe que hacer al respecto.
+r, err, usados = _analizar({m: ERR_429_REAL for m in todos})
+msg = str(err or "")
+check("Lanza un error con el 429 real", err is not None)
+if err is not None:
+    print(f"  Mensaje:\n")
+    for linea in msg.splitlines():
+        print(f"    {linea}")
+    check("Nombra el limite de 20", "20" in msg, "-> no dice cuantas son")
+    check("Dice que hay que activar facturacion",
+          "facturacion" in msg.lower() or "Billing" in msg)
+    check("Y da una alternativa sin pagar",
+          "no quieres pagar" in msg)
+    # Acepta las dos formas de decirlo: "no se pierde" y "nada se pierde".
+    _plano = msg.lower()
+    check("Aclara que no se pierde trabajo",
+          "no se pierde" in _plano or "nada se pierde" in _plano)
+    check("No manda a tocar la clave", "copiala" not in msg.lower())
 print()
 
 print("=" * 70)

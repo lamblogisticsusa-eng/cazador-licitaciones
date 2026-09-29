@@ -184,6 +184,42 @@ def verificar_api() -> dict:
     }
 
 
+def _detalle_de_cuota(texto_error: str) -> str:
+    """
+    Saca de la respuesta de Google el dato que sirve: cuanto es el tope y de
+    que metrica se trata.
+
+    Sin esto, el usuario solo lee "se agoto la cuota" y no tiene por donde
+    empezar. Google lo dice muy claro en el 429:
+
+        * Quota exceeded for metric:
+          generativelanguage.googleapis.com/generate_content_free_tier_requests,
+          limit: 20, model: gemini-3.8-flash
+
+    El "limit: 20" es el tope real del plan gratis, medido el 29-sep-2026. Vale
+    la pena repetirselo tal cual, porque "el plan gratis son 20 al dia" es la
+    informacion que convierte un misterio en una decision.
+    """
+    if not texto_error:
+        return ""
+    tope = re.search(r"limit:\s*([0-9][0-9,]*)", texto_error)
+    metrica = re.search(r"Quota exceeded for metric:\s*([A-Za-z0-9_./-]+)", texto_error)
+    espera = re.search(r"Please retry in ([0-9.]+)s", texto_error)
+
+    partes = ["Lo que dice Google:"]
+    if tope:
+        partes.append(f"   · Tope del plan gratis: {tope.group(1)} llamadas al dia.")
+    if metrica:
+        # El nombre de la metrica es largo y no le dice nada a un usuario
+        # normal; solo se guarda en el log para diagnosticar.
+        log.info("Metrica de cuota agotada: %s", metrica.group(1))
+    if espera:
+        partes.append(f"   · Google sugiere reintentar en {float(espera.group(1)):.0f}s.")
+    if len(partes) == 1:
+        return ""
+    return "\n".join(partes) + "\n"
+
+
 def _construir_prompt(opp: dict, descripcion: str, lugar: str) -> str:
     return f"""
 Eres Kyomoto, analista senior de abastecimiento del gobierno de EE.UU.
@@ -408,14 +444,23 @@ def analizar(
                 intentos_429 += 1
                 if intentos_429 > config.GEMINI_REINTENTOS_429:
                     raise GeminiError(
-                        "Se agoto la cuota de Gemini (429 RESOURCE_EXHAUSTED).\n"
-                        "La clave SI funciona: esto es un limite del plan, no del "
-                        "codigo.\n"
-                        f"  - Bajar MAX_A_GEMINI (ahora {config.MAX_A_GEMINI}) y/o "
-                        f"subir GEMINI_PAUSA_SEG (ahora {config.GEMINI_PAUSA_SEG:g}s).\n"
-                        "  - Activar facturacion en https://aistudio.google.com para "
-                        "levantar el limite.\n"
-                        "Los avisos NO se marcan como vistos: se reintentan en el "
+                        "Se agoto la cuota de Google (429 RESOURCE_EXHAUSTED).\n"
+                        "Tu clave SI funciona: esto es el tope del plan gratis, no "
+                        "un error del codigo.\n"
+                        + _detalle_de_cuota(texto)
+                        + "\n\nCOMO SOLUCIONARLO\n"
+                        "   1. Activa facturacion en https://aistudio.google.com "
+                        "(Settings > Billing). Eso quita el tope gratis de "
+                        f"{config.PRESUPUESTO_GEMINI_DIARIO}/dia y el bot puede "
+                        "analizar todo lo que encuentre. Con flash cuesta "
+                        "centimos.\n"
+                        "   2. Si no quieres pagar, baja "
+                        f"PRESUPUESTO_GEMINI_DIARIO (hoy "
+                        f"{config.PRESUPUESTO_GEMINI_DIARIO}) y acepta fewer "
+                        "licitaciones al dia.\n"
+                        "   3. O usa otra cuenta de Google con su propia cuota.\n"
+                        "Nada se pierde: los avisos NO se marcan como vistos, "
+                        "asi que lo que no alcanzo queda pendiente para el "
                         "proximo barrido."
                     ) from e
                 # Si otro hilo ya esta esperando por lo mismo, no se suma una
