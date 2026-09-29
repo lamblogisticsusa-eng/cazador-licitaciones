@@ -102,7 +102,7 @@ check("Y va primero: es el mas rapido y el que menos se satura",
 check("NO incluye gemini-flash-lite, que no existe",
       "gemini-flash-lite" not in alternos)
 check("No hay entradas vacias", all(m for m in config.GEMINI_MODELES_ALTERNATIVOS))
-check("La version subio a 2.3.1", config.KYOMOTO_VERSION == "2.3.1",
+check("La version subio a 2.4.0", config.KYOMOTO_VERSION == "2.4.0",
       f"-> {config.KYOMOTO_VERSION}")
 
 print()
