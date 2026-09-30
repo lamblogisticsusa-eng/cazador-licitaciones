@@ -134,12 +134,18 @@ for codigo, nota, esperado in CODIGOS:
 
 check("El rango esta en config", config.PSC_MINIMO == 1000 and config.PSC_MAXIMO == 9999)
 
-# Lo importante: el PSC NUNCA veta, solo suma. Un PSC de servicio tiene que
-# seguir llegando a la fase de Gemini, que es quien decide.
+# Lo importante: el PSC NUNCA veta, solo suma. Un PSC valido tiene que hacer
+# llegar el aviso a la fase de Gemini, que es quien decide en definitiva.
+#
+# El titulo es de VENTA DE PIEZAS, no de obra. Con "MAINTENANCE OF GENERATOR
+# 50KW" (que era el que se uso antes) la comprobacion dejo de servir al
+# entrar la regla de mano de obra en sitio del 30-sep: ese titulo es
+# mantenimiento de un generador, o sea trabajo en sitio, y se penaliza -3
+# a proposito. El codigo estaba bien; el ejemplo era el equivocado.
 print()
 print("  El PSC suma, pero NO veta:")
 _caso = {
-    "title": "MAINTENANCE OF GENERATOR 50KW",
+    "title": "43--PARTS KIT, ROTARY PUMP",
     "naicsCode": "332999", "classificationCode": "2915",
     "typeOfSetAside": "", "responseDeadLine": "2026-11-04T17:00:00-04:00",
 }
@@ -148,6 +154,29 @@ check("Un PSC valido suma al menos 1", _p >= 1, f"-> {_p}")
 check("Y no lo veta (puntaje no negativo)", _p > -100, f"-> {_p}")
 check("Y el motivo menciona que es tangible",
       any("tangible" in x for x in _m), f"-> {_m}")
+
+# Y la interaccion con la regla de obra, que no existia antes de ella.
+print()
+print("  Y la regla de mano de obra se come los puntos de un titulo de obra:")
+_obra = {
+    "title": "MAINTENANCE OF GENERATOR 50KW",
+    "naicsCode": "332999", "classificationCode": "2915",
+    "typeOfSetAside": "", "responseDeadLine": "2026-11-04T17:00:00-04:00",
+}
+_piezas, _ = filters.puntuar(_caso, "")
+_p_obra, _m_obra = filters.puntuar(_obra, "")
+check("El titulo de obra puntua por debajo del de pieza",
+      _p_obra < _piezas, f"-> {_p_obra} vs {_piezas}")
+check("Y la penalizacion se aplica (PSC no la evita)",
+      any("obra en sitio" in x for x in _m_obra), f"-> {_m_obra}")
+
+# Y un set-aside de PYME tampoco lo rescata: si lo hiciera, bastaria con
+# pedir el contrato como small business para saltarse el filtro.
+_obra_sa = dict(_obra)
+_obra_sa["typeOfSetAside"] = "Total Small Business"
+_p_obra_sa, _ = filters.puntuar(_obra_sa, "")
+check("El set-aside de PYME no compra la penalizacion",
+      _p_obra_sa < _piezas, f"-> {_p_obra_sa} vs {_piezas}")
 
 print()
 print("=" * 70)

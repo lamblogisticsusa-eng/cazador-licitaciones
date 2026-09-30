@@ -230,7 +230,8 @@ NAICS_SERVICIOS = {
 #
 # Los set-asides socioeconómicos (WOSB, EDWOSB, HBC, VOSBC, SDVOSBC) también
 # valen +2, pero ADVIERTEN: exigen certificación de propiedad. Si L.A.M.B.
-# tiene la de mujer,訓練 Militar, o顺势, el mismo contrato se puede presentar
+# Si L.A.M.B. consigue alguna de esas certificaciones, el mismo contrato
+# se presenta ahi con el mismo +2 y con menos competencia.
 # ahi con el mismo +2 y la competencia es menor.
 #
 # Se comparan por palabra y no por igualdad exacta a propósito. SAM.gov manda

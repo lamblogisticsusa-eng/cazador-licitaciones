@@ -87,7 +87,9 @@ def _es_psc_producto(psc: str) -> bool:
     servicio, y en la practica de la compra tangible es lo que se ve. Se
     acepta el rango entero 1000-9999 a proposito: una lista blanca obliga a
     ir anoadiendo codigos a mano cada vez que aparece uno, y los que faltan
-    son precisamente los que no se 㬂 a escribir (piezas navales, material de
+    son precisamente los que no se saben a escribir (piezas navales,
+    material de construccion, cableado), que son los buenos para este
+    negocio).
     construccion, cableado), que son los buenos para este negocio.
 
     No es un veto: quien llama decide el peso, y aqui son +1. Las familias
