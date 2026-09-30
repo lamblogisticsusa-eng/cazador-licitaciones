@@ -6,13 +6,16 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 2.6.0 = el barrido automatico entrega de verdad (el destino salia como la
+# cadena "None"), ficha en formato ejecutivo y 3 distribuidores con su
+# verificacion en un clic.
 # 2.5.0 = penalizacion de mano de obra en sitio (-3) y bonus de set-aside de
 # small business (+2), sobre la base de los botones, el PSC y el PDF.
 # 2.4.0 = los botones del menu vuelven a responder (allowed_updates no
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.5.0"
+KYOMOTO_VERSION = "2.6.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:

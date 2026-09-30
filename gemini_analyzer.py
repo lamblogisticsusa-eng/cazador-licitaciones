@@ -64,6 +64,7 @@ ESQUEMA = {
     "margen_por_distribuidor": "str",
     "busquedas_distribuidores": "[str]",
     "query_google_proveedores": "str",
+    "distribuidores_candidatos": "[{nombre,tipo,porque,verificar}]",
     "nivel_riesgo": "bajo|medio|alto",
     "preguntas_criticas": "[str]",
     "observaciones": "str",
@@ -409,7 +410,51 @@ SI ES VIABLE, ENTREGA:
                                       comprar", "precio"). Solo el
                                       termino.
                                     - De 3 a 10 palabras.
-  margen_por_distribuidor       : como cambia la ganancia segun donde se
+  distributors_candidatos        : hasta 3 DISTRIBUIDORES REALES de Estados
+                                  Unidos que conoces de nombre y que de verdad
+                                  manejan esta clase de producto. Para cada
+                                  uno:
+                                    - nombre      : el nombre comercial, como
+                                                    lo escribe la empresa
+                                                    ("Grainger", "McMaster-Carr",
+                                                    "Radwell")
+                                    - tipo        : que vende y por que sirve
+                                                    aqui (mayorista
+                                                    industrial, casa de
+                                                    catalogo, distribuidor
+                                                    naval...)
+                                    - porque      : 1 frase, por que este y no
+                                                    otro
+                                    - verificar   : UNA busqueda en Google, en
+                                                    ingles, para confirmar que
+                                                    existe, que vende esto y
+                                                    sacar su contacto real
+
+                                  REGLAS DURA. LEELAS ANTES DE CONTESTAR:
+                                    - NUNCA inventes una direccion de correo, un
+                                      telefono ni un sitio web. NO hay campo
+                                      para eso a proposito. Kyomoto lo prohibe
+                                      en el modulo distribuidores porque un
+                                      correo inventado hace que el cliente
+                                      escriba a una empresa equivocada y
+                                      queme su reputacion. Si no sabes el
+                                      correo, no lo pongas: no hay sitio donde
+                                      ponerlo.
+                                    - SOLO empresas que de verdad hayas visto
+                                      en tu entrenamiento. Es preferible
+                                      devolver 1 con certeza que devolver 3
+                                      inventadas.
+                                    - Si no estas seguro de que una empresa
+                                      maneja ESTE producto, no la incluyas.
+                                    - Si no se te ocurre ninguna con
+                                      confianza, devuelve una lista vacia. Es
+                                      una respuesta valida y preferible a
+                                      inventar.
+                                  NO se verifica nada automaticamente: la
+                                  busqueda de "verificar" es la que hace el
+                                  usuario, en un clic, antes de escribir a
+                                  nadie. Por eso el nombre es lo unico que
+                                  se muestra como dato.
                                  compre, con el rango en cada caso:
                                  - catalogo grande: 15-20% bruto
                                  - mayorista/importador: 20-25% bruto
@@ -440,6 +485,16 @@ Ejemplo, bidding 50 laptops:
   "precio_oferta_sugerido_usd": 66000,
   "busquedas_distribuidores": ["Dell Latitude 5450 wholesale distributor usa"],
     "query_google_proveedores": "laptop dell latitude 5450 wholesale distributor usa",
+  "distribuidores_candidatos": [
+    {{"nombre": "McMaster-Carr", "tipo": "casa de catalogo industrial",
+     "porque": "Stock enorme y envio el mismo dia; se paga al catalogo, no a precio de contrato.",
+     "verificar": "McMaster-Carr laptops dell contact sales"}},
+    {{"nombre": "CDW", "tipo": "mayorista IT para empresas",
+     "porque": "Volumen grande y cuenta corporativa; buen precio en lotes de 50 en adelante.",
+     "verificar": "CDW dell latitude business sales contact"}},
+    {{"nombre": "Insight", "tipo": "mayorista IT",
+     "porque": "Alternativa a CDW, util para tener dos cotizaciones en paralelo.",
+     "verificar": "Insight dell laptop volume pricing contact"}}],
   "nivel_riesgo": "medio", "preguntas_criticas": ["..."], "observaciones": ""}}
 (NOTA: ese ejemplo sale con margen neto bajo y por tanto seria viable=false.
  Sirve solo para mostrar la forma, no el resultado esperado.)
@@ -794,6 +849,7 @@ def analizar(
     "query_google_proveedores": _limpiar_ia(
         str(datos.get("query_google_proveedores") or "").replace('"', "").replace(",", " ")
     )[:90].strip(),
+        "distribuidores_candidatos": _candidatos(datos.get("distribuidores_candidatos")),
         "margen_por_distribuidor": _limpiar_ia(datos.get("margen_por_distribuidor"))[:600],
         "nivel_riesgo": _limpiar_ia(datos.get("nivel_riesgo") or "medio").lower()[:10],
         "preguntas_criticas": _lista(datos.get("preguntas_criticas")),
@@ -809,6 +865,57 @@ def analizar(
         "ui_link": opp.get("uiLink", ""),
         "title": opp.get("title", ""),
     }
+
+
+def _candidatos(valor) -> list[dict]:
+    """
+    Los 3 distribuidores candidatos que pide Gemini, limpios y con tope.
+
+    Se descartan los que llegan sin nombre, porque un candidato sin nombre no
+    es un candidato: no hay nada que verificar ni que buscar. El campo
+    "verificar" se reconstruye SI FALTA a partir del nombre, con la misma
+    logica que usa distribuidores.py. Asi una ficha con el campo vacio
+    degrada a "buscar el nombre", que es lo unico que se puede hacer, en vez
+    de quedarse sin nada.
+
+    NUNCA se acepta aqui un correo ni un telefono. Aunque el modelo los
+    mande, se descartan en silencio: Kyomoto no muestra contactos que no
+    puede verificar, y un correo inventado hace que el cliente escriba a
+    una empresa equivocada.
+    """
+    if not isinstance(valor, list):
+        return []
+    salida: list[dict] = []
+    vistos: set[str] = set()
+    # Se recorre la lista ENTERA y el tope se aplica al final, no antes.
+    # Con `valor[:3]` primero, un modelo que mandara tres entradas malas
+    # (una sin nombre, otra repetida, otra con basura) mas una buena
+    # quarta se quedaba con cero candidatos, y la ficha caia a la busqueda
+    # general habiendole dado una buena. El limite es de lo que SALE bien,
+    # no de lo que llega.
+    for crudo in valor:
+        if len(salida) >= 3:
+            break
+        if not isinstance(crudo, dict):
+            continue
+        nombre = _limpiar_ia(str(crudo.get("nombre") or ""))[:80].strip()
+        if len(nombre) < 2:
+            continue
+        clave = nombre.lower()
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        verificar = str(crudo.get("verificar") or "").replace('"', "").replace(",", " ")
+        verificar = re.sub(r"\s+", " ", verificar).strip()[:90]
+        if not verificar:
+            verificar = f"{nombre} {str(crudo.get('tipo') or '').strip()} contact usa".strip()
+        salida.append({
+            "nombre": nombre,
+            "tipo": _limpiar_ia(str(crudo.get("tipo") or ""))[:80].strip(),
+            "porque": _limpiar_ia(str(crudo.get("porque") or ""))[:200].strip(),
+            "verificar": verificar,
+        })
+    return salida
 
 
 def _lista(valor) -> list[str]:

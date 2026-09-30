@@ -111,10 +111,41 @@ def _trocear(texto: str, limite: int = LIMITE_TELEGRAM - RESERVA) -> list[str]:
     return [t for t in trozos if t.strip()]
 
 
+def _chat_id_valido(chat_id) -> bool:
+    """
+    Dice si un chat_id sirve para mandar de verdad.
+
+    No basta con `if not chat_id`. El fallo real que costaba un escaneo
+    entero por barrido era justamente ese: un str(None) llega como la CADENA
+    "None", que tiene cuatro letras y es VERDADERA en Python, asi que el
+    guarda `if not` la deja pasar y el POST sale con chat_id="None". Telegram
+    contesta 400 "chat not found" y el mensaje se pierde sin que nadie se
+    entere.
+
+    Un chat_id de Telegram es un entero (positivo, o negativo para grupos y
+    canales) o su cadena decimal. Cualquier otra cosa esta mal, y se rechaza
+    aqui en vez de gastar una llamada a la API.
+    """
+    if chat_id is None:
+        return False
+    if isinstance(chat_id, bool):          # True/False no son chat_id
+        return False
+    if isinstance(chat_id, int):
+        return chat_id != 0
+    texto = str(chat_id).strip()
+    if not texto or texto.lower() in ("none", "null", "nan", "undefined"):
+        return False
+    return texto.lstrip("-").isdigit()
+
+
 def enviar(chat_id: str, texto: str, html_mode: bool = True) -> bool:
     """Envia texto, troceado si hace falta. Nunca lanza excepcion."""
-    if not chat_id:
-        log.error("No hay TELEGRAM_CHAT_ID de destino.")
+    if not _chat_id_valido(chat_id):
+        log.error(
+            "chat_id de destino invalido (%r). No se envio nada. Revisa "
+            "TELEGRAM_CHAT_ID en Render y de donde se calcula el destino.",
+            chat_id,
+        )
         return False
     ok = True
     degradado = False
@@ -490,27 +521,128 @@ def _usd_texto(valor) -> str:
     return f"${valor:,.2f}"
 
 
+_SEPARADOR = "━━━━━━━━━━━━━━━━━━━━"
+
+
+def _bloque_financiero(a: dict) -> list[str]:
+    """
+    El resumen financiero en dos columnas alineadas.
+
+    Etiqueta a la izquierda, cifra a la derecha, y la ganancia neta separada
+    al final con una raya, porque es el unico numero que importa y el unico
+    que sale cerrado.
+
+    Va en <pre> por una razon concreta: sin <pre>, el ancho de una celda es
+    el de su contenido mas largo, y en cuanto una etiqueta pasa de la
+    siguiente, la cifra baja de linea. Las columnas dejan de alinearse
+    justo cuando hay mas cantidad que comparar, que es cuando mas falta
+    hacen. En <pre> el ancho lo fija el texto y las columnas se caen
+    siempre en el mismo sitio.
+    """
+    presupuesto = a.get("valor_contrato_usd")
+    costo = a.get("costo_total_usd")
+    oferta = a.get("precio_oferta_sugerido_usd")
+    margen = a.get("margen_neto_porcentaje")
+
+    filas = [
+        ("Presupuesto govt.",
+         f"~{_usd_texto(presupuesto)} USD" if presupuesto is not None else "N/E"),
+        ("Costo proveedor",
+         f"~{_usd_texto(costo)} USD" if costo is not None else "N/E"),
+        ("Precio a ofertar",
+         f"{_usd_texto(oferta)} USD" if oferta is not None else "N/E"),
+    ]
+
+    L: list[str] = ["💰 <b>Resumen financiero</b>", "<pre>"]
+    for etiqueta, valor in filas:
+        L.append(f"{etiqueta:<17}{valor:>18}")
+    L.append("\u2500" * 35)
+    # El "~" no aparece en la ganancia ni en el precio ofertado: los dos se
+    # calculan aqui, no salen de una estimacion del modelo. Poner "~" seria
+    # mentir sobre lo unico que sale cerrado.
+    L.append(f"{'GANANCIA NETA':<17}{_usd_texto(a.get('ganancia_neta_usd')):>18}")
+    if margen is not None:
+        L.append(f"{'Margen neto':<17}{f'{margen:.1f}%':>18}")
+    L.append("</pre>")
+    return L
+
+
+def _bloque_distribuidores(d: dict) -> list[str]:
+    """
+    Los 3 distribuidores candidatos, cada uno con su busqueda de verificacion.
+
+    Cada nombre lleva su enlace de Google, porque el nombre SOLO es una
+    sugerencia hasta que se abre el enlace. Kyomoto no muestra ni correo ni
+    telefono: no hay forma de comprobar un contacto generado por un modelo, y
+    escribir a una direccion inventada hace que el cliente queme su
+    reputacion con la empresa equivocada. El nombre es barato de comprobar y
+    el enlace lo deja comprobar en un clic.
+
+    Si no hay candidatos de confianza, se degrada a la busqueda general, que
+    es lo que hay. Nunca se muestra un bullet vacio.
+    """
+    L = ["🏭 <b>Distribuidores a verificar (USA)</b>"]
+    candidatos = d.get("candidatos") or []
+    if not candidatos:
+        etiqueta, url = d["principal"]
+        L.append(f'<a href="{_esc(url)}">{_esc(etiqueta)}</a>')
+        L.append("")
+        L.append("<i>Sin candidatos de confianza para este producto: "
+                 "usa la búsqueda general.</i>")
+        return L
+
+    for n, c in enumerate(candidatos, 1):
+        linea = f'{n}. <a href="{_esc(c["url"])}"><b>{_esc(c["nombre"])}</b></a>'
+        if c.get("tipo"):
+            linea += f' <i>({_esc(c["tipo"])})</i>'
+        L.append(linea)
+        if c.get("porque"):
+            L.append(f'   <i>{_esc(c["porque"][:150])}</i>')
+
+    L.append("")
+    L.append("<i>Nombres sugeridos: ábrelos y confirma que venden este "
+             "producto antes de escribir. Kyomoto no da correos ni teléfonos "
+             "porque no puede verificarlos.</i>")
+    return L
+
+
 def formatear_analisis(a: dict) -> str:
     """
-    La ficha, en el formato exacto que pidio el usuario.
+    La ficha, en formato ejecutivo.
 
-    Pensada para leerla de un vistazo y decidir si abrir el enlace: que es,
-    quien la pide, cuanto se gana, a cuanto se ofrece, donde comprar y donde
-    esta la ficha original.
+    Estructura de arriba abajo, pensada para decidir en diez segundos si se
+    abre el enlace o no:
+
+        SEPARADOR
+        Que es, de quien es, cuando cierra      <- identidad y urgencia
+        SEPARADOR
+        Producto
+        SEPARADOR
+        Resumen financiero en tabla             <- las cifras, alineadas
+        SEPARADOR
+        Estrategia, con el porque en la misma linea
+        SEPARADOR
+        Los 3 distribuidores, con su verificacion
+        SEPARADOR
+        Enlace a SAM.gov
+        Cierre
 
     Regla de oro, y no es negociable: la cuenta se sostiene. Si el bot dice que
     vas a ofertar $74,500, la ganancia se mide contra $74,500 y no contra el
     presupuesto del gobierno, porque lo que entra a tu cuenta es lo que
-    ofertaste. Medirla contra el presupuesto infla el margen y hace que
-   Finish
-    ofertas por debajo de tu propia ganancia.
+    ofertaste. Medirla contra el presupuesto infla el margen y lleva a
+    ofertar por debajo de tu propia ganancia.
     """
     import distribuidores
     import kyo
 
-    L = ["✨ <b>¡Amo, encontré una nueva oportunidad súper interesante!</b> (≧◡≦)", ""]
+    L: list[str] = [
+        "✨ <b>¡Amo, oportunidad nueva y bien armada!</b> (≧◡≦)",
+        _SEPARADOR,
+        "",
+    ]
 
-    # --- Que es y de quien ---
+    # --- Que es, de quien, y cuanto queda ---
     # La abreviatura va delante del producto para que la linea se escanee de
     # un vistazo: "USAF - Generadores 50kW" dice mas que el nombre entero, y el
     # nombre entero va justo debajo, que es donde toca leerlo.
@@ -525,68 +657,76 @@ def formatear_analisis(a: dict) -> str:
         L.append(f"📦 <b>{_esc(_titulo)}</b>")
     else:
         L.append(f"📦 <b>{_esc(_corta)} - {_esc(_titulo)}</b>")
+    L.append(f"🏛️ {_esc(a['agencia'])}")
     L.append(f"🔢 Solicitud: <code>{_esc(a['solicitation'])}</code>")
-    L.append(f"🏛️ Agencia: {_esc(a['agencia'])}")
+
+    # La fecha sube aqui porque es lo que decide si hay tiempo de ofertar, y
+    # en el formato anterior estaba debajo de todo el bloque economico.
+    #
+    # OJO: _fecha_legible YA devuelve su propio emoji ("⏰ Vence en 3 días",
+    # "🗓️ Vence en 35 días"). Anteponer otro aqui saca "⏰ 🗓️ Vence en 35
+    # días", que es un emoji pegado a otro. Se usa la cadena tal cual.
+    _vence, _cuando = _fecha_legible(a.get("limite"))
+    if _vence:
+        L.append(f"<b>{_esc(_vence)}</b> · {_esc(_cuando)}")
+
+    # Con la regla de +2 del 30-sep, saber si el contrato esta reservado a
+    # pequenas empresas cambia la decision, y ese dato no aparecia.
+    _sa = str(a.get("set_aside") or "").strip()
+    if _sa and "sin set-aside" not in _sa.lower():
+        L.append(f"🏷️ {_esc(_sa)}")
+    L.append(_SEPARADOR)
     L.append("")
 
-    # --- Descripcion del producto ---
-    L.append("📝 <b>Descripción del Producto:</b>")
+    # --- Producto ---
+    L.append("📝 <b>Producto</b>")
     L.append(_esc(_descripcion_corta(a)))
+    L.append("")
+    L.append(_SEPARADOR)
     L.append("")
 
     # --- Analisis financiero ---
-    # El "~" no es decorativo: el presupuesto y el costo los estima Gemini a
-    # partir de la especificacion, no salen de una cifra oficial. La ganancia
-    # neta NO lleva "~" porque si se calcula, y ponerlo seria mentir sobre lo
-    # unico que sale cerrado.
-    L.append("💰 <b>Análisis Financiero Estimado:</b>")
-    L.append(f"• Presupuesto Est. Gobierno: ~{_usd_texto(a['valor_contrato_usd'])} USD")
-    L.append(f"• Costo Est. Proveedor: ~{_usd_texto(a['costo_total_usd'])} USD")
-    _margen = a.get("margen_neto_porcentaje")
-    L.append(f"• Ganancia Neta Proyectada: "
-             f"<b>{_usd_texto(a['ganancia_neta_usd'])}</b> USD"
-             + (f" ({_margen:.1f}% de margen)" if _margen is not None else ""))
+    L.extend(_bloque_financiero(a))
+    L.append("")
+    L.append(_SEPARADOR)
     L.append("")
 
     # --- Estrategia de oferta ---
     # La explicacion va en la MISMA linea, entre parentesis: es el "por que" de
     # ese numero, y separarla obligaba a saltar de un bloque a otro.
-    L.append("🎯 <b>Estrategia de Oferta Sugerida:</b>")
     _expl = (a.get("razonamiento_oferta") or a.get("estrategia_oferta") or "").strip()
-    _linea = (f"• Precio Sugerido para Licitar: "
-              f"<b>{_usd_texto(a['precio_oferta_sugerido_usd'])}</b> USD")
+    L.append("🎯 <b>Estrategia de oferta</b>")
+    _linea = f'· Ofertar a <b>{_usd_texto(a["precio_oferta_sugerido_usd"])} USD</b>'
     if _expl:
-        _linea += f" ({_esc(_expl)})"
+        _linea += f" ({_esc(_expl[:300])})"
     L.append(_linea)
+    L.append(_SEPARADOR)
     L.append("")
 
     # --- Distribuidores ---
-    L.append("🔍 <b>Búsqueda Automática de Distribuidores:</b>")
     d = distribuidores.para_oportunidad(
         a.get("busquedas_distribuidores") or [],
         a.get("producto") or "",
         a.get("lugar_entrega") or "",
         a.get("query_google_proveedores") or "",
+        a.get("distribuidores_candidatos") or [],
     )
-    etiqueta, url = d["principal"]
-    # La etiqueta ya trae su propio emoji; anteponer otro lo duplicaba y se
-    # leia como "🔎 🔎 Buscar en Google".
-    L.append(f'<a href="{_esc(url)}">{_esc(etiqueta)}</a>')
+    L.extend(_bloque_distribuidores(d))
+    L.append("")
+    L.append(_SEPARADOR)
     L.append("")
 
     # --- Aviso que hay que leer si aplica ---
     if a.get("sin_descripcion"):
-        L.append("⚠️ <i>SAM.gov no publicó descripción de este aviso; las cifras "
-                 "son estimaciones. Antes de ofertar, léelo en el enlace.</i>")
+        L.append("⚠️ <i>SAM.gov no publicó descripción; las cifras con «~» son "
+                 "estimaciones. Lee el aviso antes de ofertar.</i>")
         L.append("")
 
     # --- Enlace ---
-    L.append("🔗 <b>Enlace Directo SAM.gov:</b>")
     if a.get("ui_link"):
-        L.append(f"📄 <a href=\"{_esc(a['ui_link'])}\">"
-                 "<b>Ver Ficha Completa de la Licitación</b></a>")
+        L.append(f'🔗 <a href="{_esc(a["ui_link"])}"><b>Ver ficha en SAM.gov</b></a>')
     else:
-        L.append("📄 Ver Ficha Completa de la Licitación")
+        L.append("🔗 Ver ficha en SAM.gov")
 
     L.append("")
     L.append(f"<i>{kyo.CIERRE}</i>")

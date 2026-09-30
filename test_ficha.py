@@ -115,8 +115,15 @@ check("El precio ofertado sin ~", "~$230,000.00 USD" not in html)
 check("Y es menor que el techo del gobierno",
       FICHA["precio_oferta_sugerido_usd"] < FICHA["valor_contrato_usd"],
       "-> ofertando por encima del techo, que no tiene sentido")
+# La explicacion tiene que quedar en la MISMA linea que el precio. Se
+# comprueba sobre la LINEA, no sobre una cadena literal: en el formato ejecutivo
+# del 30-sep el precio va en <b>, asi que entre " USD" y el parentesi hay un
+# "</b>". Buscar " USD (" daba falso negativo aunque la linea estuviera bien.
+_linea_oferta = [l for l in html.split("\n") if "Ofertar" in l]
 check("La explicacion de la estrategia va en la MISMA linea",
-      " USD (" in html, "-> quedo en una linea aparte")
+      bool(_linea_oferta) and "(" in _linea_oferta[0]
+      and FICHA["razonamiento_oferta"][:40] in _linea_oferta[0],
+      "-> quedo en una linea aparte: %s" % _linea_oferta)
 print()
 
 print("=" * 70)

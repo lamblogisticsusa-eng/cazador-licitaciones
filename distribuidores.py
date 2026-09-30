@@ -96,9 +96,61 @@ def busqueda_sitio(dominio: str, termino: str) -> str:
     return google(f'{termino} site:{dominio}')
 
 
+def _candidato(c: dict) -> dict | None:
+    """
+    Un distribuidor propuesto, con su enlace de verificacion.
+
+    Devuelve None si no trae nombre: sin nombre no hay nada que buscar, y una
+    ficha con un bullet vacio se ve peor que una ficha con dos.
+
+    El enlace SIEMPRE se construye con el nombre, aunque el modelo haya
+    mandado su propio campo "verificar". Motivo: una busqueda de Google
+    alrededor del nombre comercial es la unica forma de confirmar que la
+    empresa existe, que vende ese producto y cual es su contacto real. El
+    texto que dio el modelo se usa, pero enriquecido con el nombre, para que
+    la busqueda no se disperse.
+    """
+    # El nombre se limpia de etiquetas ANTES de usarse, por dos motivos:
+    # Segundo, el nombre se imprime en la ficha, y la ficha lo escapa con
+    # _esc() al imprimirse, pero si el HTML ya viaja en la URL no lo cubre el
+    # escape de la pantalla. Se quita aqui una vez y no hay que acordarse en
+    # cada sitio.
+    nombre = re.sub(r"<[^>]+>", " ", str(c.get("nombre") or ""))
+    nombre = re.sub(r"\s+", " ", nombre).strip()[:80]
+    if len(nombre) < 2:
+        return None
+
+    # El nombre se pone entre comillas para que Google no lo descomponga, y se
+    # le anade lo que el modelo dijo del tipo. Las comillas de Google son
+    # justamente lo que _limpiar() prohibe en los terminos, asi que aqui se
+    # ponen despues, nunca antes.
+    #
+    # OJO con la duplicacion: el modelo suele escribir el nombre dentro de su
+    # propio campo "verificar" ("McMaster-Carr EPDM seal contact"). Si se
+    # antepone el nombre otra vez, la busqueda queda
+    #   "McMaster-Carr" McMaster-Carr EPDM seal contact
+    # que no rompe, pero se ve como un error y gasta palabras clave. Se quita
+    # el nombre del texto del modelo antes de anteponerlo.
+    propio = str(c.get("verificar") or "").strip()
+    if len(nombre) > 4:
+        propio = re.sub(re.escape(nombre), " ", propio, flags=re.IGNORECASE)
+    propio = re.sub(r"\s+", " ", propio).strip(" -,")
+    if propio and len(propio) < 90:
+        consulta = f'"{nombre}" {propio}'
+    else:
+        consulta = f'"{nombre}" distributor wholesale usa contact'
+    return {
+        "nombre": nombre,
+        "tipo": str(c.get("tipo") or "").strip()[:80],
+        "porque": str(c.get("porque") or "").strip()[:200],
+        "url": google(consulta),
+    }
+
+
 def para_oportunidad(terminos: list[str], producto: str = "",
                      pais_destino: str = "",
-                     query_google_proveedores: str = "") -> dict:
+                     query_google_proveedores: str = "",
+                     candidatos: list[dict] | None = None) -> dict:
     """
     Arma el bloque de distribuidores para la ficha.
 
@@ -169,8 +221,18 @@ def para_oportunidad(terminos: list[str], producto: str = "",
         for nombre, dominio in FABRICANTES
     ]
 
+    # Los candidatos nombrados por Gemini, con su enlace de verificacion. Se
+    # descartan los que no traigan nombre, y se limita a 3 porque son los que
+    # caben en la ficha sin que deje de leerse de un vistazo.
+    validos = []
+    for c in (candidatos or []):
+        limpio = _candidato(c) if isinstance(c, dict) else None
+        if limpio:
+            validos.append(limpio)
+
     return {
         "principal": principal,
+        "candidatos": validos[:3],
         "sitios": sitios,
         "fabricantes": fabricantes,
         "terminos": limpio or [especifico],

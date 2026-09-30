@@ -77,7 +77,41 @@ def _servidor() -> None:
 #  HELPERS
 # ==========================================================================
 def _chat_id(ctx: ContextTypes.DEFAULT_TYPE) -> str:
-    return str(ctx.job.chat_id) if ctx.job else config.TELEGRAM_CHAT_ID
+    """
+    A donde va el mensaje: el chat del que viene, o el configurado.
+
+    ESTA ERA LA RAZON DE QUE NUNCA LLEGARA UNA FICHA SOLA.
+
+    Antes era una linea:
+
+        return str(ctx.job.chat_id) if ctx.job else config.TELEGRAM_CHAT_ID
+
+    El trabajo periodico se registra en _post_init con run_repeating SIN
+    chat_id, y en python-telegram-bot 22.8 ese parametro tiene default None.
+    Asi que dentro del trabajo ctx.job NO es None (el trabajo existe) pero
+    ctx.job.chat_id SI es None, y str(None) da la CADENA "None".
+
+    Y "None" es una cadena de cuatro letras, no el entero 0: es VERDADERA en
+    Python. El guarda de _tarea_periodica, `if not chat_id: return`, no
+    cortaba. El escaneo arrancaba, gastaba la cuota diaria de Gemini
+    analizando avisos de verdad, y al final mandaba el POST a Telegram con
+    chat_id="None", que Telegram responde 400 "chat not found". La ficha se
+    perdia en silencio, una vez cada dos horas, para siempre.
+
+    /escaneo SI entregaba, porque ahi el chat_id es el del mensaje. Por eso
+    todo se ve bien capa por capa y a la vez nunca llego nada solo.
+
+    Ahora: si el Job trae chat_id se usa ese, y si no, el configurado. Un
+    chat_id de un Job es un entero de Telegram, nunca la palabra "None".
+    """
+    if ctx is not None and ctx.job is not None:
+        chat = getattr(ctx.job, "chat_id", None)
+        # is not None y no un "if not": 0 no es un chat_id valido, pero la
+        # comprobacion tiene que distinguir None de 0 para no regalarle un
+        # entero crudo a la API de Telegram.
+        if chat is not None:
+            return str(chat)
+    return config.TELEGRAM_CHAT_ID
 
 
 def _crear_app() -> Application:
