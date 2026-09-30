@@ -197,8 +197,55 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
         puntos -= 5
         motivos.append(f"menciona destino extranjero ({pais}): revisar")
 
-    set_aside = str(opp.get("typeOfSetAside") or "").upper()
-    if set_aside in ("BPA", "SBA", "TOTAL", "EDWOSB", "WOSB", "HBC", "SDVOSBC", "VOSBC"):
+    # --- Set-aside de small business (+2) ---
+    # L.A.M.B. Logistics LLC es una small business de EE.UU. (empresa
+    # unipersonal en Albuquerque, NM), asi que un set-aside para petites
+    # empresas no es solo una pista: es la confirmacion de que PUEDE
+    # presentarse, y de contra quien compite.
+    #
+    # Se busca por palabra y no por igualdad exacta porque SAM.gov manda el
+    # valor completo ("Total Small Business Set-Aside"), y eso no es igual a
+    # "TOTAL": con igualdad se escapaba justo el que mas le conviene.
+    set_aside = str(opp.get("typeOfSetAside") or "").upper().strip()
+    if set_aside and set_aside != "NA":
+        _sa_tokens = set(re.split(r"[^A-Z0-9]+", set_aside)) - {""}
+        _sa_texto = " " + re.sub(r"[^A-Z0-9]+", " ", set_aside) + " "
+        if any(t in config.SET_ASIDE_PYME for t in _sa_tokens) or \
+                any(p in _sa_texto for p in ("TOTAL SMALL", "SMALL BUSINESS", "SBA")):
+            puntos += config.SET_ASIDE_PYME_PUNTOS
+            _cert = [t for t in _sa_tokens
+                     if t in config.SET_ASIDE_CON_CERTIFICACION]
+            if _cert:
+                motivos.append(
+                    f"Set-aside {set_aside} (+{config.SET_ASIDE_PYME_PUNTOS}, "
+                    f"exige certificacion de propiedad)"
+                )
+            else:
+                motivos.append(
+                    f"Set-aside {set_aside} (+{config.SET_ASIDE_PYME_PUNTOS}, "
+                    f"total small business: puede presentarse)"
+                )
+
+    # --- Penalizacion de mano de obra en sitio (-3) ---
+    # Se pide cuando el titulo trae trabajo en sitio JUNTO a equipo pesado.
+    # "Replacement" queda fuera a proposito: medirlo sobre los titulos reales
+    # del barrido del 29-sep mostro que "replacement parts" y "parts kit,
+    # replacement" son el nucleo del negocio (piezas navales que se compran en
+    # USA), no contratos de obra. Con "replacement" dentro, la regla
+    # penalizaba 5 ventas de piezas de cada 10 y dejaba pasar solo 4 de 5
+    # obras reales: al reves de lo que se buscaba.
+    _titulo_low = titulo.lower()
+    _pesado = any(e in _titulo_low for e in config.EQUIPO_PESADO)
+    _obra = any(w in _titulo_low for w in config.TRABAJO_EN_SITIO)
+    _piezas = any(p in _titulo_low for p in config.VENTA_DE_PIEZAS)
+    if _pesado and _obra and not _piezas:
+        puntos -= config.PENALIZACION_OBRA_PUNTOS
+        motivos.append(
+            f"-{config.PENALIZACION_OBRA_PUNTOS} parece obra en sitio "
+            f"(equipo pesado + trabajo en sitio)"
+        )
+
+    if False and set_aside in ("BPA", "SBA", "TOTAL", "EDWOSB", "WOSB", "HBC", "SDVOSBC", "VOSBC"):
         puntos += 1
         motivos.append(f"Set-aside {set_aside} (small business)")
 

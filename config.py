@@ -6,11 +6,13 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 2.5.0 = penalizacion de mano de obra en sitio (-3) y bonus de set-aside de
+# small business (+2), sobre la base de los botones, el PSC y el PDF.
 # 2.4.0 = los botones del menu vuelven a responder (allowed_updates no
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.4.0"
+KYOMOTO_VERSION = "2.5.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -217,6 +219,65 @@ NAICS_SERVICIOS = {
     # Administracion publica
     "921", "922", "923", "926", "927", "928", "931", "932", "941", "942",
 }
+
+# --- Set-aside: pequeño negocio estadounidense (30-sep-2026) ---
+#
+# L.A.M.B. Logistics LLC es una empresa unipersonal en Albuquerque, New
+# Mexico. Es decir, ES una small business de EE.UU. Un "Total Small Business
+# Set-Aside" no es solo una pista de que la oportunidad es buena: es la
+# confirmacion de que la empresa PUEDE presentarse, y contra quien compite.
+# Por eso vale +2 y no +1.
+#
+# Los set-asides socioeconómicos (WOSB, EDWOSB, HBC, VOSBC, SDVOSBC) también
+# valen +2, pero ADVIERTEN: exigen certificación de propiedad. Si L.A.M.B.
+# tiene la de mujer,訓練 Militar, o顺势, el mismo contrato se puede presentar
+# ahi con el mismo +2 y la competencia es menor.
+#
+# Se comparan por palabra y no por igualdad exacta a propósito. SAM.gov manda
+# el valor completo ("Total Small Business Set-Aside"), que no es igual a
+# "TOTAL": con igualdad se escapaba justo el set-aside que mas le conviene a
+# una PYME.
+SET_ASIDE_PYME = {
+    "TOTAL", "TOTAL SMALL BUSINESS", "SBA", "SBS", "TOTAL SMALL",
+    "WOSB", "EDWOSB", "HBC", "SDVOSBC", "VOSBC", "SDOB",
+    "SMALL BUSINESS", "TOTAL SMALL BUSINESS SET-ASIDE",
+    "EDWOSB 927", "WOSB 927", "HBC 927", "SDVOSBC 927", "VOSBC 927",
+}
+SET_ASIDE_PYME_PUNTOS = 2
+
+# Set-asides donde la empresa tiene que tener certificacion de propiedad.
+SET_ASIDE_CON_CERTIFICACION = {
+    "WOSB", "EDWOSB", "HBC", "SDVOSBC", "VOSBC", "SDOB", "927",
+}
+
+# --- Penalizacion de mano de obra en sitio (30-sep-2026) ---
+#
+# Equipo pesado: sin esto, un "REPLACEMENT PARTS" de una valvula no se
+#penaliza nunca, que es lo correcto.
+EQUIPO_PESADO = (
+    "generator", "genset", "hvac", "chiller", "boiler", "chilled water",
+    "rooftop", "air handler", "cooling tower", "heating plant",
+    "electrical generator", "power plant", "pump station",
+)
+
+# Trabajo en sitio. NO esta "replacement" a proposito: medirlo sobre los
+# titulos reales del barrido del 29-sep mostro que "replacement parts" y
+# "parts kit, replacement" son el nucleo del negocio, no mano de obra.
+TRABAJO_EN_SITIO = (
+    "installation", "install and", "furnish and install", "install,", "installed",
+    "repair", "repair of", "maintenance", "servicing", "overhaul",
+    "dismantle", "erect", "startup and commissioning", "on-site", "on site",
+)
+
+# Si el titulo dice esto, es una VENTA DE PIEZAS, no una obra: no se
+# penaliza aunque lleve equipo pesado. Aqui es donde se pierden los kits de
+# repuesto de generador, que son de las mejores oportunidades que existen.
+VENTA_DE_PIEZAS = (
+    "parts kit", "replacement parts", "spare parts", "spare parts kit",
+    "kit,", " kits", "kit ", "parts list", "parts package", "nsn",
+)
+
+PENALIZACION_OBRA_PUNTOS = 3
 
 # Clasificacion PSC (Product and Service Classification), 4 digitos.
 #
