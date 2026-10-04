@@ -6,6 +6,9 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 2.7.0 = horizonte de vencimiento a 45 dias con rdlfrom/rdlto (filtro del
+# servidor de SAM.gov, que no se estaba usando), ventana de publicacion a 45
+# dias para poder alcanzarlos, y aviso de truncamiento por totalRecords.
 # 2.6.1 = &nbsp; fuera del resumen de barrido (Telegram lo rechazaba entero),
 # atajo para no pedir descripcion que ya vino, y PTYPE_SAM en config.
 # 2.6.0 = el barrido automatico entrega de verdad (el destino salia como la
@@ -17,7 +20,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.6.1"
+KYOMOTO_VERSION = "2.7.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -81,10 +84,65 @@ GEMINI_MODELES_ALTERNATIVOS = os.getenv(
 # el fin de semana y el lunes siguiente. Los sabados y domingos se publica
 # muy poco, asi que con una ventana corta Kyomoto se quedaria sin nada que
 # mostrarte. El filtro de fecha limite ya descarta los que se cerraron.
-DIAS_DE_VENTANA = _int("DIAS_DE_VENTANA", 10)
-DIAS_POR_CHUNK = _int("DIAS_POR_CHUNK", 3)
+# --- Horizonte de vencimiento (4-oct-2026) -------------------------------
+#
+# Cuanto tiempo hacia adelante se buscan avisos que aun se puedan ofertar.
+# Kyomoto lo pasa a la API como rdlfrom/rdlto, que es un filtro DEL SERVIDOR:
+# antes se pedian todos los avisos de la ventana y se descartaban en el
+# cliente. Ahora es SAM.gov el que devuelve solo los que cierran en plazo.
+#
+# 45 dias, y no mas, por dos razones. La primera es que la cuenta no da para
+# mas: mas plazo significa mirar mas hacia atras (ver DIAS_DE_VENTANA mas
+# abajo) y cada dia de mas son bloques enteros de peticiones contra un tope
+# diario que ya se agota. La segunda es que pasado cierto plazo la
+# oportunidad ya no sirve: un aviso que cierra dentro de dos meses casi nunca
+# se gana sin trabajo previo, y aqui no hay tiempo para ese trabajo.
+#
+# Poner 0 desactiva el filtro de vencimiento y deja el comportamiento
+# anterior, que es filtrar en el cliente. Se deja el valor a mano para poder
+# comparar, no porque sea lo mejor.
+HORIZON_VENCIMIENTO_DIAS = _int("HORIZON_VENCIMIENTO_DIAS", 45)
+
+# --- Ventana de publicacion: tiene que ALCANZAR el horizonte -------------
+#
+# Antes era 10 dias. Con 10 no se ven los avisos de plazo largo: uno con 60
+# dias de plazo publicado hace 15 dias cierra dentro de 30, o sea dentro del
+# horizonte, y Kyomoto no lo miraba porque ya habia salido de la ventana.
+#
+# 45 dias de mira atras cubren plazos de respuesta de hasta 90, que es lo
+# mas largo que se ve en licitaciones complejas. Es la misma cifra que el
+# horizonte por una razon: si el plazo maximo es P, un aviso cierra dentro de
+# HORIZON cuando se publico no antes de hoy-(P-HORIZON), y con P=90 y
+# HORIZON=45 eso son 45 dias atras.
+#
+# OJO, esto NO acorta nada. El filtro de vencimiento es INCLUSIVO: con 45 dias
+# siguen entrando los avisos que cierran en 1, en 3, en 10, en 25 y en 45. El
+# miedo de quedarse solo con la cola lejana no ocurre: rdldesde=hoy y
+# rdlhasta=hoy+45 incluyen todo el intervalo.
+DIAS_DE_VENTANA = _int("DIAS_DE_VENTANA", 45)
+
 LIMITE_POR_CHUNK = _int("LIMITE_POR_CHUNK", 1000)
-MAX_CHUNKS = _int("MAX_CHUNKS", 12)
+DIAS_POR_CHUNK = _int("DIAS_POR_CHUNK", 3)
+
+# Antes 12. Con DIAS_POR_CHUNK=3, 12 bloques solo llegaban a 36 dias de
+# ventana, o sea menos de la que ahora se mira. 20 da margen.
+# OJO: es un tope de peticiones de UNA SOLA VEZ, no por barrido. Despues del
+# primer llenado de cache, esa parte sale de SQLite sin gastar nada. El
+# coste de ampliar la ventana a 45 dias se paga una vez, no cada 2 horas.
+MAX_CHUNKS = _int("MAX_CHUNKS", 20)
+
+# Coherencia entre las dos ventanas. Se comprueba en vez de suponer: si el
+# horizonte se sube sin ampliar la mira atras, el filtro de vencimiento se
+# queda sin avisos a los que llegar en la cola, y no hay forma de verlo en los
+# numeros del barrido, porque el filtro funciona: simplemente nunca trae nada
+# de lejos. Sale en el arranque y dice que hacer.
+if HORIZON_VENCIMIENTO_DIAS > DIAS_DE_VENTANA:
+    import sys as _sys
+    print("[config] AVISO: HORIZON_VENCIMIENTO_DIAS=%d es mayor que "
+          "DIAS_DE_VENTANA=%d. No se podran ver los avisos de plazo largo "
+          "que cierran dentro del horizonte."
+          % (HORIZON_VENCIMIENTO_DIAS, DIAS_DE_VENTANA), file=_sys.stderr)
+
 # Dias de la ventana que SIEMPRE se piden a la API, porque ahi es donde
 # aparecen los avisos nuevos. El resto sale de la cache (SQLite).
 # Con 2 dias vivos y ventana de 10, solo se piden 1 bloque por barrido.

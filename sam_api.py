@@ -62,6 +62,18 @@ class SamError(Exception):
     """Error de la API de SAM.gov con contexto suficiente para diagnosticarlo."""
 
 
+def fin_de_barrido() -> datetime:
+    """
+    El "ahora" del barrido.
+
+    Se llama una vez por barrido y se usa para las dos ventanas, para que la
+    de publicacion y la de vencimiento no se calculen con dos relojes
+    distintos: si cruzara un medianoche entre una y otra, el bloque mas viejo
+    del dia saldría con una fecha de vencimiento que no cuadra con el resto.
+    """
+    return datetime.now(timezone.utc)
+
+
 def _fecha(dt: datetime) -> str:
     """SAM.gov exige MM/DD/YYYY con DIAGONALES. Nunca usar to_native de Windows,
     que en locale es-419 devuelve 09-23-2026 y la API responde 400."""
@@ -72,7 +84,12 @@ def _parse_fecha(valor: str | None) -> datetime | None:
     if not valor:
         return None
     texto = valor.strip()
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"):
+    # MM/DD/YYYY va primero porque es el formato que la API exige EN LAS
+    # PETICIONES (postedFrom, postedTo, rdlfrom, rdlto). Antes no estaba, y
+    # cualquier codigo que leyera de vuelta una de esas fechas recibia None en
+    # silencio: _parse_fecha devolvia None sin error, que es la forma mas
+    # dificil de detectar de un fallo.
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"):
         try:
             dt = datetime.strptime(texto[: len(fmt) + 6], fmt)
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -244,7 +261,19 @@ def throttle(respuesta: requests.Response) -> None:
         log.error("SAM.gov: cuota agotada. Se puede volver a usar en %s", siguiente)
 
 
-def _bloque(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
+def _bloque(desde: datetime, hasta: datetime, ptype: str,
+            rdl_desde: str = "", rdl_hasta: str = "") -> list[dict]:
+    """
+    Un bloque de la ventana, ya acotado por fecha de vencimiento si se puede.
+
+    rdl_desde / rdl_hasta son las fechas MM/DD/YYYY de la ventana de
+    vencimiento. Vacias significan "no mandarlas" y dejan el filtrado en el
+    cliente, que es el comportamiento anterior.
+
+    postedFrom/postedTo NO son opcionales: la API responde 400 si faltan
+    ("User does not provide postedFrom and postedTo values"). Por eso los dos
+    filtros van juntos siempre, y nunca se sustituye uno por el otro.
+    """
     params = {
         "api_key": config.SAM_API_KEY,
         "postedFrom": _fecha(desde),
@@ -254,15 +283,44 @@ def _bloque(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
         "limit": config.LIMITE_POR_CHUNK,
         "ptype": ptype,
     }
+    if rdl_desde and rdl_hasta:
+        params["rdlfrom"] = rdl_desde
+        params["rdlto"] = rdl_hasta
+
     r = _get(params)
     throttle(r)
     datos = r.json()
-    return datos.get("opportunitiesData") or []
+    lote = datos.get("opportunitiesData") or []
+
+    # Truncamiento. offset esta roto (medido: offset=0,1,10 -> 100 registros;
+    # offset=50,99,100,101,500 -> 0), asi que lo que no cabe en limit NO se
+    # puede recuperar con otra llamada. Sin esta comprobacion, un bloque que
+    # se llenara perderia avisos sin que nadie se enterara.
+    #
+    # Con los numeros que ya documenta este modulo (ptype=o,a -> 546 al dia) y
+    # DIAS_POR_CHUNK=3, un bloque son ~1639 registros contra limit=1000: se
+    # perdia un 39% en silencio. El filtro de vencimiento reduce el riesgo,
+    # pero la comprobacion se queda.
+    total = datos.get("totalRecords")
+    try:
+        total = int(total)
+    except (TypeError, ValueError):
+        total = None
+    if total is not None and total > len(lote):
+        log.warning(
+            "Bloque %s..%s truncado: SAM.gov dice %d registros y devolvio %d "
+            "(limit=%d). Los %d que faltan NO se pueden recuperar con offset. "
+            "Bajar DIAS_POR_CHUNK o subir LIMITE_POR_CHUNK.",
+            _fecha(desde), _fecha(hasta), total, len(lote),
+            config.LIMITE_POR_CHUNK, total - len(lote),
+        )
+    return lote
 
 
-def _rango_vivo(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
+def _rango_vivo(desde: datetime, hasta: datetime, ptype: str,
+               rdl_desde: str = "", rdl_hasta: str = "") -> list[dict]:
     """Pide un bloque a la API y lo cachea."""
-    lote = _bloque(desde, hasta, ptype)
+    lote = _bloque(desde, hasta, ptype, rdl_desde, rdl_hasta)
     for opp in lote:
         store.guardar_busqueda(opp)
     return lote
@@ -308,6 +366,18 @@ def barrer(dias: int | None = None, ptype: str | None = None,
     # cualquier llamada, incluida la que se hace desde /escaneo.
     ptype = ptype or config.PTYPE_SAM
 
+    # Ventana de VENCIMIENTO, que es distinta de la ventana de PUBLICACION.
+    # Se calcula una vez por barrido y se pasa a todos los bloques, para que
+    # la API devuelva solo lo que aun se puede ofertar. El filtro es
+    # INCLUSIVO: rdldesde=hoy y rdlhasta=hoy+45 no quitan los cercanos, los
+    # de 1 a 10 dias siguen entrando. Amplia, no acota.
+    horizon = max(0, int(config.HORIZON_VENCIMIENTO_DIAS or 0))
+    if horizon:
+        rdl_desde = _fecha(fin_de_barrido())
+        rdl_hasta = _fecha(fin_de_barrido() + timedelta(days=horizon))
+    else:
+        rdl_desde = rdl_hasta = ""
+
     dias = dias or config.DIAS_DE_VENTANA
     dias = max(dias, config.DIAS_POR_CHUNK)
     dias_vivos = max(config.DIAS_POR_CHUNK, min(config.DIAS_VIVOS, dias))
@@ -339,7 +409,7 @@ def barrer(dias: int | None = None, ptype: str | None = None,
             if desde < desde_antiguo:
                 break
             try:
-                for opp in _rango_vivo(desde, hasta, ptype):
+                for opp in _rango_vivo(desde, hasta, ptype, rdl_desde, rdl_hasta):
                     if emitir(opp, False) is not None:
                         yield opp
                 if stats is not None:
@@ -364,7 +434,7 @@ def barrer(dias: int | None = None, ptype: str | None = None,
         if desde < fin - timedelta(days=dias_vivos):
             break
         try:
-            lote = _rango_vivo(desde, hasta, ptype)
+            lote = _rango_vivo(desde, hasta, ptype, rdl_desde, rdl_hasta)
         except SamError as e:
             log.error("Fallo el bloque %s -> %s: %s", _fecha(desde), _fecha(hasta), e)
             if stats is not None:
