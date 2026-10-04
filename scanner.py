@@ -135,7 +135,12 @@ def _bajar_descripciones(candidatos: list[dict]) -> dict[str, str]:
     _log(f"Bajando {len(pendientes)} descripciones nuevas (SAM.gov tiene tope diario)")
 
     def bajar(o):
-        return o["noticeId"], (sam_api.obtener_descripcion(o["noticeId"]) or "")
+        # Se pasa el aviso entero: si la busqueda ya trajo el texto de la
+        # descripcion, obtener_descripcion lo devuelve sin gastar una
+        # peticion del tope diario. Antes se pedia siempre, y esa peticion es
+        # exactamente el recurso que se agota ("SAM.gov me dijo que me calle").
+        # Con la URL que trae de normal, el comportamiento es identico.
+        return o["noticeId"], (sam_api.obtener_descripcion(o["noticeId"], o) or "")
 
     with ThreadPoolExecutor(max_workers=config.WORKERS) as pool:
         for fut in as_completed({pool.submit(bajar, o): o for o in pendientes}):

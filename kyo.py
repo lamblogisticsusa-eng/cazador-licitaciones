@@ -60,8 +60,24 @@ def resumen_escaneo(r: dict) -> str:
     q = r.get("cuota") or {}
     if q:
         lineas.append("")
+        # El separador va con "\u00b7" y NO con &nbsp;.
+        #
+        # Telegram, con parse_mode=HTML, solo entiende cuatro entidades:
+        # &lt;, &gt;, &amp; y &quot;. Cualquier otra, &nbsp; incluida, hace que
+        # el servidor conteste 400 "can't parse entities: Unsupported entity"
+        # y RECHACE EL MENSAJE ENTERO. No sale un signo raro: no sale nada.
+        #
+        # Aca no se notaba porque main.py envuelve la llamada en un
+        # try/except y reenvia en texto plano, o sea que el mensaje llegaba
+        # igual... con la cadena literal "&nbsp;|&nbsp;" escrita en el chat.
+        # Esa es la version visible del fallo, y es la que se reporto.
+        #
+        # OJO: esto NO aplica a pdf_generator.py, que tambien usa &nbsp;.
+        # Ahi es reportlab, que SI la admite, y la necesita para poner el
+        # telefono y el email en la misma linea. Si se toca ese archivo, el
+        # PDF se rompe en lugar de arreglarse.
         lineas.append(
-            f"🔋 Cuota de hoy: {q.get('usadas', 0)}/{q.get('presupuesto', 0)} &nbsp;|&nbsp; "
+            f"🔋 Cuota de hoy: {q.get('usadas', 0)}/{q.get('presupuesto', 0)} \u00b7 "
             f"quedan <b>{q.get('restantes', 0)}</b>"
         )
     if not viables:

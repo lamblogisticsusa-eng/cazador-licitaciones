@@ -6,6 +6,8 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 2.6.1 = &nbsp; fuera del resumen de barrido (Telegram lo rechazaba entero),
+# atajo para no pedir descripcion que ya vino, y PTYPE_SAM en config.
 # 2.6.0 = el barrido automatico entrega de verdad (el destino salia como la
 # cadena "None"), ficha en formato ejecutivo y 3 distribuidores con su
 # verificacion en un clic.
@@ -15,7 +17,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.6.0"
+KYOMOTO_VERSION = "2.6.1"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -172,6 +174,51 @@ PORT = _int("PORT", 10000)
 # ==========================================================================
 #  CLASIFICACION NAICS
 #
+# --- Que tipos de aviso se piden a la API ------------------------------
+#
+# ptype es el parametro que decide que clases de aviso trae /v2/search. Kyomoto
+# pide estos desde el 30-sep-2026, por medicion y no por suposicion:
+#
+#   "o,a"  (lo que hay ahora)
+#       o = Solicitation. Es lo ofertable: ahi se presenta una propuesta.
+#       a = Award Notice. El contrato YA esta adjudicado. No se puede ofertar.
+#       Volumen medido: 7647 avisos en 14 dias.
+#
+#   "o"    (solo solicitaciones)
+#       o = Solicitation. 2083 avisos en 14 dias. Un 73% menos de volumen.
+#
+# POR QUE EL VALOR POR DEFECTO SIGUE SIENDO "o,a"
+#
+# Se pidio dejar los award fuera. El ahorro es real: 5564 peticiones menos en
+# la misma ventana, contra un tope diario que ya se agota. Y un award
+# adjudicado no es algo a lo que uno se pueda presentar, o sea que quitarlos
+# tampoco quita nada ofertable.
+#
+# En contra hay algo que pesa mas que el ahorro: los award dicen QUE compra el
+# gobierno de verdad, con NSN, cantidades y precios unitarios. Algunos ya
+# pasaron el filtro antes de esto, entre ellos "Award Notice-1ID H2F Office
+# Furniture and Equipment" con puntuacion 10 de 12. Y el cuello de botella que
+# de verdad duele no es el volumen de avisos: es que todavia no ha llegado ni
+# una sola ficha de punta a punta, porque el embudo se queda sin texto antes
+# de llegar a Gemini. Reducir el embudo a ciegas, con el embudo ya en cero,
+# hace mas facil que no llegue nunca.
+#
+# QUE HACER: dejar esto en "o" y mandar /puntajes tras el primer barrido. Si
+# siguen saliendo avisos de producto con puntuacion alta, se queda en "o". Si
+# el ahorro de peticiones compensa que aparezcan menos, se queda en "o,a".
+# Es una linea, no un deshacer commit.
+#
+# Los codigos de SAM.gov, por si hace falta combinarlos:
+#   o = Solicitation                     a = Award Notice
+#   k = Cancelled solicitation           b = Combined synopsis award
+#   c = Combined synopsis (other)        g = Notice of intent to award
+#   i = Industry                         p = Pre-solicitation
+#   u = Sources Sought
+# Los tres "combined" que pide el requerimiento son k, b y c, que se piden
+# juntos como "k,b,c". Ojo: hoy no entran, y no se anaden porque cambian lo
+# que el bot ve. Se dejan aqui anotados para cuando se decida medido.
+PTYPE_SAM = "o,a"
+
 #  Datos reales medidos en SAM.gov (muestra de 14 dias, ptype=o, 1000 avisos):
 #    541 (IT / servicios)            -> 15%   EXCLUIR
 #    236/237/238 (construccion)       -> 18%   EXCLUIR

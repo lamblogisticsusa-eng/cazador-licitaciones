@@ -162,8 +162,56 @@ def _get(params: dict, reintentos: int | None = None) -> requests.Response:
     raise ultima or SamError("Fallo desconocido")
 
 
-def obtener_descripcion(notice_id: str) -> str:
-    """Texto real de la oportunidad. Devuelve "" si falla (no revienta el escaneo)."""
+def _descripcion_interna(opp: dict) -> str:
+    """
+    Texto que YA venia en la respuesta de la busqueda, si lo hubo.
+
+    La documentacion del modulo (medido contra la API real en septiembre de
+    2026) dice que `description` de /v2/search NO trae texto: trae una URL a
+    /v1/noticedesc. Pero eso es lo que se vio entonces, no una garantia del
+    contrato: si un dia la busqueda devuelve el texto ya dentro, seguir
+    pidiendo noticedesc seria gastar una peticion del tope diario por aviso
+    para volver a leer lo que ya teniamos en la mano.
+
+    Por eso se comprueba antes de pagar la llamada. Cuando la busqueda trae
+    una URL (lo normal), se devuelve "" y el llamador sigue el camino de
+    siempre, que es el que funciona. Cuando trae texto de verdad, se devuelve
+    ese y se ahorra la peticion.
+
+    La distincion se hace por forma: una URL empieza por http. Un texto real
+    no. Es una heuristica, no una garantia, asi que el criterio es
+    conservador: si hay duda, se pide igual.
+    """
+    bruto = str(opp.get("description") or "").strip()
+    if not bruto:
+        return ""
+    if bruto.lower().startswith("http"):
+        return ""
+    return limpiar_html(bruto)[: config.MAX_CHARS_DESCRIPCION]
+
+
+def obtener_descripcion(notice_id: str, opp: dict | None = None) -> str:
+    """
+    Texto real de la oportunidad. Devuelve "" si falla (no revienta el escaneo).
+
+    Ya devuelve "" cuando no hay descripcion, que es lo que pedia el
+    requerimiento: el ciclo de barrido no se frena ni se reintenta. Lo que no
+    habia era el atajo de arriba: si la busqueda ya trajo el texto, no hay
+    que gastarse una peticion del tope diario en volver a pedirlo.
+
+    NO se anade un segundo endpoint (/opportunityApi/v1/resources) a proposito.
+    Ahi no hay descripciones: hay adjuntos, y sus nombres de archivo ("QRA_
+    5345B_Contract.pdf") no alcanzan para que Gemini calcule costo por unidad
+    ni margen. Medido el 29-sep-2026: el 53% de los avisos responden 404 en
+    noticedesc, y anadir una llamada por cada uno multiplicaria ese gasto
+    contra un tope diario que ya se agota ("SAM.gov me dijo que me calle"),
+    para traer menos informacion que la que ya se tiene. Si algun dia hace
+    falta, tiene que ir con un flag y medirse, no por defecto.
+    """
+    if opp is not None:
+        ya_venia = _descripcion_interna(opp)
+        if ya_venia:
+            return ya_venia
     try:
         r = _get({"api_key": config.SAM_API_KEY, "noticeid": notice_id}, reintentos=2)
         if r.status_code != 200:
@@ -220,7 +268,8 @@ def _rango_vivo(desde: datetime, hasta: datetime, ptype: str) -> list[dict]:
     return lote
 
 
-def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = None) -> Iterator[dict]:
+def barrer(dias: int | None = None, ptype: str | None = None,
+          stats: dict | None = None) -> Iterator[dict]:
     """
     Trae la ventana de fechas con FETCHING INCREMENTAL.
 
@@ -253,6 +302,11 @@ def barrer(dias: int | None = None, ptype: str = "o,a", stats: dict | None = Non
             f"SAM.gov tiene el tope diario de peticiones alcanzado. "
             f"Vuelve a las {_proximo_acceso}."
         )
+
+    # El tipo de aviso sale de config, con el valor medido. Antes era un
+    # literal "o,a" en la firma; ahora se cambia en un sitio y vale para
+    # cualquier llamada, incluida la que se hace desde /escaneo.
+    ptype = ptype or config.PTYPE_SAM
 
     dias = dias or config.DIAS_DE_VENTANA
     dias = max(dias, config.DIAS_POR_CHUNK)
