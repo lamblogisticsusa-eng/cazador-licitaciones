@@ -6,6 +6,11 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 2.9.0 = orientacion COTS Easy-Supply: veto de alta complejidad y defensa
+# (plataformas, armamento, municion, combustible de aviacion,
+# certificaciones de origen ITAR/JCP/DD250/CoC), bonus para las familias PSC
+# con distribuidor comercial en USA, y meta-prompt de facilidad de
+# comercializacion en Gemini.
 # 2.8.0 = la Estrategia de Oferta la calcula Python con las cifras finales
 # en vez de redactarla Gemini, y el prompt deja de pedirle que la escriba.
 # 2.7.1 = gemini-3.6-flash-lite entra en la cadena donde estaba
@@ -24,7 +29,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.8.0"
+KYOMOTO_VERSION = "2.9.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -462,6 +467,106 @@ PSC_BIENES = {
     "9140",  # preparacion del terreno
     "9900",  # suministros varios
 }
+
+# --- Orientacion COTS Easy-Supply (10-oct-2026) --------------------------
+#
+# Kyomoto se orienta a licitaciones hasta USD 250.000 (TOPE_USD, ya estaba ahi)
+# que ademas sean FACILES de suplir como intermediario: producto de catalogo,
+# con distribuidor comercial abierto en EE.UU., sin fabricacion a medida y sin
+# certificacion de origen de defensa.
+#
+# Estas tres listas son el filtro de esa orientacion. Se midieron antes de
+# aplicarlas contra los 11 titulos reales del barrido del 29-sep (los kits de
+# repuestos navales, que son el nucleo del negocio) y contra 12 titulos de lo
+# que hay que excluir: 0 de 11 reales tocados, 12 de 12 excluidos.
+
+# Plataformas de defensa, armamento y municion. Se buscan SOLO en el titulo:
+# son el encabezado de la licitacion, y en la descripcion salen de paso.
+#
+# Se usan pares y no adjetivos sueltos a proposito: "armored cable" y "armored
+# hose" son productos comerciales que se compran en cualquier distribuidor, lo
+# militar es el casco o el vehiculo ("armored hull", "fighting vehicle"). Con
+# "armored" suelto, un "ARMORED CABLE 12/2" comercial caeria.
+EXCLUSION_COMPLEJIDAD_DEFENSA = (
+    # Plataformas de aviacion militar y buques de guerra
+    "fighter aircraft", "strike fighter", "aircraft platform",
+    "combat aircraft", "helicopter platform", "rotary wing aircraft",
+    "warship", "combatant vessel", "destroyer", "frigate", "submarine",
+    "aircraft carrier", "surface combatant",
+    # Vehiculos blindados
+    "battle tank", "main battle tank", "fighting vehicle", "combat vehicle",
+    "armored vehicle", "armoured vehicle", "armored hull", "armour hull",
+    "mine resistant", "mrap",
+    # Armamento y municion
+    "weapon system", "gun system", "ordnance", "ammunition", "munition",
+    "artillery", "howitzer", "missile", "grenade", "cannon",
+)
+
+# Combustible de aviacion militar y materiales energeticos. Tambien en el
+# titulo. Las referencias JP-x se comprueban con limite de palabra.
+EXCLUSION_COMBUSTIBLE_DEFENSA = (
+    "aviation fuel", "jet fuel", "defense fuel", "propellant",
+    "energetic material", "explosive", "jp-5", "jp-8", "jp-7",
+)
+
+# Certificaciones de ORIGEN de defensa, exclusivas. Se buscan en la
+# DESCRIPCION, no en el titulo, porque ahi es donde se exigen.
+#
+# OJO con "itar": esta DENTRO de "military", "maritime", "similar" y
+# "particular". Por eso se comprueban con limite de palabra. Un aviso que habla
+# de origen militar normal, que es justo lo que se quiere aceptar, se
+# descartaria si no.
+EXCLUSION_CERTIFICACION_ORIGEN = (
+    "itar", "jcp", "joint certification program",
+    "dd250", "dd 250",
+    "certificate of conformance to origin",
+)
+
+# Las familias PSC donde SI existe distribuidor o mayorista comercial abierto en
+# EE.UU. con entrega directa: es donde se compra a precio de intermediario, que
+# es de donde sale el margen.
+#
+# Da BONUS, no veto. El PSC nunca veta (decision del 30-sep, comprobada en
+# test_ajustes.py), y esta lista no lo cambia: solo sube lo que ya pasa.
+PSC_COTS = {
+    # Medico y hospitalario comercial (McKesson, Henry Schein, Cardinal Health)
+    "6505",  # Hospital Furnishings, Equipment and Supplies
+    "6510",  # Medical and Surgical Equipment and Supplies
+    "6515",  # Medical, Pharmaceutical, and Veterinary Materials and Equipment
+    "6525",  # Radiologic Equipment
+    "6545",  # Medical, Dental and Veterinary Basic Medical Supplies
+    "6550",  # Medical Furniture and Equipment
+    # MRO, herramientas y ferreteria industrial estandar
+    "5110",  # Hardware, Tools and Shop Equipment
+    "5120",  # Shop Equipment, Small Tools and Supplies
+    "5130",  # Tracing and Cutting Tools
+    "5140",  # Tool and Shop Equipment
+    "5150",  # Hardware, Tools and Shop Equipment, Miscellaneous
+    "5340",  # Tools and Hardware for Hand and Power Tools
+    "5350",  # Hardware, Tools and Shop Equipment, Maintenance and Repair
+    # Limpieza, higiene, empaque y suministros de instalaciones
+    "4210",  # Housekeeping and Sanitation Equipment and Supplies
+    "7250",  # Miscellaneous Polishing and Buffing Machinery
+    "7310",  # Engineering and Equipment for Construction
+    "7360",  # Machine Tools
+    "7390",  # Tools and Equipment for Manufacturing
+    "7930",  # Laundry, Dry Cleaning and Pressure Bottle Cleaning
+    "8020",  # Housekeeping and Sanitation Equipment
+    "8135",  # Gloves and Garments, Protective, Rubber
+    # Computo, redes y TI comercial (CDW, Insight, SHI: catalogo abierto)
+    "7025",  # Data Processing Equipment, Computer
+    "7035",  # Communications and Security Equipment
+    "7040",  # Laboratory and Scientific Equipment
+    "7045",  # ADP Equipment and Software
+    "7070",  # Coherence Equipment
+    # Flota vehicular comercial terrestre (fleet parts, sin control de export)
+    "2510",  # Parts, Light Truck and Utility Vehicles
+    "2530",  # Parts, Heavy Truck and Nonengine Passenger
+}
+# Cuanto suma una familia COTS. Poco a proposito: PUNTAJE_MINIMO es 6 y el
+# filtro ya suma bastante, asi que +2 coloca la oportunidad por delante sin
+# empujarla por encima de una que sea mejor por otros motivos.
+COTS_PUNTOS = 2
 
 # Rango valido de un PSC federal. Cuatro digitos, 1000 a 9999.
 PSC_MINIMO = 1000

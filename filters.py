@@ -101,6 +101,40 @@ def _es_psc_producto(psc: str) -> bool:
     return config.PSC_MINIMO <= int(psc) <= config.PSC_MAXIMO
 
 
+# --- Exclusiones COTS Easy-Supply (10-oct-2026) ---------------------------
+#
+# Compiladas aqui, una vez al cargar el modulo, no en cada aviso: el filtro
+# corre para cientos por barrido y no tiene sentido abrir un regex por aviso.
+#
+# Y llevan LIMITE DE PALABRA las siglas cortas. No por estetica: "itar" esta
+# DENTRO de "military", "maritime", "similar" y "particular". Con `in` a secas,
+#
+#     Material must be of military CoC origin, strictly certified.
+#
+# matchea "itar" por el "milITARy" y descarta un aviso que habla de origen
+# militar NORMAL, que es justo de los que hay que aceptar.
+#
+# La alternancia va de mas largo a mas corto porque en regex el orden importa:
+# "dd 250" tiene que probarse antes que "dd".
+import re as _re_cots
+
+
+def _compilar_cots(palabras):
+    ordenadas = sorted({p.strip().lower() for p in palabras if p and p.strip()},
+                       key=len, reverse=True)
+    if not ordenadas:
+        return _re_cots.compile(r"(?!x)x")          # nunca matchea
+    cuerpo = "|".join(_re_cots.escape(p) for p in ordenadas)
+    return _re_cots.compile(r"(?:\b(?:" + cuerpo + r")\b)")
+
+
+_RE_DEFENSA = _compilar_cots(config.EXCLUSION_COMPLEJIDAD_DEFENSA)
+_RE_COMBUSTIBLE = _compilar_cots(config.EXCLUSION_COMBUSTIBLE_DEFENSA)
+_RE_ORIGEN = _compilar_cots(config.EXCLUSION_CERTIFICACION_ORIGEN)
+
+# La etiqueta que se pide en el log de descarte.
+TAG_ALTA_COMPLEJIDAD = "high_complexity_defense"
+
 def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     """
     Devuelve (puntaje, motivos). Los motivos se muestran en /debug para que
@@ -160,6 +194,44 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
             return -100, [f"{s_titulo} terminos de servicio en el titulo, veto automatico"]
         puntos -= min(hits_serv * 2, 8)
         motivos.append(f"-{min(hits_serv * 2, 8)} por {hits_serv} termino(s) de servicio")
+
+    # --- Exclusiones COTS Easy-Supply ---
+    #
+    # Plataformas de defensa, armamento, municion y combustible: SOLO en el
+    # titulo. Son el encabezado de la licitacion; en la descripcion salen de
+    # pasada, y ahi un sello EPDM para una bomba naval acabaria descartado por
+    # mencionar la marina.
+    #
+    # Medido antes de aplicar: 0 de los 11 titulos reales del barrido del
+    # 29-sep (los kits de repuestos navales, que son el nucleo del negocio) se
+    # tocan, y los 12 titulos de ejemplo que si hay que excluir caen todos.
+    _m = _RE_DEFENSA.search(titulo)
+    if _m:
+        return -100, [f"{TAG_ALTA_COMPLEJIDAD}: {titulo.strip()[:50]} "
+                      f"({_m.group(0).strip()})"]
+    _m = _RE_COMBUSTIBLE.search(titulo)
+    if _m:
+        return -100, [f"{TAG_ALTA_COMPLEJIDAD}: {titulo.strip()[:50]} "
+                      f"({_m.group(0).strip()})"]
+
+    # Certificaciones de ORIGEN de defensa: SOLO en la descripcion, que es donde
+    # se exigen; en el titulo casi nunca salen. Con limite de palabra, porque
+    # "itar" esta dentro de "military".
+    if descripcion:
+        _m = _RE_ORIGEN.search(descripcion.lower())
+        if _m:
+            return -100, [f"{TAG_ALTA_COMPLEJIDAD}: certificacion de origen "
+                          f"exclusiva de defensa ({_m.group(0).strip()})"]
+
+    # --- Prioridad Easy-Supply ---
+    # Familias PSC donde hay distribuidor comercial abierto en EE.UU. Suma, NO
+    # veta: el PSC nunca ha vetado en Kyomoto (decision del 30-sep que
+    # test_ajustes.py fija) y esto no la revierte.
+    _psc = str(opp.get("classificationCode") or "").strip()
+    if _psc in config.PSC_COTS:
+        puntos += config.COTS_PUNTOS
+        motivos.append(f"PSC {_psc} = producto COTS con distribuidor "
+                       f"comercial en USA (+{config.COTS_PUNTOS})")
 
     # --- Base de trabajo ---
     if "supplies" in titulo or "materials" in titulo or "equipment" in titulo:

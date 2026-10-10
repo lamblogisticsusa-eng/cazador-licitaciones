@@ -22,6 +22,54 @@ log = logging.getLogger("kyomoto.scanner")
 # Errores que no son culpa de Gemini y hay que reportar aunque el escaneo continue.
 FALLOS_IGNORADOS = ()
 
+# Cuantos avisos se han descartado por veto, y con que motivo. Vive aqui y
+# no en el return porque el veto se aplica en dos sitios distintos (el
+# pre-puntaje por titulo y el bucle con descripcion) y los dos son codigo
+# suelto dentro de escanear(): leer la cuenta despues desde puntuadas daria
+# cero siempre, porque los vetados nunca llegan a puntuadas.
+DESCARTE_POR_MOTIVO: dict[str, int] = {}
+
+# Avisos ya contados en ESTE barrido.
+#
+# Hace falta porque cada aviso se puntua DOS veces: el pre-puntaje por titulo,
+# que corre antes de bajar descripciones porque bajar una cuesta una peticion,
+# y luego el bucle principal con la descripcion ya en la mano. Sin esta
+# memoria, un veto que se dispara en los dos sitios suma dos.
+#
+# Medido con un catalogo de 12 avisos de los que 4 eran de defensa: el filtro
+# estaba bien (pasaban 8, los 8 buenos) pero el log decia 8 descartes en vez
+# de 4. Un contador que duplica es peor que uno que no existe, porque es el
+# numero con el que se decide si el filtro funciona o esta comiendose el
+# catalogo.
+_DESCARTE_VISTOS: set[str] = set()
+
+
+def limpiar_descarte() -> None:
+    """Empieza un barrido nuevo con la cuenta a cero."""
+    DESCARTE_POR_MOTIVO.clear()
+    _DESCARTE_VISTOS.clear()
+
+
+def _contar_descarte(motivos: list, notice_id: str = "") -> None:
+    """
+    Suma una unidad al motivo de veto que corresponda, UNA vez por aviso.
+
+    Idempotente: llamarla dos veces con el mismo notice_id no suma la segunda.
+    """
+    nid = str(notice_id or "").strip()
+    if nid and nid in _DESCARTE_VISTOS:
+        return
+    if nid:
+        _DESCARTE_VISTOS.add(nid)
+    for m in motivos:
+        if m.startswith("-100") or ": " in m:
+            _clave = m.split(":")[0].strip()
+            if "veto" in m or "high_complexity" in m or "sin titulo" in m \
+                    or "Fecha limite" in m or "NAICS" in m:
+                DESCARTE_POR_MOTIVO[_clave] = \
+                    DESCARTE_POR_MOTIVO.get(_clave, 0) + 1
+            return
+
 
 def _log(txt: str) -> None:
     print(f"{datetime.now().strftime('%H:%M:%S')} {txt}", flush=True)
@@ -160,6 +208,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     Corrige un barrido completo. Never lanza: devuelve un resumen con
     'errores' para que main.py pueda avisarle al usuario.
     """
+    limpiar_descarte()
     dias = dias or config.DIAS_DE_VENTANA
     # Si alguien usa el scanner sin pasar por main(), las tablas pueden no
     # existir. Es idempotente y barato, asi que se asegura aqui.
@@ -177,6 +226,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         "detalle_puntajes": [],
         "analisis": [],
         "cuota": {},
+        "descarte_motivo": {},
     }
 
     def avisar(texto: str) -> None:
@@ -209,9 +259,11 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     # candidatos que de verdad parecen producto.
     provisionales = []
     for opp in candidatas:
-        p, _ = filters.puntuar(opp, "")
+        p, _m = filters.puntuar(opp, "")
         if p >= config.PUNTAJE_MINIMO:
             provisionales.append((p, opp))
+        else:
+            _contar_descarte(_m, opp.get("noticeId", ""))
     provisionales.sort(key=lambda x: x[0], reverse=True)
 
     # Cuantas descripciones bajar. Antes era MAX_DESCRIPCIONES (40) en cada
@@ -263,6 +315,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         desc = descripciones.get(opp["noticeId"], "")
         puntos, motivos = filters.puntuar(opp, desc)
         if puntos < config.PUNTAJE_MINIMO:
+            _contar_descarte(motivos, opp.get("noticeId", ""))
             continue
 
         # El tope de USD se aplica AQUI, con los datos que ya tenemos, para no
@@ -315,6 +368,14 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     _log(f"Pasan el filtro: {len(puntuadas)} (de {len(candidatas)})")
     for p, o, _, _ in puntuadas[:8]:
         _log(f"   [{p:>3}] {o.get('title', '')[:78]}")
+
+    # Los descartes por alta complejidad / defensa, con la etiqueta pedida.
+    _alta = DESCARTE_POR_MOTIVO.get("high_complexity_defense", 0)
+    if _alta:
+        _log(f"[DROPPED] high_complexity_defense: {_alta} licitacion(es) "
+             f"descartadas por plataforma militar, buque de guerra, vehiculo "
+             f"blindado, armamento, municion, combustible de aviacion o "
+             f"certificacion de origen exclusiva de defensa")
 
     if not puntuadas:
         return resumen
@@ -492,6 +553,8 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             resumen["errores"].append(
                 f"No se pudo notificar {str(a.get('notice_id'))[:8]}"
             )
+
+    resumen["descarte_motivo"] = dict(DESCARTE_POR_MOTIVO)
 
     if fallos_gemini:
         # Esto es lo que el codigo original se tragaba en silencio.

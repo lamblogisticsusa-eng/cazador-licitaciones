@@ -61,6 +61,10 @@ ESQUEMA = {
     "precio_oferta_sugerido_usd": "num|null",
     # --- Como se consigue ese margen ---
     "estrategia_oferta": "str",
+    # Facilidad de suplido como intermediario. Nuevo el 10-oct-2026.
+    "facilidad_comercializacion":
+        "OPORTUNIDAD COTS ALTA PROBABILIDAD|COTS|NO APTA",
+    "motivo_facilidad": "str",
     "margen_por_distribuidor": "str",
     "busquedas_distribuidores": "[str]",
     "query_google_proveedores": "str",
@@ -472,6 +476,41 @@ SI ES VIABLE, ENTREGA:
                                  - fabricante directo: 25-35% bruto
                                  Di explicitamente cual conviene para ESTE
                                  producto y por que.
+  facilidad_comercializacion  : evalua la FACILIDAD DE COMERCIALIZACION, es
+                                  decir si este producto se puede suplir
+                                  como intermediario/distribuidor comercial en
+                                  EE.UU., que es el negocio de L.A.M.B.:
+                                    - NO APTA: requiere fabricacion a medida,
+                                      trazabilidad aeroespacial militar o
+                                      licencias especiales de defensa (ITAR,
+                                      JCP, DD250, certificado de origen
+                                      estricto). Ejemplos: pernos y-sheet de
+                                      titanio aeroespacial con cadena de
+                                      custodia, "unico proveedor aprobado",
+                                      planos del cliente.
+                                    - OPORTUNIDAD COTS ALTA PROBABILIDAD: se
+                                      puede cotizar y adquirir mediante
+                                      distribuidores o mayoristas comerciales
+                                      estandar en EE.UU. con entrega directa.
+                                      Ejemplos: guantes nitrilo, sellos
+                                      EPDM, filtros, herramientas, laptops,
+                                     Retry jabones y suministros de
+                                      limpieza.
+                                    - COTS: esta a medio camino, se compra
+                                      en un distribuidor pero con alguna
+                                 una condicion (cantidad minima alta,
+                                      una medida o Norma especial, entrega
+                                      solo a contratistas).
+                                  Elige UNA de las tres, en mayusculas y
+                                  sin explicar mas en este campo.
+
+  motivo_facilidad            : 1 frase de POR QUE has elegido esa etiqueta.
+                                  Sin esto, el modelo elige entre las tres sin
+                                  explicar y no hay forma de comprobar si ha
+                                  entendido el criterio. Si el producto es
+                                  NO APTA por una certificacion de origen,
+                                  nombrala aqui.
+
   nivel_riesgo                  : bajo | medio | alto
   preguntas_criticas            : 3-5 preguntas que DEBO hacer antes de ofertar
   observaciones                 : 1-2 frases de advertencia
@@ -494,6 +533,8 @@ Ejemplo, bidding 50 laptops:
   "margen_bruto_porcentaje": 9.1,
   "costo_factoring_usd": 2310, "margen_neto_porcentaje": 5.6,
   "precio_oferta_sugerido_usd": 66000,
+  "facilidad_comercializacion": "OPORTUNIDAD COTS ALTA PROBABILIDAD",
+  "motivo_facilidad": "Laptop de catalogo: se compra a CDW o Insight sin condiciones y con entrega en 5 dias.",
   "busquedas_distribuidores": ["Dell Latitude 5450 wholesale distributor usa"],
     "query_google_proveedores": "laptop dell latitude 5450 wholesale distributor usa",
   "distribuidores_candidatos": [
@@ -868,6 +909,8 @@ def analizar(
         # dice no puede ser correcto, porque sus cifras se corrigen mas arriba
         # (L792-815). La frase se arma con oferta_final y valor, que son
         # exactamente los numeros que salen en la ficha.
+        "facilidad_comercializacion": _facilidad(datos.get("facilidad_comercializacion")),
+        "motivo_facilidad": _limpiar_ia(datos.get("motivo_facilidad"))[:250],
         "estrategia_oferta": estrategia,
         "razonamiento_oferta": estrategia,
         "busquedas_distribuidores": _lista(datos.get("busquedas_distribuidores")),
@@ -894,6 +937,56 @@ def analizar(
         "ui_link": opp.get("uiLink", ""),
         "title": opp.get("title", ""),
     }
+
+
+# Las tres categorias de facilidad de comercializacion. El orden va de la
+# mas especifica a la menos especifica, y no es estetico: "COTS" esta DENTRO de
+# "OPORTUNIDAD COTS ALTA PROBABILIDAD". Si se probara "COTS" primero, TODO
+# acabaria como COTS y se perderia la distincion entre la mejor categoria y la
+# intermedia, que es justo lo que el usuario necesita para priorizar.
+_FACILIDADES = (
+    "OPORTUNIDAD COTS ALTA PROBABILIDAD",
+    "COTS",
+    "NO APTA",
+)
+
+# El rasgo que distingue cada una. Se busca el rasgo y no la etiqueta entera
+# porque el modelo no siempre devuelve la etiqueta literal: a veces omite
+# "OPORTUNIDAD", a veces en minusculas, a veces con un punto o un guion al
+# final. Medido:
+#
+#     "COTS ALTA PROBABILIDAD"  -> con etiqueta entera daba "COTS"   <- mal
+#     "cots alta probabilidad"  -> con etiqueta entera daba "COTS"   <- mal
+#
+# Con rasgo, los dos dan la categoria correcta. El orden es de mas especifica
+# a menos especifica: "NO APTA" primero, "ALTA PROBABILIDAD" despues, y
+# "COTS" al final porque es la mas ambigua y esta contenida en las otras dos.
+_RASGOS = (
+    ("NO APTA", "NO APTA"),
+    ("ALTA PROBABILIDAD", "OPORTUNIDAD COTS ALTA PROBABILIDAD"),
+    ("COTS", "COTS"),
+)
+
+
+def _facilidad(valor) -> str:
+    """
+    Normaliza la etiqueta de facilidad de comercializacion.
+
+    El modelo la devuelve en formatos variaciones (minusculas, con guiones, y a
+    veces sin la palabra "OPORTUNIDAD" delante). Sin normalizar, eso acabaria
+    en la ficha como texto suelto que el usuario no sabe interpretar.
+
+    Se decide por el rasgo distintivo de cada categoria. Ante una etiqueta que
+    no sea ninguna de las tres se devuelve "COTS", que es el valor intermedio:
+    ni se pierde la oportunidad ni se promete alta probabilidad sin pruebas.
+    """
+    texto = str(valor or "").strip().upper()
+    if not texto:
+        return "COTS"
+    for rasgo, etiqueta in _RASGOS:
+        if rasgo in texto:
+            return etiqueta
+    return "COTS"
 
 
 def calcular_estrategia_oferta(presupuesto, precio_ofertar) -> tuple[str, float | None]:
