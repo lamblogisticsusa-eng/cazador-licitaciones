@@ -18,10 +18,21 @@ if not os.environ.get("GEMINI_API_KEY"):
 
 from google import genai
 
+# Los candidatos, con un MODELO_MALO al final a proposito: "gemini-flash-lite"
+# no existe y sirve de control. Si un dia la API empiezan a responder a un
+# modelo inexistente, ese control deja de servir y hay que poner otro.
+#
+# OJO: esta lista es de SONDEO, no la cadena de respaldo. Aqui van todos los
+# candidatos, viejos incluidos, porque el objeto es descubrir cuales existen y
+# tienen cuota. Los que ya no se usan en Kyomoto se pueden quitar de
+# config.GEMINI_MODELES_ALTERNATIVOS y seguir estando aqui.
 MODELOS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
+    # Entro el 10-oct-2026 en la cadena de respaldo. Hay que confirmar que
+    # existe y que responde, que es justo lo que hace este script.
+    "gemini-3.6-flash-lite",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
     "gemini-flash-latest",

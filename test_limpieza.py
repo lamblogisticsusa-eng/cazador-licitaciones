@@ -102,7 +102,46 @@ check("Y va primero: es el mas rapido y el que menos se satura",
 check("NO incluye gemini-flash-lite, que no existe",
       "gemini-flash-lite" not in alternos)
 check("No hay entradas vacias", all(m for m in config.GEMINI_MODELES_ALTERNATIVOS))
-check("La version subio a 2.7.0", config.KYOMOTO_VERSION == "2.7.0",
+
+# --- El 3.5-flash suelto (10-oct-2026) ---
+#
+# Se cambio por gemini-3.6-flash-lite. Estas comprobaciones existen porque el
+# cambio era peligroso de hacer mal y hay dos formas de hacerlo mal que las
+# pruebas de arriba NO cazan:
+#
+# 1) Un reemplazo de texto plano de "gemini-3.5-flash" por "gemini-3.6-flash"
+#    convierte TAMBIEN "gemini-3.5-flash-lite", porque el nombre del lite
+#    contiene al otro como subcadena. El -lite es el primero de la lista y el
+#    que menos se satura, asi que perderlo se nota un dia de corte.
+#    Por eso se comprueba que el -lite SIGUE INTACTO.
+#
+# 2) Poner "gemini-3.6-flash" en el hueco habria creado un alterno igual al
+#    principal. Como la cuota es por modelo y por dia, reintentar un 429 del
+#    mismo modelo vuelve a fallar: hueco inutil. El hueco tiene que ser un
+#    modelo DISTINTO del principal, que es lo que comprueba la tercera linea.
+check("El hueco ya no es gemini-3.5-flash", "gemini-3.5-flash" not in alternos,
+      f"-> sigue: {[a for a in alternos if a == 'gemini-3.5-flash']}")
+check("Y en su lugar esta gemini-3.6-flash-lite",
+      "gemini-3.6-flash-lite" in alternos,
+      "-> falta 3.6-flash-lite")
+check("El -lite de 3.5 SIGUE INTACTO: es el primero y no se renombro",
+      alternos and alternos[0] == "gemini-3.5-flash-lite"
+      and "gemini-3.6-flash-lite" in alternos,
+      f"-> primero: {alternos[0] if alternos else 'vacia'}")
+check("Ningun alterno repite al principal",
+      all(a != principal for a in alternos),
+      f"-> repiten: {[a for a in alternos if a == principal]}")
+check("Y no hay ningun alterno repetido entre si",
+      len(set(alternos)) == len(alternos),
+      f"-> duplicados: {[a for a in set(alternos) if alternos.count(a) > 1]}")
+check("Cada nombre es un modelo distinto de verdad (no subcadena de otro)",
+      not any(a != b and a.startswith(b.rsplit("-", 1)[0])
+              for a in alternos for b in alternos),
+      "-> hay un -lite junto a su modelo base")
+check("Siguen siendo al menos cinco modelos usables",
+      len({principal} | set(alternos)) >= 5,
+      f"-> {len({principal} | set(alternos))}")
+check("La version subio a 2.7.1", config.KYOMOTO_VERSION == "2.7.1",
       f"-> {config.KYOMOTO_VERSION}")
 
 print()

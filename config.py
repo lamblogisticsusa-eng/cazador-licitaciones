@@ -6,6 +6,8 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 2.7.1 = gemini-3.6-flash-lite entra en la cadena donde estaba
+# gemini-3.5-flash, en render.yaml y .env.example tambien.
 # 2.7.0 = horizonte de vencimiento a 45 dias con rdlfrom/rdlto (filtro del
 # servidor de SAM.gov, que no se estaba usando), ventana de publicacion a 45
 # dias para poder alcanzarlos, y aviso de truncamiento por totalRecords.
@@ -20,7 +22,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.7.0"
+KYOMOTO_VERSION = "2.7.1"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -73,10 +75,31 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 #
 # Va primero porque es el mas rapido (0,7s medidos) y el que menos se satura:
 # casi nadie lo usa, asi que su cuota aguanta mas.
+#
+# gemini-3.6-flash-lite entra el 10-oct-2026 donde estaba gemini-3.5-flash, con
+# el principal ya en gemini-3.6-flash. OJO CON POR QUE NO SE RENOMBRO A SECO:
+#
+# "gemini-3.5-flash" esta DENTRO de "gemini-3.5-flash-lite" como subcadena, asi
+# que un reemplazo de texto plano convertia tambien el -lite de la primera
+# posicion. Ese es el mas rapido y el que menos se satura, y fue el UNICO con
+# cuota libre durante el corte del 29-sep. No se toca.
+#
+# Y tampoco vale con cambiar solo el 3.5-flash suelto por gemini-3.6-flash: el
+# principal ya es ese, asi que el hueco habria reintentado el mismo modelo que
+# acababa de dar 429. Como la cuota es por modelo y por dia, ese reintento
+# vuelve a fallar siempre: hueco inutil. Con 3.6-flash-lite es un modelo
+# DISTINTO, o sea cobertura de verdad.
+#
+# Si 3.6-flash-lite no existiera para esta cuenta, el 404 lo salta solo y la
+# cadena sigue con el siguiente (gemini_analyzer.py lo hace, y deja el nombre
+# en la lista de incompatibles). No rompe el barrido.
+#
+# Para comprobar que responde y que cuota tiene:
+#     python sondear_modelos.py
 GEMINI_MODELES_ALTERNATIVOS = os.getenv(
     "GEMINI_MODELES_ALTERNATIVOS",
     "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-flash-latest,"
-    "gemini-3.5-flash,gemini-3.7-flash",
+    "gemini-3.6-flash-lite,gemini-3.7-flash",
 ).replace(" ", "").split(",")
 
 # --- Ventana de busqueda en SAM.gov ---
