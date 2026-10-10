@@ -6,6 +6,8 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 2.8.0 = la Estrategia de Oferta la calcula Python con las cifras finales
+# en vez de redactarla Gemini, y el prompt deja de pedirle que la escriba.
 # 2.7.1 = gemini-3.6-flash-lite entra en la cadena donde estaba
 # gemini-3.5-flash, en render.yaml y .env.example tambien.
 # 2.7.0 = horizonte de vencimiento a 45 dias con rdlfrom/rdlto (filtro del
@@ -22,7 +24,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.7.1"
+KYOMOTO_VERSION = "2.8.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:

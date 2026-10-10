@@ -696,10 +696,23 @@ def formatear_analisis(a: dict) -> str:
     # ese numero, y separarla obligaba a saltar de un bloque a otro.
     _expl = (a.get("razonamiento_oferta") or a.get("estrategia_oferta") or "").strip()
     L.append("🎯 <b>Estrategia de oferta</b>")
-    _linea = f'· Ofertar a <b>{_usd_texto(a["precio_oferta_sugerido_usd"])} USD</b>'
-    if _expl:
-        _linea += f" ({_esc(_expl[:300])})"
-    L.append(_linea)
+    # La frase de estrategia la calcula Python y empieza por "Ofertar a X USD",
+    # con el precio dentro (ver gemini_analyzer.calcular_estrategia_oferta). Si
+    # ademas la plantilla antepone su propio "Ofertar a X USD", el precio sale
+    # dos veces seguidas:
+    #
+    #   Ofertar a $74,500.00 USD (Ofertar a 74,500.00 USD. Con este monto...)
+    #
+    # Cuando la explicacion ya trae el precio, se muestra ella sola. El texto
+    # del modelo antes no lo traia y por eso se anteponia; ahora la logica es
+    # la misma pero se detecta en vez de suponer.
+    if _expl.lower().startswith("ofertar a"):
+        L.append(_esc(_expl[:300]))
+    else:
+        _linea = f'· Ofertar a <b>{_usd_texto(a["precio_oferta_sugerido_usd"])} USD</b>'
+        if _expl:
+            _linea += f" ({_esc(_expl[:300])})"
+        L.append(_linea)
     L.append(_SEPARADOR)
     L.append("")
 

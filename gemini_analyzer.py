@@ -370,7 +370,18 @@ SI ES VIABLE, ENTREGA:
   costo_factoring_usd           : valor_contrato * {config.FACTORING_PCT:.3f}
   margen_neto_porcentaje        : (ganancia_total - factoring) / valor * 100
   precio_oferta_sugerido_usd    : total a ofertar (cantidad x unitario)
-  estrategia_oferta             : 2-3 frases de tactica
+  estrategia_oferta           : NO LA REDACTES. Kyomoto la escribe en Python,
+                                  calculada con las cifras finales, y la
+                                  sobreescribe a lo que pongas aqui. Pon ""
+                                  y listo. Si escribes un porcentaje de
+                                  descuento aqui, casi seguro no va a cuadrar
+                                  con el que calcula el codigo, y la ficha
+                                  mostraria dos cifras distintas para la misma
+                                  cuenta. Kyomoto recalcula los totales con
+                                  cantidad x precio unitario porque no confia
+                                  en los que das tu, y el texto de la
+                                  estrategia tiene que salir de esos mismos
+                                  numeros recalculados.
   razonamiento_oferta          : UNA frase que explique el monto ofertado.
                                  Debe decir cuantos por ciento queda POR
                                  DEBAJO del presupuesto del gobierno, y
@@ -814,6 +825,19 @@ def analizar(
         ganancia_neta = _num(datos.get("ganancia_total_usd"))
         margen_neto = _num(datos.get("margen_neto_porcentaje"))
 
+    # El precio de oferta final, tal y como sale en la ficha, y la frase de
+    # estrategia calculada con el. Se hacen aqui y no en la linea del return
+    # porque la frase la necesitan los dos, y sacarla en el return hacia
+    # imposible compararla con nada.
+    oferta_final = _num(datos.get("precio_oferta_sugerido_usd")) or valor
+    estrategia, _pct_descuento = calcular_estrategia_oferta(valor, oferta_final)
+    if estrategia:
+        log.info(
+            "Estrategia calculada en Python para %s: %.2f%% de descuento",
+            str(opp.get("noticeId"))[:8], _pct_descuento
+            if _pct_descuento is not None else float("nan"),
+        )
+
     return {
         "notice_id": opp.get("noticeId"),
         "viable": bool(datos["viable"]),
@@ -838,9 +862,14 @@ def analizar(
         "costo_factoring_usd": factoring,
         "ganancia_neta_usd": ganancia_neta,
         "margen_neto_porcentaje": margen_neto,
-        "precio_oferta_sugerido_usd": _num(datos.get("precio_oferta_sugerido_usd")) or valor,
-        "estrategia_oferta": _limpiar_ia(datos.get("estrategia_oferta"))[:700],
-        "razonamiento_oferta": _limpiar_ia(datos.get("razonamiento_oferta"))[:500],
+        "precio_oferta_sugerido_usd": oferta_final,
+        # Los dos campos de estrategia se SOBRESCRIBEN con la frase calculada
+        # en Python. No es que se ignoren lo que dice el modelo: es que lo que
+        # dice no puede ser correcto, porque sus cifras se corrigen mas arriba
+        # (L792-815). La frase se arma con oferta_final y valor, que son
+        # exactamente los numeros que salen en la ficha.
+        "estrategia_oferta": estrategia,
+        "razonamiento_oferta": estrategia,
         "busquedas_distribuidores": _lista(datos.get("busquedas_distribuidores")),
     # El termino optimizado para el enlace de la ficha. Se limpian comillas y
     # comas antes de guardarlo: si se cuela una comilla en el termino, el
@@ -865,6 +894,87 @@ def analizar(
         "ui_link": opp.get("uiLink", ""),
         "title": opp.get("title", ""),
     }
+
+
+def calcular_estrategia_oferta(presupuesto, precio_ofertar) -> tuple[str, float | None]:
+    """
+    La frase de estrategia de oferta, calculada aqui y no por el modelo.
+
+    Devuelve (texto, porcentaje). El porcentaje es None cuando no hay con que
+    comparar, y en ese caso el texto es el del tope, que no inventa cifras.
+
+    Se calcula DESPUES de la respuesta del modelo, a proposito, con los mismos
+    numeros que se imprimen en la ficha. La razon esta en el docstring del
+    modulo: antes de la llamada el precio de oferta no existe, y calcularlo
+    antes haria que el texto y la tabla contasen cosas distintas.
+
+    El formato del porcentaje es el de la ficha (coma de miles, punto decimal,
+    como "$74,500.00"), no el del castellano, porque en esta ficha todos los
+    importes van asi y mezclar los dos formatos en la misma pantalla es peor
+    que la falta de tilde en "por debajo".
+    """
+    # Sin numero legible no hay nada que comparar. Se cae al texto del tope en
+    # vez de devolver "":
+    #
+    # - devolver "" dejaba la ficha con la linea de estrategia pelada, sin el
+    #   porque entre parentesis, que es justo la parte util
+    # - tratar la oferta ausente como 0.0 producia "Ofertar a 0.00 USD...
+    #   100% por debajo", que es un absurdo: 100% de descuento significa
+    #   regalar el contrato, no que falte el dato
+    #
+    # Un modelo puede devolver null, "", "N/A" o una lista donde se espera un
+    # numero. Nada de eso es un cero.
+    try:
+        if presupuesto is None or precio_ofertar is None:
+            raise TypeError("falta un numero")
+        tope = float(presupuesto)
+        oferta = float(precio_ofertar)
+    except (TypeError, ValueError):
+        return (
+            "Ofertar al tope del presupuesto estimado del gobierno para "
+            "maximizar el margen: el aviso no publica las dos cifras con las "
+            "que comparar el descuento.",
+            None,
+        )
+
+    if tope <= 0:
+        # Sin presupuesto no hay descuento que calcular. Se dice el tope, que
+        # es lo unico cierto, en vez de inventar un porcentaje.
+        return (
+            "Ofertar al tope del presupuesto estimado del gobierno para "
+            "maximizar el margen, ya que el aviso no publica un presupuesto "
+            "con el cual comparar el descuento.",
+            None,
+        )
+
+    descuento_absoluto = tope - oferta
+    porcentaje = round((descuento_absoluto / tope) * 100, 2)
+
+    if porcentaje == 0:
+        return (
+            "Ofertar al tope del presupuesto estimado del gobierno para "
+            "maximizar el margen, ya que este monto iguala el presupuesto "
+            "publicado y no deja descuento alguno.",
+            porcentaje,
+        )
+
+    if porcentaje < 0:
+        # Ofertar por encima del techo. La formula daria "-8.5% por debajo",
+        # que es un absurdo en la ficha. Se dice lo que pasa y cuanto.
+        return (
+            f"Ofertar a {oferta:,.2f} USD. ATENCION: este monto supera el "
+            f"presupuesto estimado del gobierno ({tope:,.2f} USD) en un "
+            f"{abs(porcentaje):.2f}%. Una oferta por encima del techo no "
+            f"tiene sentido: revisar el precio antes de presentarla.",
+            porcentaje,
+        )
+
+    return (
+        f"Ofertar a {oferta:,.2f} USD. Con este monto nos mantenemos un "
+        f"{porcentaje:.2f}% por debajo del presupuesto estimado del gobierno "
+        f"para asegurar alta competitividad y ganar el contrato.",
+        porcentaje,
+    )
 
 
 def _candidatos(valor) -> list[dict]:

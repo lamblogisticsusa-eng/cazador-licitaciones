@@ -193,8 +193,26 @@ check("Cantidad en unidades", "50 EA" in html, "-> no encontrado")
 check("Modelo", "Dell Latitude 5450" in html)
 check("Valor del contrato", "$72,500.00" in html)
 check("Ganancia neta", "$9,962.50" in html)
-check("Los montos con USD detras", html.count(" USD") == 4,
+# Cada monto de la tabla lleva "USD" detras. Se comprueba fila por fila y no
+# contando el total, porque el total depende de la variante de la frase de
+# estrategia y esa ya no es fija:
+#
+# Este fixture tiene valor == oferta (72.500 los dos), asi que el descuento es
+# 0 y la frase es la del tope del presupuesto, que NO lleva precio y por tanto
+# no aporta un cuarto " USD". Con una oferta por debajo del techo la frase si
+# lo lleva, y el total seria 4. Un conteo global comprobaria una cosa que
+# depende del caso en vez de la regla que importa.
+for fila in ("Presupuesto govt.", "Costo proveedor", "Precio a ofertar"):
+    _linea = [l for l in html.split("\n") if l.startswith(fila)]
+    check(f"'{fila}' lleva USD detras",
+          bool(_linea) and " USD" in _linea[0],
+          f"-> {[l.strip() for l in _linea]}")
+check("Y hay al menos los tres de la tabla", html.count(" USD") >= 3,
       f"-> {html.count(' USD')}")
+# Y la frase de estrategia no repite el precio cuando ya lo trae ella.
+check("La estrategia no duplica el precio",
+      not __import__("re").search(r"\(Ofertar a", html),
+      "-> el precio sale dos veces en la misma linea")
 check("Presupuesto y costo con ~ (son estimaciones)",
       "~$72,500.00" in html and "~$60,000.00" in html)
 check("La ganancia neta sin ~ (se calcula)", "~$9,962.50" not in html)
