@@ -6,6 +6,10 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 3.0.0 = indice PSC comercial Tier-1 con filtrado nativo ccode (recorrido
+# codigo a codigo con rotacion), descargas limitadas a 5 simultaneas,
+# backoff 2/4/8 con timeout de lectura reintentable, y un solo aviso por
+# barrido cuando no quedan viables.
 # 2.9.0 = orientacion COTS Easy-Supply: veto de alta complejidad y defensa
 # (plataformas, armamento, municion, combustible de aviacion,
 # certificaciones de origen ITAR/JCP/DD250/CoC), bonus para las familias PSC
@@ -29,7 +33,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "2.9.0"
+KYOMOTO_VERSION = "3.0.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -306,6 +310,95 @@ PORT = _int("PORT", 10000)
 # juntos como "k,b,c". Ojo: hoy no entran, y no se anaden porque cambian lo
 # que el bot ve. Se dejan aqui anotados para cuando se decida medido.
 PTYPE_SAM = "o,a"
+
+# --- Indice PSC comercial Tier-1 (12-oct-2026) ---------------------------
+#
+# Kyomoto busca solo en familias PSC donde hay distribuidor o mayorista
+# comercial abierto en EE.UU. Es el mismo criterio Easy-Supply del 10-oct, pero
+# ahora aplicado EN LA CONSULTA y no solo al filtrar despues.
+#
+# COMO SE APLICA (esto es lo que obliga a la forma de la lista)
+#
+# La spec oficial declara el parametro como:
+#
+#     ccode : type: string     -> UN solo valor
+#     ptype : type: array, collectionFormat: multi   -> admite varios
+#
+# O sea que ccode NO acepta un grupo de 2 digitos ni una lista de ellos.
+# Pasar "53" no devuelve la familia 53xx: no devuelve nada util. Para cubrir un
+# grupo habria que enumerar sus 100 codigos de 4 digitos, o sea 800 peticiones
+# por barrido y 9.600 al dia, contra un tope publico del orden de 1000. Hoy el
+# escaneo hace 1 o 2 por barrido.
+#
+# Por eso lo de abajo son codigos de 4 digitos, no grupos. Se agrupan por el
+# prefijo de 2 digitos para que se vea de donde viene cada cosa, y porque asi se
+# puede medir el acierto por categoria.
+#
+# El detalle de NO meter el grupo 75 entero: la serie 75xx es casi todo
+# servicio (instalacion, mantenimiento, reparacion, construccion), que es justo
+# lo que Kyomoto descarta. De ahi solo entran los codigos de tangible.
+COMERCIAL_PSC_GROUPS = ["51", "61", "65", "70", "75", "45", "71", "81"]
+
+# El indice. Clave: prefijo de 2 digitos del grupo pedido. Valor: codigos de 4
+# digitos de producto tangible y comercial dentro de ese grupo.
+#
+# Los grupos que no estaban en la peticion (43, 53, 58, 16) se anaden al final
+# con su etiqueta, porque son las familias que de verdad han producido
+# resultados medidos. No se mezclan con los del usuario para que siga
+# viendose cuales eran cuales.
+PSC_COMERCIAL_INDICE = {
+    # --- Los 8 grupos pedidos ---
+    # 5340 y 5350 NO van aqui: son de la serie 53xx (Tools and Hardware, y
+    # Hardware/Shop Equipment), y ya estan en el grupo 53. Estaban en los dos
+    # grupos, y con la rotacion del indice el mismo codigo se podia pedir dos
+    # veces en el mismo barrido.
+    "51": ["5110", "5120", "5130", "5140", "5150", "5160"],  # ferreteria y MRO
+    "61": ["6110", "6145", "6150"],                        # cable y conduccion
+    "65": ["6505", "6510", "6515", "6525", "6545", "6550"],  # medico y hospital
+    "70": ["7025", "7035", "7037", "7040", "7045", "7050",
+           "7065", "7070", "7080"],                        # computo, redes, TI
+    "75": ["7510", "7520", "7530", "7540"],                # tooling tangible
+    "45": ["4510", "4520", "4530"],                        # papel y consumibles
+    "71": ["7100", "7110", "7120", "7130", "7140", "7150",
+           "7190"],                                        # equipo general
+    "81": ["8110", "8120", "8135", "8136"],                # guantes y	EPP
+    # --- Anadidos por medicion, no estaban en la peticion ---
+    # Los titulos que mejor han puntuado. Sin estos, 7 de los 9 titulos reales
+    # del barrido del 29-sep quedan fuera del indice.
+    "43": ["4320", "4330", "4340", "4350"],   # bombas, valvulas, filtros
+    "53": ["5330", "5340", "5345", "5350"],   # suministros y herramientas
+    "58": ["5820", "5840", "5890"],            # comunicaciones y radionavegacion
+    "16": ["1610", "1620", "1630", "1650"],   # comunicacion y defensa electronica
+}
+
+# Cuantos codigos se refrescan POR BARRIDO. El indice entero son unos 60
+# codigos y refrescarlos todos en una pasada serian 60 peticiones de golpe
+# contra un tope diario. Con este tope cada barrido gasta una parte y el resto
+# lo cubre la cache, que sobrevive entre barridos.
+#
+# Con barrido cada 2 h, 12 barridos al dia x 10 codigos = 120 peticiones/dia de
+# refresco, mas el llenado inicial de la cache. Es sustainable con el tope
+# publico, y los avisos que aun no se han refrescado se siguen viendo desde
+# cache, no se pierden.
+MAX_CODIGOS_POR_BARRIDO = _int("MAX_CODIGOS_POR_BARRIDO", 10)
+
+# Descargas de descripcion simultaneas. Cubre lo que pedia un
+# asyncio.Semaphore(5), con el mismo efecto sobre la API.
+#
+# El cliente HTTP es requests, que es BLOQUEANTE: un asyncio.Semaphore no puede
+# gobernarlo, seria decoracion. httpx solo esta como dependencia indirecta de
+# google-genai y no esta en requirements.txt, asi que el async real seria un
+# cambio de despliegue sobre la ruta que baja los datos. Esto no lo toca.
+MAX_DESCARGAS_CONCURRENTES = _int("MAX_DESCARGAS_CONCURRENTES", 5)
+
+# Espera entre reintentos de una peticion que falla o que responde 429/5xx.
+# Escalonado, como se pidio: 2s, 4s, 8s. Antes era 2**i+1, que daba 2, 3, 5.
+BACKOFF_SEGUNDOS = (2, 4, 8)
+
+# Si se agotan los reintentos de una peticion, se sigue con la siguiente en vez
+# de tirar el barrido entero. Un 429 aislado no puede dejar el escaneo sin hacer
+# nada, que es lo que mas duele cuando la cuota se agota por un momento.
+
 
 #  Datos reales medidos en SAM.gov (muestra de 14 dias, ptype=o, 1000 avisos):
 #    541 (IT / servicios)            -> 15%   EXCLUIR

@@ -28,6 +28,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
@@ -45,6 +46,37 @@ BASE_DESC = "https://api.sam.gov/prod/opportunities/v1/noticedesc"
 
 _sesion = requests.Session()
 _sesion.headers.update({"Accept": "application/json", "User-Agent": "Kyomoto/2.0"})
+
+# Downloads de descripcion simultaneas. Cubre lo que se pidio con un
+# asyncio.Semaphore(5), con el mismo efecto sobre la API.
+#
+# El cliente HTTP es requests, que es BLOQUEANTE: un asyncio.Semaphore no
+# gobierna una llamada bloqueante, seria decoracion. httpx solo esta como
+# dependencia indirecta de google-genai y no esta en requirements.txt, asi que
+# hacer el async de verdad seria un cambio de despliegue sobre justo la ruta que
+# baja los datos. Este semaforo va donde ocurre el trabajo: el pool de hilos.
+#
+# Se crea con el valor de config al importar, y hay una funcion para
+# reconfigurarlo si en pruebas se quiere bajar.
+def _nuevo_semaforo() -> "threading.Semaphore":
+    return threading.Semaphore(max(1, int(config.MAX_DESCARGAS_CONCURRENTES)))
+
+
+_DESCARGAS = _nuevo_semaforo()
+
+
+def limite_descargas(n: int | None = None):
+    """Fija el limite de descargas simultaneas. Sin argumento, devuelve el actual."""
+    global _DESCARGAS
+    if n is not None:
+        config.MAX_DESCARGAS_CONCURRENTES = max(1, int(n))
+        _DESCARGAS = threading.Semaphore(config.MAX_DESCARGAS_CONCURRENTES)
+    return config.MAX_DESCARGAS_CONCURRENTES
+
+
+# Rotacion del indice PSC. Sin esto, si siempre se Asking los primeros N codigos,
+# los demas no se ven nunca: el starve es silencioso y no sale en ningun log.
+_INDICE_ROTACION = 0
 
 # Momento en que SAM.gov dice que vuelve a dejar usar la API. None = sin tope.
 _proximo_acceso: str | None = None
@@ -155,27 +187,70 @@ def verificar_api() -> dict:
     }
 
 
+def _espera(i: int) -> int:
+    """
+    Espera antes del reintento i, de la escala que se pidio: 2s, 4s, 8s.
+
+    Antes era 2 ** i + 1, que daba 2, 3, 5. No era una escalera, era otra
+    cosa. Ademas, cuando se pasaban de intentos, 2 ** i + 1 se iba a 9, 17,
+    33... y un barrido podia quedarse bloqueado medio minuto por una sola
+    llamada. Con la escala fija, el peor caso de una peticion es 14 segundos en
+    total y se puede sumar de un vistazo.
+
+    Si el numero de intentos supera la escala, se usa el ultimo valor en vez de
+    crecer sin limite.
+    """
+    escala = tuple(config.BACKOFF_SEGUNDOS) or (2, 4, 8)
+    return escala[min(i, len(escala) - 1)]
+
+
 def _get(params: dict, reintentos: int | None = None) -> requests.Response:
+    """
+    Una peticion a SAM.gov, con reintentos y backoff escalonado.
+
+    Reintenta en dos casos que antes se trataban distinto o no se trataban:
+
+      - 429 y 5xx: igual que antes, pero con la escala 2/4/8 en vez de 2/3/5.
+      - Timeout de LECTURA: antes caia en el mismo "Error de red" genérico y
+        esperaba 1 segundo plano. Un timeout de lectura es tan transitorio como
+        un 429 en esta API (es GSA saturandose), asi que ahora espera lo mismo
+        que un 429.
+
+    Los 400/401/403 no se reintentan: no se arreglan esperando.
+    """
     intentos = config.MAX_REINTENTOS if reintentos is None else reintentos
     url = BASE_SEARCH if "postedFrom" in params else BASE_DESC
     ultima = None
     for i in range(intentos):
         try:
             r = _sesion.get(url, params=params, timeout=config.TIMEOUT_HTTP)
+        except requests.Timeout as e:
+            # Timeout de lectura: la peticion entro, la respuesta no llego.
+            espera = _espera(i)
+            log.warning("SAM.gov timeout de lectura, reintento %s en %ss",
+                        i + 1, espera)
+            ultima = SamError(f"Timeout de lectura: {e}")
+            time.sleep(espera)
+            continue
         except requests.RequestException as e:
+            espera = _espera(i)
+            log.warning("SAM.gov error de red, reintento %s en %ss",
+                        i + 1, espera)
             ultima = SamError(f"Error de red: {e}")
-        else:
-            if r.status_code == 200:
-                return r
-            if r.status_code in (429, 500, 502, 503, 504):
-                espera = 2 ** i + 1
-                log.warning("SAM.gov %s, reintento %s en %ss", r.status_code, i + 1, espera)
-                ultima = SamError(f"HTTP {r.status_code}: {r.text[:300]}")
-                time.sleep(espera)
-                continue
-            # 400/401/403 no se arreglan reintentando.
-            raise SamError(f"HTTP {r.status_code}: {r.text[:300]}")
-        time.sleep(1)
+            time.sleep(espera)
+            continue
+        if r.status_code == 200:
+            return r
+        if r.status_code in (429, 500, 502, 503, 504):
+            espera = _espera(i)
+            log.warning("SAM.gov %s, reintento %s en %ss",
+                        r.status_code, i + 1, espera)
+            ultima = SamError(f"HTTP {r.status_code}: {r.text[:300]}")
+            throttle(r)
+            time.sleep(espera)
+            continue
+        # 400/401/403 no se arreglan reintentando.
+        raise SamError(f"HTTP {r.status_code}: {r.text[:300]}")
     raise ultima or SamError("Fallo desconocido")
 
 
@@ -262,17 +337,22 @@ def throttle(respuesta: requests.Response) -> None:
 
 
 def _bloque(desde: datetime, hasta: datetime, ptype: str,
-            rdl_desde: str = "", rdl_hasta: str = "") -> list[dict]:
+            rdl_desde: str = "", rdl_hasta: str = "",
+            ccode: str = "") -> tuple[list[dict], int]:
     """
-    Un bloque de la ventana, ya acotado por fecha de vencimiento si se puede.
+    Un bloque de la ventana, acotado por fecha de vencimiento y por PSC.
 
     rdl_desde / rdl_hasta son las fechas MM/DD/YYYY de la ventana de
     vencimiento. Vacias significan "no mandarlas" y dejan el filtrado en el
     cliente, que es el comportamiento anterior.
 
-    postedFrom/postedTo NO son opcionales: la API responde 400 si faltan
-    ("User does not provide postedFrom and postedTo values"). Por eso los dos
-    filtros van juntos siempre, y nunca se sustituye uno por el otro.
+    ccode es el codigo de 4 digitos de Product Service Code. Es UN valor, no
+    una lista: la spec oficial lo declara type: string, mientras que ptype es
+    type: array con collectionFormat: multi. Por eso el indice se recorre
+    codigo a codigo en vez de mandar los 12 de golpe.
+
+    Devuelve (lote, totalRecords). El total se necesita para avisar del
+    truncamiento, y antes se perdia porque solo se devolvia el lote.
     """
     params = {
         "api_key": config.SAM_API_KEY,
@@ -286,6 +366,8 @@ def _bloque(desde: datetime, hasta: datetime, ptype: str,
     if rdl_desde and rdl_hasta:
         params["rdlfrom"] = rdl_desde
         params["rdlto"] = rdl_hasta
+    if ccode:
+        params["ccode"] = str(ccode)
 
     r = _get(params)
     throttle(r)
@@ -305,29 +387,65 @@ def _bloque(desde: datetime, hasta: datetime, ptype: str,
     try:
         total = int(total)
     except (TypeError, ValueError):
-        total = None
-    if total is not None and total > len(lote):
+        total = 0
+    if total > len(lote):
         log.warning(
-            "Bloque %s..%s truncado: SAM.gov dice %d registros y devolvio %d "
-            "(limit=%d). Los %d que faltan NO se pueden recuperar con offset. "
-            "Bajar DIAS_POR_CHUNK o subir LIMITE_POR_CHUNK.",
-            _fecha(desde), _fecha(hasta), total, len(lote),
-            config.LIMITE_POR_CHUNK, total - len(lote),
+            "Bloque %s..%s%s truncado: SAM.gov dice %d registros y devolvio "
+            "%d (limit=%d). Los %d que faltan NO se pueden recuperar con "
+            "offset.",
+            _fecha(desde), _fecha(hasta),
+            (" PSC " + str(ccode)) if ccode else "",
+            total, len(lote), config.LIMITE_POR_CHUNK, total - len(lote),
         )
-    return lote
+    return lote, total
 
 
 def _rango_vivo(desde: datetime, hasta: datetime, ptype: str,
-               rdl_desde: str = "", rdl_hasta: str = "") -> list[dict]:
+               rdl_desde: str = "", rdl_hasta: str = "",
+               ccode: str = "") -> list[dict]:
     """Pide un bloque a la API y lo cachea."""
-    lote = _bloque(desde, hasta, ptype, rdl_desde, rdl_hasta)
+    lote, _total = _bloque(desde, hasta, ptype, rdl_desde, rdl_hasta, ccode)
     for opp in lote:
         store.guardar_busqueda(opp)
     return lote
 
 
+def _codigos_del_turno(presupuesto: int | None = None) -> list[str]:
+    """
+    Los codigos PSC que le tocan a ESTE barrido, ya rotados.
+
+    Sin rotacion, si el indice tiene mas codigos que el presupuesto, se Asking
+    siempre los primeros y los demas no se ven nunca. Eso es starve
+    silencioso: no sale en ningun log, no da error, y simplemente una parte del
+    indice nunca aparece.
+
+    La rotacion avanza con el numero de codigos servidos, y es global, asi que
+    sobrevive entre barridos dentro de la misma ejecucion.
+    """
+    indice = config.PSC_COMERCIAL_INDICE or {}
+    plano: list[str] = []
+    for grupo in config.COMERCIAL_PSC_GROUPS + sorted(
+            k for k in indice if k not in config.COMERCIAL_PSC_GROUPS):
+        for codigo in indice.get(grupo, []):
+            plano.append(str(codigo))
+    if not plano:
+        return []
+    tope = int(presupuesto if presupuesto is not None
+               else config.MAX_CODIGOS_POR_BARRIDO)
+    if tope <= 0 or tope >= len(plano):
+        return plano
+    global _INDICE_ROTACION
+    _INDICE_ROTACION %= len(plano)
+    tomados = plano[_INDICE_ROTACION:_INDICE_ROTACION + tope]
+    if len(tomados) < tope:
+        tomados += plano[:tope - len(tomados)]
+    _INDICE_ROTACION = (_INDICE_ROTACION + tope) % len(plano)
+    return tomados
+
+
 def barrer(dias: int | None = None, ptype: str | None = None,
-          stats: dict | None = None) -> Iterator[dict]:
+          stats: dict | None = None,
+          indice_psc: bool = False) -> Iterator[dict]:
     """
     Trae la ventana de fechas con FETCHING INCREMENTAL.
 
@@ -351,7 +469,8 @@ def barrer(dias: int | None = None, ptype: str | None = None,
 
     if stats is not None:
         stats.update(bloques_ok=0, bloques_error=0, total_api=0,
-                     errores=[], desde_cache=0)
+                     errores=[], desde_cache=0, psc_codigos=0,
+                     psc_avisos=0)
 
     if not config.SAM_API_KEY:
         raise SamError("SAM_API_KEY no configurada")
@@ -395,6 +514,46 @@ def barrer(dias: int | None = None, ptype: str | None = None,
         if stats is not None:
             stats["desde_cache" if de_cache else "total_api"] += 1
         return opp
+
+    # ---- Parte 0: el indice PSC, codigo a codigo ----
+    #
+    # Se pide uno a uno porque ccode es type: string: un solo valor, no una
+    # lista. La spec oficial lo dice claro, y por eso el indice de config son
+    # codigos de 4 digitos y no los 8 grupos de 2 que se pidieron (que obligan
+    # a 800 llamadas por barrido).
+    #
+    # Se recorre ADEMAS del recorrido por fecha de abajo, no en vez de el. El
+    # indice acota QUE familias se miran; el recorrido por fecha acota el
+    # rango temporal. Si solo se usara el indice, los dias de la ventana que no
+    # entran en ningun codigo del turno se quedarian sin mirar, y con un
+    # presupuesto de 10 codigos por barrido sobre 24, hay bloques enteros que
+    # no tocan ningun codigo de ese turno.
+    if indice_psc:
+        codigos = _codigos_del_turno()
+        if codigos:
+            log.info("Indice PSC: %d codigos este barrido (de %d en el "
+                     "indice)", len(codigos),
+                     sum(len(v) for v in (config.PSC_COMERCIAL_INDICE or {}).values()))
+            for codigo in codigos:
+                try:
+                    lote = _rango_vivo(fin - timedelta(days=dias_vivos), fin,
+                                       ptype, rdl_desde, rdl_hasta, codigo)
+                except SamError as e:
+                    # Un 429 agotado en UN codigo no puede tirar el barrido
+                    # entero: los otros codigos y el resto de la ventana siguen
+                    # siendo validos. Se registra y se sigue.
+                    log.warning("Fallo el codigo PSC %s: %s", codigo, str(e)[:120])
+                    if stats is not None:
+                        stats["bloques_error"] += 1
+                        stats["errores"].append(f"ccode {codigo}: {str(e)[:80]}")
+                    continue
+                if stats is not None:
+                    stats["bloques_ok"] += 1
+                    stats["psc_codigos"] += 1
+                    stats["psc_avisos"] += len(lote)
+                for opp in lote:
+                    if emitir(opp, False) is not None:
+                        yield opp
 
     # ---- Parte 1: lo viejo, desde la base ----
     viejos = store.desde_cache_rango(dias, dias_vivos)

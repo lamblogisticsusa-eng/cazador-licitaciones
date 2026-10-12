@@ -84,7 +84,7 @@ def _traer_candidatos(dias: int) -> tuple[list[dict], int, int]:
     crudos: list[dict] = []
     total = 0
     stats: dict = {}
-    for opp in sam_api.barrer(dias, stats=stats):
+    for opp in sam_api.barrer(dias, stats=stats, indice_psc=True):
         total += 1
         nid = opp.get("noticeId")
         if not nid or nid in vistos:
@@ -188,9 +188,21 @@ def _bajar_descripciones(candidatos: list[dict]) -> dict[str, str]:
         # peticion del tope diario. Antes se pedia siempre, y esa peticion es
         # exactamente el recurso que se agota ("SAM.gov me dijo que me calle").
         # Con la URL que trae de normal, el comportamiento es identico.
-        return o["noticeId"], (sam_api.obtener_descripcion(o["noticeId"], o) or "")
+        #
+        # El semaforo es el de sam_api, de 5 en 5 (MAX_DESCARGAS_CONCURRENTES).
+        # Antes el pool se abria con WORKERS=8 sin ninguna limite real mas alla
+        # de eso, y 8 descargas del mismo dominio a la vez es justo lo que hace
+        # que GSA te tire un 429 o te bloquee la IP. Con Render, cuya IP es
+        # dinamica, un bloqueo dura hasta que cambia la IP.
+        with sam_api._DESCARGAS:
+            return o["noticeId"], (sam_api.obtener_descripcion(o["noticeId"], o) or "")
 
-    with ThreadPoolExecutor(max_workers=config.WORKERS) as pool:
+    # El pool no puede tener mas hilos que el semaforo permite, o los
+    # hilos sobrantes se quedan esperando y no hacen nada. Se deja el
+    # semaforo como el limite real y el pool algo mas holgado.
+    with ThreadPoolExecutor(
+        max_workers=max(config.WORKERS, config.MAX_DESCARGAS_CONCURRENTES)
+    ) as pool:
         for fut in as_completed({pool.submit(bajar, o): o for o in pendientes}):
             try:
                 nid, texto = fut.result()
@@ -555,6 +567,39 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             )
 
     resumen["descarte_motivo"] = dict(DESCARTE_POR_MOTIVO)
+
+    # Un solo aviso de "no salio nada" por barrido, nunca uno por nada.
+    #
+    # Antes no se mandaba ninguno: el resumen se iba en silencio y el usuario no
+    # tenia forma de saber si el bot estaba trabajando o parado. La tentacion
+    # de arreglarlo mandando un mensaje cada vez que un lote venia vacio es
+    # justo lo que hay que evitar: con barrido cada 2 h, un lote vacio cada
+    # vez son 12 mensajes al dia de "no hay nada", y en cuanto la cuota de
+    # Gemini se agota un dia, son 12 mas. Eso es saturar el canal para no
+    # decir nada.
+    #
+    # Aqui va UNO, y solo cuando no hubo ni un viable, y con los numeros de
+    # por que no hubo: cuantos avisos se vieron, cuantos pasaron el filtro y
+    # cuantos se descartaron por cada motivo. Que es lo que hace falta para
+    # diagnosticar sin tener que preguntar.
+    if not resumen.get("viables") and not config.DRY_RUN:
+        _por_que = ""
+        _dm = resumen.get("descarte_motivo") or {}
+        if _dm:
+            _top = sorted(_dm.items(), key=lambda kv: -kv[1])[:3]
+            _por_que = ("\n\nDescartes: "
+                        + ", ".join(f"{k} x{v}" for k, v in _top))
+        telegram_notify.enviar(
+            chat_id,
+            "<b>Barrido sin oportunidades</b>\n\n"
+            f"Avisos vistos: <b>{resumen.get('traidas', 0)}</b>\n"
+            f"Pasaron el filtro: <b>{resumen.get('puntuales', 0)}</b>\n"
+            f"Analizados por IA: <b>{resumen.get('analizadas', 0)}</b>"
+            f"{_por_que}\n\n"
+            "<i>No es un fallo: Kyomoto sigue trabajando. Si pasan varios "
+            "barridos igual, revisa /puntajes.</i>",
+            html_mode=True,
+        )
 
     if fallos_gemini:
         # Esto es lo que el codigo original se tragaba en silencio.
