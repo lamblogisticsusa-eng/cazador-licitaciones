@@ -113,6 +113,107 @@ def _fecha(dt: datetime) -> str:
     return f"{dt.month:02d}/{dt.day:02d}/{dt.year:04d}"
 
 
+# Margen bajo el limite duro de la API de SAM.gov.
+#
+# La API dice "Date range must be no more than 1 year apart". Un rango de
+# EXACTAMENTE 365 dias es un ano, asi que esta en el limite y lo rechaza. De ahi
+# el margen.
+#
+# 360 y no 180 porque 180 funciona pero deja fuera la mitad de las licitaciones
+# de un ano, y el caso que motiva esto es cotizar una licitacion publicada hace
+# meses. 360 es lo mas que la API tolera con seguridad y cinco dias de margen
+# no son un coste.
+LIMITE_DIAS_SAM = 360
+
+
+def _cuerpo_error(respuesta) -> str:
+    """
+    El texto que devuelve la API cuando algo va mal, para el log.
+
+    Solo para el log de Render. El mensaje de Telegram lo pone el manejador, con
+    su propia redaccion, porque lo que se enseña al usuario no puede ser una
+    cadena cruda de la API: puede traer comillas, corchetes o HTML que el
+    parser de Telegram rechazaria, y el mensaje se perderia entero por un
+    detalle de formato.
+
+    Se recorta a 200 caracteres porque si no, un error enorme llena el log y
+    esconde el resto.
+    """
+    try:
+        cuerpo = respuesta.text or ""
+    except Exception:
+        return ""
+    cuerpo = " ".join(cuerpo.split())
+    if not cuerpo:
+        return "(sin cuerpo)"
+    return cuerpo[:200]
+
+
+def _dias_entre(desde: str, hasta: str) -> int:
+    """
+    Dias de calendario entre dos fechas MM/DD/YYYY. 0 si no se pueden leer.
+
+    Se mide sobre las CADENAS que van a salir en la peticion, no sobre el numero
+    que se pidio. No por el 29 de febrero, que se comprobo que no tiene nada que
+    ver: timedelta(days=365) son 365 dias SIEMPRE, tambien en un anyo bisiesto,
+    porque la resta es exacta. La razon de medir es otra, y mas simple: que
+    _rango_posted() no dependa de quien lo llame. Un dia alguien escribira
+    dias=365 creyendo que "un ano" es lo que quiere decir la API, que es
+    exactamente el error que se esta arreglando, y el clamp lo habria corregido
+    ya. La medicion es la ultima linea de defensa, no la primera.
+    """
+    try:
+        d = datetime.strptime(str(desde), "%m/%d/%Y").date()
+        h = datetime.strptime(str(hasta), "%m/%d/%Y").date()
+    except (ValueError, TypeError):
+        return 0
+    return (h - d).days
+
+
+def _rango_posted(dias: int = LIMITE_DIAS_SAM,
+                  hoy: datetime | None = None) -> tuple[str, str]:
+    """
+    Devuelve (postedFrom, postedTo) con un rango que la API acepta SIEMPRE.
+
+    Tressteps, y los tres hacen falta:
+
+      1) acota `dias` al limite, por si alguien pasa 365 creyendo que "un ano"
+         es lo que quiere decir la API
+      2) formatea las dos fechas en MM/DD/YYYY, con diagonales, que es lo que
+         la API exige (en locale es-419, strftime da 09-23-2026 y responde 400)
+      3) MIDE lo que ha salido y encoge mientras no quepa
+
+    El paso 3 es la garantia final. Los dos anteriores son prevencion; el tercero
+    es la comprobacion sobre lo que sale. Por si sola no arregla este bug (lo
+    arregla el clamp del paso 1), pero garantiza que la funcion no pueda
+    devolver un rango que la API vaya a rechazar ni aunque mañana alguien la
+    llame con otro numero.
+
+    Una excepcion NO borra la garantia: si las fechas no se pueden formatear se
+    devuelven tal cual y las registra el llamante. Un rango roto visible es
+    mejor que un rangoOCulto que parece bueno.
+    """
+    try:
+        n = int(dias)
+    except (TypeError, ValueError):
+        n = LIMITE_DIAS_SAM
+    # El clamp va primero: por mucho que pidan, no sale mas de 360.
+    n = max(1, min(n, LIMITE_DIAS_SAM))
+    base = hoy or datetime.now(timezone.utc)
+    posted_to = _fecha(base)
+    posted_from = _fecha(base - timedelta(days=n))
+    # Y despues se mide lo que ha salido de verdad, no lo que se queria.
+    while _dias_entre(posted_from, posted_to) > LIMITE_DIAS_SAM:
+        n -= 1
+        if n < 1:
+            break
+        posted_from = _fecha(base - timedelta(days=n))
+    if _dias_entre(posted_from, posted_to) > LIMITE_DIAS_SAM:
+        log.error("_rango_posted: no se pudo acotar el rango a %d dias: %s -> %s",
+                  LIMITE_DIAS_SAM, posted_from, posted_to)
+    return posted_from, posted_to
+
+
 def _parse_fecha(valor: str | None) -> datetime | None:
     if not valor:
         return None
@@ -345,15 +446,18 @@ def limpiar_solicitud(bruto) -> str:
     return "".join(c for c in limpio if c.isalnum() or c == "-")
 
 
-def buscar_por_solicitud(solnum: str, dias: int = 365,
+def buscar_por_solicitud(solnum: str, dias: int = LIMITE_DIAS_SAM,
                          estado: dict | None = None) -> dict | None:
     """
     Busca una licitacion por su numero en SAM.gov. None si no la encuentra.
 
-    dias=365 porque la ventana por defecto de la spec es de un ano, y una
-    licitacion de hace ocho meses con el plazo ainda abierto es justo el caso
-    que el usuario quiere cotizar. Con la ventana de 10 dias del escaneo
-    diario no apareceria nunca.
+    dias=360 (LIMITE_DIAS_SAM) porque la API rechaza cualquier rango de un ano
+    o mas, y una licitacion de hace ocho meses con el plazo ainda abierto es
+    justo el caso que el usuario quiere cotizar. Con la ventana de 10 dias del
+    escaneo diario no apareceria nunca.
+
+    El rango se calcula en _rango_posted(), que acota el numero y ademas mide
+    las fechas que salen antes de mandarlas.
 
     NUNCA LANZA. Si la clave no esta, si la API da error, o si simplemente no
     esta, se devuelve None. Un fallo de red aqui no puede tumbar el comando
@@ -373,6 +477,37 @@ def buscar_por_solicitud(solnum: str, dias: int = 365,
         if estado is not None:
             estado["fallo"] = fallo
             estado["motivo"] = motivo
+
+    def _http(codigo: int):
+        """Deja en `estado` el codigo HTTP y UN MOTIVO QUE NO MIENTA.
+
+        El motivo importa porque el llamante lo enseña al usuario. Decirle
+        "casi siempre por cuota del plan gratuito" cuando lo que ha pasado es un
+        400 por rango de fechas es mandar al usuario a esperar unos minutos
+        para que falle exactamente igual: el rango se calcula en cada llamada y
+        siempre sale igual de mal.
+
+        400 = peticion incorrecta. Casi siempre es cosa nuestra (un rango de
+              fechas, un formato), no de SAM.gov ni de la clave.
+        401/403 = clave que no vale o sin permiso.
+        429 = cuota o limite de peticiones. ESTE si es de SAM.gov.
+        5xx = caida de SAM.gov.
+        """
+        motivos = {
+            400: "HTTP 400: SAM.gov rechazo la consulta. Suele ser el rango de "
+                 "fechas o el formato de un parametro.",
+            401: "HTTP 401: la clave de la API no es valida.",
+            403: "HTTP 403: la clave no tiene permiso para esta consulta.",
+            429: "HTTP 429: se ha alcanzado el limite de peticiones de SAM.gov "
+                 "(cuota del plan gratuito).",
+            500: "HTTP 500: SAM.gov tiene un problema ahora mismo.",
+            503: "HTTP 503: SAM.gov no esta disponible ahora mismo.",
+        }
+        if estado is not None:
+            estado["fallo"] = True
+            estado["http"] = codigo
+            estado["motivo"] = motivos.get(codigo, f"HTTP {codigo}.")
+
     if not config.SAM_API_KEY:
         log.error("buscar_por_solicitud: no hay SAM_API_KEY")
         _nota(True, "SAM_API_KEY no esta configurada")
@@ -386,15 +521,23 @@ def buscar_por_solicitud(solnum: str, dias: int = 365,
         _nota(False, "el numero es demasiado corto para una solicitud")
         return None
 
-    hoy = datetime.now(timezone.utc)
+    # El rango lo calcula _rango_posted(), que acota a 360 dias. Antes era
+    # hoy - 365 dias, que es EXACTAMENTE un ano, que es justo el limite que la
+    # API rechaza. No era un problema del rango ni del dia en que se ejecutaba: un rango de
+    # 365 dias son 365 dias todos los dias del ano. Fallaba siempre, y como
+    # devolvia el mismo None que "no existe", no habia forma de distinguirlo.
+    posted_from, posted_to = _rango_posted(dias)
     params = {
         "api_key": config.SAM_API_KEY,
-        "postedFrom": _fecha(hoy - timedelta(days=dias)),
-        "postedTo": _fecha(hoy),
+        "postedFrom": posted_from,
+        "postedTo": posted_to,
         "offset": 0,
         "limit": 20,
         "solnum": consulta,
     }
+    log.info("buscar_por_solicitud('%s'): rango %s -> %s (%d dias)",
+             solnum, posted_from, posted_to,
+             _dias_entre(posted_from, posted_to))
     try:
         r = _get(params, reintentos=2)
     except SamError as e:
@@ -403,8 +546,9 @@ def buscar_por_solicitud(solnum: str, dias: int = 365,
         return None
 
     if r.status_code != 200:
-        log.error("buscar_por_solicitud('%s'): HTTP %s", solnum, r.status_code)
-        _nota(True, f"HTTP {r.status_code}")
+        log.error("buscar_por_solicitud('%s'): HTTP %s %s", solnum,
+                  r.status_code, _cuerpo_error(r))
+        _http(r.status_code)
         return None
     try:
         datos = r.json()
@@ -459,6 +603,24 @@ def buscar_notice(notice_id: str, estado: dict | None = None) -> dict | None:
             estado["fallo"] = fallo
             estado["motivo"] = motivo
 
+    def _http(codigo: int):
+        """Igual que en buscar_por_solicitud(): deja el codigo HTTP y un motivo
+        que no confunda un 400 con un 429."""
+        motivos = {
+            400: "HTTP 400: SAM.gov rechazo la consulta. Suele ser el rango de "
+                 "fechas o el formato de un parametro.",
+            401: "HTTP 401: la clave de la API no es valida.",
+            403: "HTTP 403: la clave no tiene permiso para esta consulta.",
+            429: "HTTP 429: se ha alcanzado el limite de peticiones de SAM.gov "
+                 "(cuota del plan gratuito).",
+            500: "HTTP 500: SAM.gov tiene un problema ahora mismo.",
+            503: "HTTP 503: SAM.gov no esta disponible ahora mismo.",
+        }
+        if estado is not None:
+            estado["fallo"] = True
+            estado["http"] = codigo
+            estado["motivo"] = motivos.get(codigo, f"HTTP {codigo}.")
+
     if not config.SAM_API_KEY:
         log.error("buscar_notice: no hay SAM_API_KEY")
         _nota(True, "SAM_API_KEY no esta configurada")
@@ -469,11 +631,14 @@ def buscar_notice(notice_id: str, estado: dict | None = None) -> dict | None:
         _nota(False, "demasiado corto para ser un noticeId")
         return None
 
-    hoy = datetime.now(timezone.utc)
+    # Mismo rango y mismo motivo que en buscar_por_solicitud(). Cuando dos
+    # sitios hacen la misma cuenta a mano, los dos se equivocan igual, y arreglar
+    # solo uno deja el bug vivo en el otro.
+    posted_from, posted_to = _rango_posted()
     params = {
         "api_key": config.SAM_API_KEY,
-        "postedFrom": _fecha(hoy - timedelta(days=365)),
-        "postedTo": _fecha(hoy),
+        "postedFrom": posted_from,
+        "postedTo": posted_to,
         "offset": 0,
         "limit": 5,
         "noticeid": nid,
@@ -485,8 +650,9 @@ def buscar_notice(notice_id: str, estado: dict | None = None) -> dict | None:
         _nota(True, str(e)[:200])
         return None
     if r.status_code != 200:
-        log.error("buscar_notice('%s'): HTTP %s", nid, r.status_code)
-        _nota(True, f"HTTP {r.status_code}")
+        log.error("buscar_notice('%s'): HTTP %s %s", nid, r.status_code,
+                  _cuerpo_error(r))
+        _http(r.status_code)
         return None
     try:
         datos = r.json()

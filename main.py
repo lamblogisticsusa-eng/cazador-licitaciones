@@ -692,6 +692,9 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # los dos porque hay avisos donde el usuario tiene uno y no el otro.
         de_sam = False
         fallo_api = ""
+        # El codigo HTTP, no solo el motivo: un 400 y un 429 necesitan mensajes
+        # distintos y el usuario hace cosas distintas con cada uno.
+        _http_api = None
         if not analisis:
             # `estado` es lo que permite no mentirle al usuario: sin el, un
             # 429 de SAM.gov y una solicitud inexistente se ven IGUALES, y
@@ -705,8 +708,10 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 aviso = sam_api.buscar_notice(id_limpio, estado=_est2)
                 if _est2.get("fallo"):
                     fallo_api = _est2.get("motivo") or fallo_api
+                    _http_api = _est2.get("http")
             if aviso is None and _est.get("fallo"):
                 fallo_api = _est.get("motivo") or fallo_api
+                _http_api = _est.get("http")
             if aviso:
                 de_sam = True
                 analisis = pdfg.desde_aviso(aviso)
@@ -717,13 +722,38 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             # No es que no exista: es que no se pudo preguntar. Decirlo es la
             # diferencia entre que el usuario lo intente otra vez en diez
             # minutos y que lo de por bueno.
+            # Un 400 NO es cuota. La cuota es el 429.
+            #
+            # Decirle a un 400 "casi siempre por cuota del plan gratuito,
+            # intentelo en unos minutos" es actively harmful: el rango de fechas
+            # se calcula en cada llamada, asi que dentro de un minuto va a fallar
+            # EXACTAMENTE igual, con el mismo 400. El usuario espera, reintenta,
+            # y pierde el rato dos veces. Y como el numero de solicitud es
+            # correcto, lo siguiente que hara es buscar en Google si se ha
+            # equivocado, que es justo la accion que no lleva a ninguna parte.
+            #
+            # Un 400 es una peticion incorrecta, y casi siempre es cosa nuestra:
+            # un rango de fechas, un formato de parametro. Se dice eso, y se
+            # dice que el numero es correcto.
+            if _http_api == 400:
+                await estado.edit_text(
+                    f"<b>SAM.gov rechazo la consulta (HTTP 400)</b>\n\n"
+                    f"Solicitud: <code>{telegram_notify._esc(id_limpio)}</code>"
+                    "\n\nSAM.gov no acepto la consulta por el rango de fechas "
+                    "o por el formato de un parametro. El numero de solicitud "
+                    "puede estar bien: no es un problema del numero ni de "
+                    "cuota.\n\nSe ha registrado en el log de Render. Si "
+                    "repite, digame el numero para revisar la consulta.",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
             await estado.edit_text(
                 f"<b>No pude consultar SAM.gov</b>\n\n"
                 f"Solicitud: <code>{telegram_notify._esc(id_limpio)}</code>\n"
                 f"Motivo: <code>{telegram_notify._esc(str(fallo_api)[:120])}</code>"
                 "\n\nEl numero puede estar bien: es la API de SAM.gov la que "
-                "no ha podido responder, casi siempre por cuota del plan "
-                "gratuito. Intentelo otra vez en unos minutos.",
+                "no ha podido responder. Intentelo otra vez en unos minutos.",
                 parse_mode=ParseMode.HTML,
             )
             return
