@@ -50,6 +50,7 @@ distribuidor es un problema de verdad al conciliar.
 from __future__ import annotations
 
 import io
+import logging
 import re
 import os
 import sqlite3
@@ -74,6 +75,8 @@ from reportlab.platypus import (
 import config
 
 # --- Datos de la empresa -------------------------------------------------
+log = logging.getLogger("kyomoto.pdf")
+
 EMPRESA = "L.A.M.B. Logistics LLC"
 DIRECCION = ["1209 Mountain Rd. PL. NE, Ste. H", "Albuquerque, NM 87110"]
 FIRMANTE = "Bastian Cordero"
@@ -480,21 +483,40 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         cab = ["CLIN", "PART NO. / NSN",
                "DESCRIPTION &amp; SALIENT CHARACTERISTICS",
                "QTY", "UOI", "UNIT PRICE"]
+        # El JSON estructurado manda en la PRIMERA fila, que es la que el
+        # comprador lee antes de decidir seguir. Las siguientes salen del BOM,
+        # que en un aviso de varios CLIN ya viene del propio aviso.
+        #
+        # Se consume el JSON y no el BOM ya "traducido" por el pipeline porque
+        # el JSON lleva el texto EXACTO que salio del parsing, con su
+        # producto_limpio y su descripcion_distribuidor. Si se usara el BOM, el
+        # JSON solo habria servido como intermedio y su valor estaria en que
+        # se vea de donde salio cada dato, no en que se imprima literal.
+        _est = datos.get("estructurado") or {}
         _f_bom = [[Paragraph(h, e["celda_b"]) for h in cab]]
-        for b in _bom:
+        for _i, b in enumerate(_bom):
             _d = b.get("descripcion") or ""
             _s = b.get("especificacion") or ""
+            _cant = _num(b.get("cantidad"))
+            _uni = b.get("unidad") or ""
+            if _i == 0 and _est:
+                _d = _est.get("producto_limpio") or _d
+                _s = _est.get("descripcion_distribuidor") or _s
+                _cant = _num(_est.get("cantidad")) or _cant
+                _uni = _est.get("unidad") or _uni
             if _s:
                 _d = f"{_d}<br/><font size=7.5 color='#5B6770'>{_s}</font>"
             _f_bom.append([
                 Paragraph(str(b.get("clin") or ""), e["celda_b"]),
                 Paragraph(b.get("parte") or "__________", e["celda"]),
                 Paragraph(_d, e["celda"]),
-                Paragraph(_fmt(_num(b.get("cantidad")))
-                          if _num(b.get("cantidad")) else HUECO, e["celda"]),
-                Paragraph(b.get("unidad") or HUECO, e["celda"]),
+                Paragraph(_fmt(_cant) if _cant else HUECO, e["celda"]),
+                Paragraph(_uni or HUECO, e["celda"]),
                 Paragraph(b.get("precio") or "", e["celda_b"]),
             ])
+        if _est.get("fuente"):
+            log.info("generar_po: BOM desde %s (%s)", _est.get("_modelo") or "IA",
+                     _est["fuente"])
         # Los anchos estan calculados para que NINGUNA cabecera se parta en
         # dos lineas. "UNIT PRICE" no cabia en 0.48" y salia "UNIT PRIC / E",
         # que se ve bien en el PDF pero rompe el texto a quien lo copia, y
@@ -1732,6 +1754,48 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
     limpio_desc = _sin_tramitacion(_sin_enmiendas(desc or "")[0])
     bom = _bom_desde_aviso(aviso, desc)
 
+    # --- Parsing estructurado con IA ---
+    #
+    # El parser de texto funciona, pero se rompe con formas que las regex no
+    # pueden ver: "2-20 foot Containers" son 2 contenedores, no 20, y "6 INCH
+    # PUMP" es la medida de un rotor, no la cantidad. Saber eso no es un
+    # problema de expresiones regulares: es de leer el aviso.
+    #
+    # El resultado se mezcla con el del parser campo a campo en
+    # estructurador._validar(), que solo se queda con lo de la IA si es
+    # utilizable. Y si la IA no esta (sin clave, sin cuota, API caída), se usa
+    # el parser de texto y el PDF sale igual que antes. Nunca lanza.
+    est = {}
+    try:
+        import estructurador
+        est = estructurador.estructurar(
+            aviso, desc or "",
+            respaldo={
+                "producto": (bom[0].get("descripcion") if bom else "") or "",
+                "especificacion": (bom[0].get("especificacion") if bom else ""),
+                "cantidad": (bom[0].get("cantidad") if bom else 0),
+                "unidad": (bom[0].get("unidad") if bom else ""),
+                "hay_cantidad": "si" if bom and (bom[0].get("cantidad") or 0) else "",
+            },
+        ) or {}
+    except Exception as e:
+        log.warning("desde_aviso: el parsing estructurado fallo (%s); "
+                    "se usa el parser de texto", e)
+
+    if est and bom:
+        # Se reescribe SOLO el primer item. En un aviso de un CLIN es el unico;
+        # con varios, el resto conserva lo que dio el parser de texto, que para
+        # las lineas siguientes ya viene del aviso.
+        _b0 = bom[0]
+        _b0["descripcion"] = est.get("producto_limpio") or _b0["descripcion"]
+        _esp_ia = est.get("descripcion_distribuidor") or ""
+        if _esp_ia:
+            _b0["especificacion"] = _esp_ia
+        if est.get("cantidad"):
+            _b0["cantidad"] = est["cantidad"]
+        if est.get("unidad"):
+            _b0["unidad"] = est["unidad"]
+
     estimacion = _estimar_precio(desc, bom)
 
     # La cantidad y la unidad salen del BOM, que ya las ha buscado en el texto
@@ -1771,6 +1835,7 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         # Se usan los valores ya limpios del BOM, que es donde vive el trabajo.
         # Asi las dos mitades del documento no pueden divergir.
         "producto": (str(_bom0.get("descripcion") or "").strip()
+                     or (est.get("producto_limpio") if est else "")
                      or (aviso.get("title") or "").strip()),
         # El numero de parte real, no el NSN. El NSN es un codigo de catalogo
         # y va en su propia columna del BOM; aqui lo que se quiere es lo que
@@ -1792,6 +1857,7 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         # fuera la ficha del rodamiento.
         "especificacion_tecnica_clave": (
             str(_bom0.get("especificacion") or "").strip()
+            or (est.get("descripcion_distribuidor") if est else "")
             or _sin_tramitacion(limpio_desc or "")),
         "sin_descripcion": not bool(desc.strip()),
         # El BOM va ya montado: desde_analisis lo respeta tal cual.
@@ -1801,6 +1867,9 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         # hay informacion que tiene que ir a mirar a SAM.gov.
         "enmiendas": max([int(b.get("enmiendas") or 0) for b in (bom or [])]
                          or [0]),
+        # El JSON estructurado viaja en el analisis para que desde_analisis
+        # pueda llevarlo hasta el documento. Ahi generar_po() lo usa tal cual.
+        "estructurado": est or {},
         # El precio lo hereda Kyomoto del valor que declara el propio aviso.
         #
         # Antes iban a None, y la tabla ITEMS ORDERED multiplicaba None por la
@@ -1933,6 +2002,10 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     normal: el usuario elige el distribuidor DESPUES de ver el analisis.
     """
     prov = proveedor or {}
+    # El JSON estructurado llega en el propio analisis (lo pone desde_aviso
+    # cuando vino de una consulta en vivo). En un analisis ya guardado por el
+    # barrido no esta, y da igual: esos datos ya salieron de Gemini.
+    _est_analisis = dict(analisis.get("estructurado") or {})
     lineas = []
     cant = _num(analisis.get("cantidad_total")) or 1
     unidad = analisis.get("unidad_medida") or "EA"
@@ -2085,6 +2158,11 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         "lineas": lineas,
         # Sin numero no se imprime $0.00: la tabla deja las celdas en blanco.
         "mostrar_precios": mostrar_precios,
+        # El JSON estructurado, tal cual. generar_po() lo consume para la tabla
+        # del BOM: producto_limpio en la linea, cantidad y unidad en sus
+        # columnas, descripcion_distribuidor en el cuerpo. Si no esta (sin IA,
+        # sin cuota), el BOM ya trae lo mismo y el documento sale igual.
+        "estructurado": _est_analisis or {},
         "instrucciones": "\n".join(inst),
         # Condiciones en ingles, por lo mismo que las instrucciones: van al
         # proveedor. El factoring se declara porque es lo que hace posible la

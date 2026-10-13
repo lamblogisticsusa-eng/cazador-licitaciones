@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS rangos_buscados (
     dia    TEXT NOT NULL,
     PRIMARY KEY (desde, hasta, dia)
 );
+CREATE TABLE IF NOT EXISTS cache_estructura (
+    notice_id TEXT PRIMARY KEY,
+    datos     TEXT NOT NULL,
+    modelo    TEXT,
+    guardado  TEXT NOT NULL
+);
 """
 
 
@@ -210,6 +216,77 @@ def rango_buscado(desde: str, hasta: str) -> bool:
             (desde, hasta, _hoy()),
         ).fetchone()
         return f is not None
+
+
+# Centinela para "se intento estructurar y no se pudo".
+#
+# Sin el, un fallo se volveria a intentar en cada llamada. El caso tipico es el
+# 429: sin cuota se gasta una llamada, falla, y como no se guarda el fallo, la
+# SIGUIENTE tambien la gasta y tambien falla. Con el centinela, la segunda vez
+# sale de la cache y es gratis.
+SIN_ESTRUCTURA = "__sin_estructura__"
+
+
+def guardar_estructura(notice_id: str, datos: dict, modelo: str = "") -> None:
+    """Guarda el JSON validado de un aviso. datos={} guarda el centinela."""
+    import json as _json
+    init_db()
+    texto = _json.dumps(datos, ensure_ascii=False) if datos else SIN_ESTRUCTURA
+    with _lock, _conexion() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO cache_estructura "
+            "(notice_id, datos, modelo, guardado) VALUES (?,?,?,?)",
+            (notice_id, texto, modelo or "", _ahora()),
+        )
+
+
+def leer_estructura(notice_id: str) -> tuple[dict, str, float]:
+    """
+    (datos, modelo, edad_minutos) de la cache. ({}, "", -1) si no hay fila.
+
+    La EDAD importa porque el fallo tambien se cachea, y reintentarlo en cada
+    llamada es lo contrario de lo que se quiere: una clave invalida hace que
+    los cuatro modelos de la cola fallen uno por uno, y si eso se repite en
+    cada /pdf son cuatro llamadas por cada pulsacion del usuario.
+
+    Con la edad, quien llama decide: si el fallo es viejo (mas de
+    MINUTOS_REINTENTO), se vuelve a intentar, porque un 429 de las tres de la
+    madrugada a las once de la manana ya no aplica.
+    """
+    import json as _json
+    from datetime import datetime as _dt
+    init_db()
+    with _lock, _conexion() as c:
+        fila = c.execute(
+            "SELECT datos, modelo, guardado FROM cache_estructura "
+            "WHERE notice_id = ?", (notice_id,),
+        ).fetchone()
+    if not fila:
+        return {}, "", -1.0
+    try:
+        edad = (_dt.now(timezone.utc)
+                - _dt.fromisoformat(fila[2])).total_seconds() / 60.0
+    except (ValueError, TypeError):
+        edad = -1.0
+    if fila[0] == SIN_ESTRUCTURA:
+        return {}, "", edad
+    try:
+        return _json.loads(fila[0]), (fila[1] or ""), edad
+    except (ValueError, TypeError):
+        # JSON roto: se devuelve como si no hubiera cache y se vuelve a
+        # intentar. Peor que no tener cache, pero no rompe nada.
+        return {}, "", -1.0
+
+
+def limpiar_cache_estructura(dias: int = 30) -> int:
+    """Borra estructuras de mas de `dias` dias. Devuelve cuantas."""
+    init_db()
+    with _lock, _conexion() as c:
+        n = c.execute(
+            "DELETE FROM cache_estructura WHERE guardado < ?",
+            (_hace(dias),),
+        ).rowcount
+    return max(0, n)
 
 
 def guardar_analisis(analisis: dict) -> None:
