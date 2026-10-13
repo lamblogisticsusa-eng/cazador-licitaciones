@@ -353,6 +353,49 @@ check("El PDF sale sin IA", len(b) > 50000, "-> %d bytes" % len(b))
 
 print()
 print("=" * 76)
+print("3b) LA BARRERA DE CUOTA NO LLEGA A LA API SI LA CUOTA ES CERO")
+print("=" * 76)
+# Esto se rompio de verdad. La barrera llamaba a quota.queden(), y la funcion
+# se llama quota.quedan(). El AttributeError caia en el except, que lo
+# registraba y SEGUIA ADELANTE: es decir, sin cuota llamaba a la API, que es
+# justo lo que la barrera tiene que impedir. Y el fallo era invisible porque
+# el except lo convierte en un aviso y continua.
+#
+# Ademas ahora el except NO continua: si no se puede comprobar la cuota se
+# asume que no la hay. Equivocarse cuesta un PDF con el parser de texto, que es
+# el respaldo; lo contrario, llamadas gastadas sin querer.
+print("  Con la cuota a cero, la API no se toca:")
+contador = instalar([RESPUESTA_1, RESPUESTA_2])
+quota.quedan = sin_cuota
+antes = len(contador.llamadas)
+r = estructurador.estructurar({"noticeId": "barrera-cuota-0"},
+                              "Line Item Number 0001: Quantity: 5 EA.",
+                              respaldo={"producto": "P", "especificacion": "E",
+                                        "cantidad": 5.0, "unidad": "EA",
+                                        "hay_cantidad": "si"})
+check("  Cero peticiones a la API", len(contador.llamadas) == antes,
+      "-> %d peticion(es) sin cuota" % (len(contador.llamadas) - antes))
+check("  Y sale el respaldo", r["cantidad"] == 5.0)
+
+print("  Y si la cuota NO SE PUEDE COMPROBAR, tampoco se llama:")
+del quota.quedan                      # Rompe a proposito
+try:
+    antes = len(contador.llamadas)
+    r = estructurador.estructurar({"noticeId": "barrera-rota-1"},
+                                  "Line Item Number 0001: Quantity: 5 EA.",
+                                  respaldo={"producto": "P",
+                                            "especificacion": "E",
+                                            "cantidad": 5.0, "unidad": "EA",
+                                            "hay_cantidad": "si"})
+    check("  Cero peticiones si la cuota no se puede mirar",
+          len(contador.llamadas) == antes,
+          "-> %d peticion(es)" % (len(contador.llamadas) - antes))
+    check("  Y sale igualmente el respaldo", r["cantidad"] == 5.0)
+finally:
+    quota.quedan = lambda: 50
+
+print()
+print("=" * 76)
 print("4) LA CACHE, Y EL FALLO TAMBIEN SE CACHEA")
 print("=" * 76)
 import quota  # se reimporta: instalar() manipula sys.modules

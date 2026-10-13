@@ -84,6 +84,15 @@ CARGO_FIRMANTE = "CEO"
 EMAIL = "lamblogisticsusa@gmail.com"
 TELEFONO = "+1 (702) 516-6086"
 
+# Identificadores oficiales ante el gobierno de EE.UU.
+#
+# UEI (Unique Entity Identifier) y NCAGE (Commercial and Government Entity code).
+# En un Small Business Set-Aside el UEI no es decorativo: es con el que se
+# comprueba que la empresa existe en SAM.gov y que su NAICS encaja con el del
+# contrato. Sin el, el documento no identifica a nadie.
+UEI = "NEXGNXGF5E38"
+NCAGE = "STYG2"
+
 # Colores de la marca. El azul del logo es #1B3B6F y el gris #5B6770.
 AZUL = colors.HexColor("#1B3B6F")
 GRIS = colors.HexColor("#5B6770")
@@ -326,7 +335,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         canvas.setFont("Helvetica", 6.5)
         canvas.drawRightString(LETTER[0] - config.PDF_MARGEN_DERECHO,
                                y - 0.04 * inch,
-                               f"{EMPRESA} · {TELEFONO} · {EMAIL} · pagina {d.page}")
+                               f"{EMPRESA} · UEI {UEI} · {TELEFONO} · {EMAIL} · pagina {d.page}")
         canvas.restoreState()
 
     doc.addPageTemplates([PageTemplate(id="po", frames=[marco],
@@ -339,6 +348,10 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
     for linea in DIRECCION:
         f.append(Paragraph(linea, e["dir"]))
     f.append(Paragraph(f"{TELEFONO} &nbsp;|&nbsp; {EMAIL}", e["dir"]))
+    # UEI y NCAGE en su propia linea, para que se LEAN. Puestos en la misma que
+    # el telefono se pierden de vista, y es justo el dato que el oficial de
+    # contratacion va a buscar.
+    f.append(Paragraph(f"UEI {UEI} &nbsp;|&nbsp; NCAGE {NCAGE}", e["dir"]))
     f.append(Spacer(1, 0.22 * inch))
 
     # --- Titulo ---
@@ -547,7 +560,9 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             "<b>UOI</b> = Unit of Issue. <b>CLIN</b> = Contract Line Item "
             "Number. <b>NSN</b> = National Stock Number. "
             "<b>MFR</b> = Manufacturer. <b>CUI</b> = Central Unit "
-            "Identifier. <b>Cage</b> = Commercial and Government Entity code.",
+            f"Identifier. <b>CAGE</b> = Commercial and Government Entity "
+            f"code. Issued under UEI {UEI}, NCAGE {NCAGE}; quote on your "
+            f"letterhead and reference both codes.",
             e["nota"]))
         f.append(Spacer(1, 0.12 * inch))
 
@@ -810,6 +825,66 @@ def _a_float(bruto) -> float:
         return 0.0
 
 
+# "2-20 foot Containers", "4-10 inch rings", "3-6 inch bolts".
+#
+# Es la forma estandar de EE.UU. para decir "N piezas, cada una de M": el numero
+# ANTES del guion es la cantidad y el de DESPUES es la medida.
+#
+# Anclado con ^ a proposito. En medio de una frase un "5-10" puede ser un numero
+# de plano, una referencia de parrafo o un rango de anyos, y leerlo como
+# cantidad seria inventar un numero en un documento que va a un distribuidor.
+#
+# Y solo si detras de los dos numeros viene una palabra de MEDIDA, que es lo que
+# separa "2-20 foot" de "MIL-STD-5-10" o de "2024-2025".
+#
+# El patron exige DOS numeros separados por guion. Por eso "20-FOOT CONTAINER
+# WITH GANTRY BEAM", que es el titulo de W912ES27QA004, NO dispara: ahi hay un
+# numero y un guion, no dos numeros. Si no lo exigiera, ese titulo daria 20
+# contenedores en vez de 2.
+_MEDIDAS = (
+    r"foot|feet|ft|inch|inches|in|meter|metre|meters|metres|yard|yards|"
+    r"centimeter|centimetre|millimeter|millimetre|cm|mm"
+)
+_RE_RANGO = re.compile(
+    r"^\s*(\d{1,6})\s*[-/]\s*\d{1,6}\s*(?:" + _MEDIDAS + r")\b", re.I)
+
+# El mismo patron SIN ancla, para la descripcion COMPLETA. En el aviso real el
+# rango va precedido de una frase ("This solicitation is for 2-20 foot
+# Containers"), asi que con el ancla no se ve: medido, daba 0.
+#
+# Lo que protege de los tramposos NO es el ancla sino la palabra de MEDIDA, que
+# es lo que hace que "MIL-STD-5-10", "2024-2025" y "Paragraph 5-10" no casen.
+_RE_RANGO_LIBRE = re.compile(
+    r"(\d{1,6})\s*[-/]\s*\d{1,6}\s*(?:" + _MEDIDAS + r")\b", re.I)
+
+
+def _cantidad_de_rango(texto: str, libre: bool = False) -> tuple[float, bool]:
+    """
+    Cantidad y si viene de un patron de rango al principio. (0.0, False).
+
+    Se comprueba el TITULO y la DESCRIPCION, porque en "20-FOOT CONTAINER WITH
+    GANTRY BEAM" el titulo solo trae la medida, y la cantidad no aparece hasta
+    la descripcion ("2-20 foot Containers").
+
+    Se acepta el prefijo de clase de SAM.gov ("53--") por si el rango llega
+    detras de el, aunque hasta ahora no ha ocurrido.
+    """
+    t = str(texto or "")
+    if libre:
+        m = _RE_RANGO_LIBRE.search(t)
+    else:
+        m = _RE_RANGO.match(t)
+        if not m:
+            m = _RE_RANGO.match(re.sub(r"^\s*\d{2,4}\s*--\s*", "", t))
+    if not m:
+        return 0.0, False
+    try:
+        v = float(m.group(1))
+    except ValueError:
+        return 0.0, False
+    return (v, True) if 0 < v <= 1_000_000 else (0.0, False)
+
+
 def _cantidad_de_linea(linea: str) -> tuple[float, str]:
     """
     Cantidad y unidad de UN CLIN. (0.0, "") si no hay.
@@ -832,6 +907,14 @@ El paso 3 va el ultimo porque es el que se confunde.
     texto = str(linea or "")
     if not texto.strip():
         return 0.0, ""
+
+    # El rango va PRIMERO. Si el principio del aviso dice "2-20 foot Containers",
+    # esa es la cantidad, y un "Quantity: 100 units" que aparezca mas abajo
+    # puede estar hablando de otra cosa: un total del contrato, un estimado.
+    # El dato que esta al principio es el que describe el item.
+    _rango, _es_rango = _cantidad_de_rango(texto)
+    if _es_rango:
+        return _rango, "EA"
 
     m = _RE_CANT_ETIQUETA.search(texto)
     if m:
@@ -1022,7 +1105,11 @@ def _cabecera_producto(titulo: str, modelo: str, plano: str) -> str:
     parece el nombre del producto y no una referencia.
     """
     t = " ".join(str(titulo or "").split())
-    t = re.sub(r"^\d{2,4}\s*-{1,2}\s*", "", t).strip(" -,")
+    # SOLO se quita el prefijo de clase, que es "53--", con DOS guiones. Con
+    # uno o dos guiones se comia el 20 de "20-FOOT CONTAINER WITH GANTRY BEAM" y
+    # el titulo salia "FOOT CONTAINER WITH GANTRY BEAM", que no es el nombre de
+    # nada. El numero ahi es la medida del contenedor, no un codigo.
+    t = re.sub(r"^\d{2,4}\s*--\s*", "", t).strip(" -,")
     # SAM.gov escribe los titulos sin espacio tras la coma
     # ("PARTS KIT,SEAL REPLACEMENT,MECHANICAL"). Se lo pone porque el
     # distributor lee esto y "KIT,SEAL" se le junta. No se hace nada mas: el
@@ -1066,11 +1153,24 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
     # para los CLIN cuya linea no traiga la suya. Antes salia de un unico
     # _RE_CANT sobre todo el texto, que con "100 BG" no encontra nada porque BG
     # no estaba en la lista, y caia al 1.
-    cant, unidad = _cantidad_de_linea(texto)
-    if not unidad:
-        m = _RE_UOI.search(texto)
-        if m and m.group(1).upper() in _UOIS:
-            unidad = m.group(1).upper()
+    # El rango manda. Se mira ANTES que la cantidad global y antes que cada
+    # CLIN, porque cuando un aviso dice "2-20 foot Containers" esta describiendo
+    # UN item con dos unidades, no dos lineas.
+    #
+    # Y la unidad se fija en EA. "CON" casi no lo usa ningun distributor, y "2
+    # CON" no es una unidad de catalogo: el item se pide UNO de cada vez.
+    _rango_txt, _hay_rango = _cantidad_de_rango(texto, libre=True)
+    if not _hay_rango:
+        _rango_txt, _hay_rango = _cantidad_de_rango(
+            (aviso.get("title") or "").strip())
+    if _hay_rango:
+        cant, unidad = _rango_txt, "EA"
+    else:
+        cant, unidad = _cantidad_de_linea(texto)
+        if not unidad:
+            m = _RE_UOI.search(texto)
+            if m and m.group(1).upper() in _UOIS:
+                unidad = m.group(1).upper()
 
     pn = _RE_PARTNO.search(texto)
     if pn and not parte:
@@ -1172,6 +1272,9 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
     salida = []
     for i, c in enumerate(clines, start=1):
         _d = _datos_de(_linea_de(c))
+        if _hay_rango:
+            _d = {"cantidad": _rango_txt, "unidad": "EA",
+                  "parte": _d["parte"]}
         # Si en su linea no habia nada, se cae al valor global del texto, y si
         # tampoco, a 1 EA. Se marca con vacio el dato que no se sabe, para que
         # el comprador lo rellene en vez de fiarse de una cifra inventada.

@@ -328,14 +328,27 @@ def estructurar(aviso: dict, descripcion: str, respaldo: dict,
             return _validar({}, respaldo, texto)
 
     # --- 2) Cuota antes de gastar ---
+    # OJO CON EL NOMBRE: la funcion se llama quota.quedan(), no "queden". Con
+    # "queden" el AttributeError caia en el except de abajo, que lo decia y
+    # seguia adelante: es decir, SIN CUOTA LLAMABA A LA API IGUAL, que es
+    # justo lo que esta barrera tiene que impedir. El fallo era silencioso
+    # porque el except lo convierte en un aviso y continua.
+    #
+    # Por eso el except ya no continua: si no se puede comprobar la cuota, se
+    # asume que no la hay. Es el lado conservador, y el coste de equivocarse es
+    # un PDF con el parser de texto, que es exactamente el respaldo.
     try:
         import quota
-        if quota.queden() < 1:
+        if quota.quedan() < 1:
             log.info("estructurar('%s'): sin cuota de Gemini, se usa el "
                      "parser de texto", nid)
             return _validar({}, respaldo, texto)
     except Exception as e:
-        log.warning("estructurar('%s'): no se pudo mirar la cuota: %s", nid, e)
+        log.warning("estructurar('%s'): no se pudo comprobar la cuota (%s). "
+                    "Se asume que no hay y se usa el parser de texto, que es "
+                    "el lado conservador: equivocarse cuesta un PDF sin IA, y "
+                    "no lo contrario una llamada sin cuota.", nid, e)
+        return _validar({}, respaldo, texto)
 
     # --- 3) La llamada ---
     try:
