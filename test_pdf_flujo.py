@@ -173,6 +173,46 @@ def msgs(con):
     return [t for k, t in con if k in ("texto", "estado_editado")]
 
 
+# ------------------------------------------------------------------ Gemini
+# Este archivo dobla Telegram pero NO dobla Gemini, asi que /pdf salia a
+# internet de verdad en cada ejecucion: cuatro modelos, cuatro 400 en unos
+# segundos. Con la clave falsa que se inyecta aqui no se gasta cuota real (la
+# API la rechaza antes de nada) y no sale nada, pero la suite deja de ser
+# hermetica y depende de que haya red.
+#
+# Se devuelve VACIO a proposito, y no una respuesta buena: es exactamente el
+# camino que la suite ya ejercita hoy, con el parsing estructurado no
+# disponible y el PDF saliendo por el respaldo de regex. Poner una respuesta
+# buena aqui reprobaria las aserciones contra otra rama que este test no
+# pretende comprobar.
+import types as _types
+
+_STUB = _types.ModuleType("google.genai")
+
+
+class _RespGemini:
+    text = ""
+
+
+class _Modelos:
+    def generate_content(self, *a, **k):
+        return _RespGemini()
+
+
+class _ClienteGemini:
+    models = _Modelos()
+
+
+_STUB.Client = lambda api_key=None: _ClienteGemini()
+_google = _types.ModuleType("google")
+_google.genai = _STUB
+sys.modules["google"] = _google
+sys.modules["google.genai"] = _STUB
+_tipos = _types.ModuleType("google.genai.types")
+_tipos.GenerateContentConfig = lambda **k: k
+_tipos.ThinkingConfig = lambda **k: k
+sys.modules["google.genai.types"] = _tipos
+
 print("=" * 76)
 print("SIMULACION DE SAM.GOV CON W9127N26QA145")
 print("=" * 76)

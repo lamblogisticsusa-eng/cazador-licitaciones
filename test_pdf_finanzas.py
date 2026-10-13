@@ -127,6 +127,47 @@ def _con_desc(texto):
         sam_api.obtener_descripcion = _real_desc
 
 
+# ------------------------------------------------------------------ Gemini
+# Ni esto dobla Gemini. /pdf llama a estructurar(), que va a la API de verdad:
+# cuatro modelos, cuatro 400 en unos segundos, en cada ejecucion.
+#
+# Con la clave falsa que estos tests inyectan no se gasta cuota real (la API la
+# rechaza antes de procesar nada) y no sale documento alguno, pero la suite
+# deja de ser hermetica y depende de que haya red. Un test que necesita
+# internet para probar un formateador no es un test.
+#
+# Se devuelve VACIO a proposito, y no una respuesta buena: es el mismo camino
+# que la suite ya ejercita (el parsing estructurado no esta disponible y el
+# PDF sale por el respaldo de regex). Poner una respuesta buena reprobaria
+# las aserciones contra una rama que estos tests no comprueban.
+import types as _types
+
+_STUB = _types.ModuleType("google.genai")
+
+
+class _RespGemini:
+    text = ""
+
+
+class _Modelos:
+    def generate_content(self, *a, **k):
+        return _RespGemini()
+
+
+class _ClienteGemini:
+    models = _Modelos()
+
+
+_STUB.Client = lambda api_key=None: _ClienteGemini()
+_google = _types.ModuleType("google")
+_google.genai = _STUB
+sys.modules["google"] = _google
+sys.modules["google.genai"] = _STUB
+_tipos = _types.ModuleType("google.genai.types")
+_tipos.GenerateContentConfig = lambda **k: k
+_tipos.ThinkingConfig = lambda **k: k
+sys.modules["google.genai.types"] = _tipos
+
 print("=" * 76)
 print("1) LOS DATOS DE CONTACTO")
 print("=" * 76)

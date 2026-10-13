@@ -418,6 +418,17 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
     # El documento no lleva precios: los pone el distribuidor. Ver la nota en
     # desde_analisis(), que explica por que el estimado propio NO se imprime.
     _sin_precio = not datos.get("mostrar_precios", True)
+    # El bloque tecnico se calcula UNA vez y solo si hay detalle del lote. Sin
+    # detalle, _tec es "" y el documento sale exactamente igual que antes: ni una
+    # linea de mas, ni un ancho cambiado, ni una maqueta tocada.
+    _tec = ""
+    _det = datos.get("lote_detalle") or {}
+    if _det:
+        try:
+            import integral as _integral
+            _tec = _integral.bloque_tecnico(_det)
+        except Exception:
+            _tec = ""
     for i, ln in enumerate(datos.get("lineas") or [], start=1):
         cant = _num(ln.get("cantidad"))
         precio = _num(ln.get("precio_unitario"))
@@ -427,6 +438,20 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         spec = ln.get("especificacion") or ""
         if spec:
             desc = f"{desc}<br/><font size=7.5 color='#5B6770'>{spec}</font>"
+            # TECHNICAL & DELIVERY REQUIREMENTS, debajo de la descripcion.
+            #
+            # Cambio de criterio respecto a 3.8.0, que decidio que esto NO iba
+            # al PDF por considerarlo informacion interna. El encargo lo pide al
+            # reves y el motivo es correcto: un distribuidor de EE.UU. NO PUEDE
+            # cotizar sin el parte y la medida. Un "1 LOT" sin saber si son 24
+            # rodamientos o 6 cierrapuertas no se cotiza, se rechaza.
+            #
+            # Lo que NO cambia es el precio: las celdas siguen EN BLANCO, que es
+            # lo que protege la negociacion y no tiene relacion con esto.
+            if _tec and i == 1:
+                desc += ('<br/><font size=7.5 color="#1B3B6F">'
+                         '<b>TECHNICAL &amp; DELIVERY REQUIREMENTS</b></font>'
+                         f'<br/><font size=7.5>{_tec}</font>')
         # El numero de linea, no el de solicitud: este no cabe en la columna
         # (0.62") y ademas ya sale arriba, en SAM.GOV REFERENCE. Lo que el
         # distribuidor necesita para citar una linea es "1", "2", "3".
@@ -1956,14 +1981,43 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
     # Y va envuelta en try/except porque el PDF de una licitacion que NO es un
     # lote se tiene que poder generar SIEMPRE. Esta capa no puede ser la
     # razon de que un documento no salga.
-    lote = {}
+    lote, correccion = {}, {}
     try:
         if any(it.get("consolidated_lot") for it in (bom or [])):
             import lote_consolidado
-            lote = lote_consolidado.resolver_lote(aviso, desc) or {}
-            log.info("desde_aviso: lote consolidado en %s -> %s",
-                     aviso.get("noticeId"),
-                     "desglosado" if lote else "sin desglose")
+            import integral
+            # Los adjuntos se piden SOLO aqui. Es lo que hace que esto no
+            # contradiga la decision de sam_api.obtener_descripcion(): no se
+            # pide /resources para todos los avisos, solo para los que tienen
+            # la tabla diciendo "1 LOT", que son los unicos donde los adjuntos
+            # pueden corregir un QTY que va a un distribuidor.
+            #
+            # Y resourceLinks ya venia en la respuesta del search, asi que
+            # descubrir los adjuntos no cuesta ninguna llamada.
+            corpus = ""
+            try:
+                import adjuntos
+                corpus = adjuntos.corpus_documental(
+                    aviso, str(aviso.get("noticeId") or ""))
+            except Exception as e:
+                log.warning("desde_aviso: los adjuntos fallaron (%s); se "
+                            "sigue con la descripcion", e)
+
+            lote = lote_consolidado.resolver_lote(
+                aviso, desc, corpus=corpus) or {}
+            log.info("desde_aviso: lote consolidado en %s -> %s (%d "
+                     "caracteres de adjuntos)", aviso.get("noticeId"),
+                     "desglosado" if lote else "sin desglose", len(corpus))
+
+            # Si el desglose trae un volumen real, se corrige el QTY, con las
+            # tres comprobaciones de integral.corregir_qty() que evitan que un
+            # numero inventado llegue a un pedido federal.
+            if lote:
+                _corpus = (desc or "") + "\n" + corpus
+                correccion = integral.corregir_qty(bom, lote, _corpus) or {}
+                if correccion and integral.aplicar_correccion(bom, correccion):
+                    log.info("desde_aviso: QTY corregido -> %s %s",
+                             int(correccion["cantidad"]), correccion["unidad"])
     except Exception as e:
         log.warning("desde_aviso: la Capa B fallo (%s); el PDF sigue igual", e)
 
@@ -2042,6 +2096,8 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         # El desglose del lote consolidado, o {}. Lo lleva SOLO el mensaje de
         # Telegram; el PDF no lo ve, por diseno.
         "lote_consolidado": lote or {},
+        # Si el QTY de la tabla se ha corregido con el volumen real, y por que.
+        "qty_corregido": correccion or {},
         # El precio lo hereda Kyomoto del valor que declara el propio aviso.
         #
         # Antes iban a None, y la tabla ITEMS ORDERED multiplicaba None por la
@@ -2335,6 +2391,9 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # columnas, descripcion_distribuidor en el cuerpo. Si no esta (sin IA,
         # sin cuota), el BOM ya trae lo mismo y el documento sale igual.
         "estructurado": _est_analisis or {},
+        # El detalle del lote consolidado, para el bloque tecnico del PDF. Va
+        # solo si hay: sin detalle, generar_po() no dibuja nada.
+        "lote_detalle": dict(analisis.get("lote_consolidado") or {}),
         "instrucciones": "\n".join(inst),
         # Condiciones en ingles, por lo mismo que las instrucciones: van al
         # proveedor. El factoring se declara porque es lo que hace posible la

@@ -147,7 +147,7 @@ print("=" * 70)
 print("2) UN BARRIDO REAL: LLEGAN VARIAS, NO UNA")
 print("=" * 70)
 n_avisos = 30
-scanner.sam_api.barrer = lambda dias=None, ptype="o,a", stats=None: (
+scanner.sam_api.barrer = lambda dias=None, ptype="o,a", stats=None, indice_psc=False: (
     _aviso(i) for i in range(n_avisos)
 )
 scanner._bajar_descripciones = _bajar_descripciones
@@ -214,7 +214,7 @@ def _bajar_vacia(candidatos):
             for o in candidatos}
 
 
-scanner.sam_api.barrer = lambda dias=None, ptype="o,a", stats=None: (
+scanner.sam_api.barrer = lambda dias=None, ptype="o,a", stats=None, indice_psc=False: (
     _aviso(i) for i in range(20)
 )
 scanner._bajar_descripciones = _bajar_vacia

@@ -70,10 +70,18 @@ import config
 log = logging.getLogger("kyomoto.lote")
 
 MAX_CARACTERES = 7000
+MAX_CORPUS = 18000
 
 # Las unidades con las que un aviso consolida. "LO" es como aparece en algunos
 # catalogos; "LOT" y "EA" son las comunes.
 UNIDADES_LOTE = frozenset({"EA", "LO", "LOT"})
+
+# Campo que puede contener un numero de piezas, y como se normaliza.
+#
+# La respuesta del modelo es texto libre ("24 bearings", "100 each", "6 exit
+# devices, 4 strikes"), porque esa es la forma en que un comprador humano lo
+# diria. Para poder sobrescribir el QTY del PDF hace falta un entero. De ahi
+# _unidades_numericas().
 
 CAMPOS = (
     "resolved_product_name",
@@ -115,10 +123,13 @@ resolved_product_name
   "Von Duprin 98A Exit Device". No "1 lot", no "miscellaneous parts".
 
 actual_units_required
-  Cuantas unidades REALES hay dentro del lote, con su unidad: "24 bearings",
-  "6 door closers, 4 strikes, 1 mounting kit". Si el texto no lo dice, cuenta
-  lo que puedas enumerar y marcalo como estimado. NO copies el "1" de la
-  tabla de precio: ese es el numero de lotes, no de piezas.
+  Cuantas unidades REALES hay DENTRO del lote. Si el desglose son varios
+  articulos, da el desglose Y el total: "24 bearings, 6 exit devices, 4
+  mounting kits, 12 strike plates (46 pieces total)".
+  El total importa mas que el desglose, porque es lo que va en la columna de
+  cantidad del documento. Si el texto no lo dice, sumalo tu y marcalo como
+  estimado. NO copies el "1" de la tabla de precio: ese es el numero de
+  lotes, no de piezas.
 
 dimensions_or_specs
   Medidas fisicas exactas: "5.00 x 96 in, 1/4 in thick", tolerancias,
@@ -184,6 +195,79 @@ def _limpiar(valor) -> str:
     return t[:220]
 
 
+# "24 bearings", "100 each", "6 exit devices, 4 mounting kits".
+#
+# El sustantivo comun CUENTA como unidad, porque es como lo escribe una persona:
+# "24 bearings" son 24 bearings, una cada una. Por eso se acepta cualquier
+# palabra tras el numero y no solo las siglas de catalogo.
+#
+# Y eso obliga a filtrar, porque "5 inch pump", "30 year warranty" y "page 12"
+# tambien son "numero + palabra". Lo que se descarta esta en _NO_UNIDAD.
+_RE_UNIDADES = re.compile(
+    r"(?<!\d)(\d{1,9})\s*(?:\+|x)?\s*"
+    r"(ea|each|eaches|units?|pieces?|pcs?|kits?|sets?|bags?|boxes|rolls?"
+    r"|containers?|cans?|cases?|lots?|pairs?|[a-z]{3,})(?![a-z])", re.I)
+
+# Palabras que PARECEN una unidad y no lo son: medidas, plazos, referencias de
+# pagina y conectores. Sin esta lista, "5 inch pump" se leeria como cinco
+# pulgadas pedidas, y eso va a la columna QTY de un documento que va a un
+# distribuidor.
+#
+# Y lo que NO esta aqui, aunque en una version anterior si, por decision:
+#
+#   each, per, total, reference, requirement
+#
+# No son unidades: son ETIQUETAS de la cifra. Y son precisamente las palabras
+# con las que un comprador humano dice la cantidad: "100 each", "46 total",
+# "24 pieces, reference drawing 1110". Con "each" y "total" en la lista negra,
+# "100 each" daba 0 y se perdia la cantidad mas clara que existe.
+_NO_UNIDAD = re.compile(
+    r"^(in|inch|inches|ft|foot|feet|yards?|yd|m|met(?:er|re)s?|cm|mm|km|mi|mile"
+    r"|miles|kg|kgs|lb|lbs|pounds?|oz|ounce|ounces|g|gal|gallons?|l|liter|"
+    r"litre|litres|ml|pt|qt|"
+    r"year|years|yr|day|days|week|weeks|month|months|hour|hours|minute|minutes"
+    r"|page|pages|pg|section|sections|sec|chapter|annex|"
+    r"item|items|line|lines|drawing|drawings|dwg|figure|figures|table|"
+    r"amendment|amendments|amd|attachment|attachments|note|notes|"
+    r"paragraph|paragraphs|clause|clauses|option|options|"
+    r"and|or|of|for|with|from|shall|must|are|is|includes|including|"
+    r"all|approximately|about|minimum|maximum|min|max|"
+    r"deliverable|deliverables|requirement|requirements|specification|"
+    r"specifications|warranty|coverage|assembly|assemblies)$", re.I)
+
+
+def _unidades_numericas(texto: str) -> int:
+    """
+    El numero de piezas de un texto libre. 0 si no hay uno claro.
+
+    Devuelve el MAYOR numero que aparece con una unidad de issue, no el
+    primero. La razon es que en un desglose tipico el texto va asi:
+
+        "24 bearings, 6 exit devices, 4 mounting kits, 12 strike plates"
+
+    El primero es 24, que es solo los rodamientos. El total que hay que
+    cotizar es 46, que es la suma. Y la suma NO esta escrita en ninguna parte,
+    asi que hay que calcularla.
+
+    Se devuelve el mayor, que es una cota INFERIOR del total pero nunca mayor,
+    y eso es la direccion buena: quedarse corto se corrige con el proveedor,
+    mientras que pasarse de cantidad en un pedido federal es un problema de
+    verdad. El LLM suele dar la suma correcta en el texto, y entonces el mayor
+    coincide con ella.
+    """
+    limpio = _RE_TRAMITE.sub(" ", str(texto or ""))
+    numeros = []
+    for m in _RE_UNIDADES.finditer(limpio):
+        palabra = (m.group(2) or "").strip()
+        if _NO_UNIDAD.match(palabra):
+            continue
+        try:
+            numeros.append(int(m.group(1)))
+        except ValueError:
+            continue
+    return max(numeros) if numeros else 0
+
+
 def _validar(datos: dict) -> dict:
     """
     Devuelve solo los seis campos, limpios, y la fuente de cada uno.
@@ -197,6 +281,13 @@ def _validar(datos: dict) -> dict:
         limpio = _limpiar(datos.get(campo))
         salida[campo] = limpio
         fuente[campo] = "ia" if limpio else "vacio"
+    # El numero que puede corregir el QTY del PDF. Va aparte del texto porque
+    # son dos cosas: lo que el modelo DICE ("24 bearings, 6 exit devices") y
+    # la cifra que se puede poner en una columna. Si no estan separados, para
+    # sobrescribir una cantidad hay que volver a parsear el texto en el sitio
+    # que sobrescribe, que es donde no toca tocar.
+    salida["unidades_numericas"] = _unidades_numericas(
+        datos.get("actual_units_required"))
     if not salida["resolved_product_name"] and not salida["actual_units_required"]:
         return {}
     salida["fuente"] = fuente
@@ -224,7 +315,7 @@ def _leer_json(bruto: str) -> dict:
 
 
 def resolver_lote(aviso: dict, descripcion: str,
-                  usar_cache: bool = True) -> dict:
+                  usar_cache: bool = True, corpus: str = "") -> dict:
     """
     CAPA B. Devuelve el desglose del lote, o {} si no hay lote o si falla.
 
@@ -272,7 +363,19 @@ def resolver_lote(aviso: dict, descripcion: str,
     except ImportError:
         return {}
 
+    # El corpus es la DESCRIPCION MAS los adjuntos. Los adjuntos son donde
+    # esta el volumen real de un lote consolidado: la tabla dice "1 LOT" porque
+    # eso es lo que se compra, y el desglose esta en el anexo 0002.
+    #
+    # El reparto de presupuesto entre las dos partes es deliberado: la
+    # descripcion va primero y con mas sitio, porque define el item, y los
+    # adjuntos despues. Un adjunto es un documento largo y el LLM puede
+    # quedarse sin al final, que es justo donde estaria el desglose.
     cuerpo = texto[:MAX_CARACTERES]
+    if corpus:
+        cuerpo = (cuerpo + "\n\n===== DOCUMENTOS ADJUNTOS DEL AVISO "
+                  "(purchase descriptions, drawings, QnA, amendments) =====\n"
+                  + corpus[:MAX_CORPUS])
     if titulo:
         cuerpo = f"TITLE: {titulo}\n\n{cuerpo}"
     prompt = PROMPT.format(aviso=cuerpo)

@@ -1,0 +1,209 @@
+"""
+Conecta la ingesta de adjuntos, la correccion de QTY, el bloque tecnico del PDF
+y el reporte financiero de Telegram.
+
+1) LA CORRECCION DE QTY
+
+El encargo pide que, si la Capa B encuentra un volumen real en los adjuntos,
+sobrescriba el QTY 1 y la unidad LOT/EA de la tabla.
+
+Antes de hacerlo hay que decidir QUE es una correccion y que es una invencion,
+porque sobrescribir una cantidad en un pedido federal con un numero que el
+modelo ha inventado es un problema MUCHO peor que dejar un 1. Asi que se
+exigen tres cosas a la vez:
+
+    1. que el numero este escrito en el corpus (descripcion O adjuntos)
+    2. que no sea la misma cifra que ya estaba en la tabla
+    3. que el texto que lo respalda venga de un documento, no de una conjetura
+
+Si falta cualquiera de las tres, no se toca el QTY. El documento sale con lo que
+decia la tabla, que es feo pero es cierto.
+
+2) EL BLOQUE TECNICO EN EL PDF
+
+Cambio de criterio respecto a la version anterior, y conviene dejarlo escrito:
+en 3.8.0 el desglose se decidio que NO fuera al PDF, porque se creia que un
+parte de fabricante es informacion interna y que en un documento comercial es
+papel viejo.
+
+El encargo ahora lo pide al contrario, y el motivo que se da es bueno: el
+distribuidor de EE.UU. NO PUEDE cotizar bien sin el parte y la medida. Un
+"1 LOT" sin saber si son 24 rodamientos o 6 cierrapuertas no se cotiza; se
+rechaza. El parte y la medida no son papel viejo, son lo que hace falta para
+que la hoja sirva.
+
+Lo que NO cambia es el precio: las celdas siguen EN BLANCO. Eso es lo que
+protege la negociacion, y no tiene nada que ver con esto.
+
+3) EL REPORTE FINANCIERO DE TELEGRAM
+
+La ganancia neta proyectada va al mensaje interno, no al PDF. Es informacion de
+L.A.M.B. y no del proveedor: mandarle tu margen a la contraparte es lo unico
+de todo este trabajo que si seria un error de verdad.
+
+NO SE TOCA
+
+La ruta feliz (sin lote consolidado), los precios, el idioma ingles del
+documento, la maqueta y los anchos de columna.
+"""
+import io
+import logging
+
+log = logging.getLogger("kyomoto.integral")
+
+import lote_consolidado as lc
+
+
+# El numero tiene que estar como CIFRA, no como parte de un identificador.
+#
+#   "QTY 100 EA"        -> si, es una cantidad
+#   "100 each"          -> si
+#   "valor 1000 USD"    -> no, ese es otro numero
+#   "codigo 100-A"      -> no, eso es un parte
+#   "ABC-100"           -> no, eso es un parte
+#
+# Los dos ultimos son el fallo real, y son graves. Un numero de pieza es
+# la forma mas comun de numero que hay en un documento tecnico:
+# "S0594DU0500-S1", "1110700278", "MS25938-1". estan por todas partes.
+#
+# Si "100" casa con "100-A", la comprobacion que existe para que el modelo
+# NO invente la cantidad no esta evitando nada, y encima da la sensacion
+# de estar protegiendo. Peor que no comprobar: parece una garantia que
+# no es una garantia.
+_RE_CIFRA_SUELTA = r"(?<![\w.,-])%s(?![\d.,]|[-/]\w)"
+
+
+def _numero_en_corpus(n: float, corpus: str) -> bool:
+    """El numero esta escrito en el texto como cifra, no como parte."""
+    import re
+    if not n or float(n) != int(n) or n <= 0:
+        return False
+    return bool(re.search(_RE_CIFRA_SUELTA % int(n), str(corpus or "")))
+
+
+def corregir_qty(bom: list, detalle: dict, corpus: str) -> dict:
+    """
+    Sobrescribe el QTY de un item consolidado con el volumen real.
+
+    Devuelve {"cantidad": n, "unidad": "EA", "motivo": "..."} si hay que
+    corregir, o {} si no. NUNCA lanza y NUNCA escribe una cantidad que no este
+    en el corpus.
+    """
+    if not detalle or not bom:
+        return {}
+    n = float(detalle.get("unidades_numericas") or 0)
+    if n <= 0:
+        return {}
+    item = bom[0] if bom else {}
+    antes = float(item.get("cantidad") or 0)
+    if n == antes:
+        # Ya coincide. No es una correccion, y toques la fila sin motivo hace
+        # que cualquier cambio posterior parezca el culpable.
+        return {}
+    if not _numero_en_corpus(n, corpus):
+        log.info("corregir_qty: %s no aparece en el corpus; no se corrige", n)
+        return {}
+    # La unidad: si el desglose viene con una sigla explicita en el texto del
+    # modelo, se respeta. Si no, EA, que es la unidad que cualquier
+    # distributor de distribucion entiende y la que va con un desglose de
+    # piezas sueltas.
+    unidad = str(detalle.get("_unidad_cantidad") or "").strip().upper()
+    if unidad not in ("EA", "BG", "KT", "PR", "CS", "CA", "BX", "PK", "PL",
+                      "SET", "HD", "CON", "LOT", "LO"):
+        unidad = "EA"
+    log.info("corregir_qty: %s %s -> %s %s", antes,
+             item.get("unidad"), int(n), unidad)
+    return {"cantidad": n, "unidad": unidad,
+            "unidad_original": str(item.get("unidad") or "LOT").upper(),
+            "motivo": "volumen real encontrado en los documentos del aviso"}
+
+
+def aplicar_correccion(bom: list, correccion: dict) -> bool:
+    """Escribe la correccion en el BOM. True si algo cambio."""
+    if not correccion or not bom:
+        return False
+    for item in bom:
+        item["cantidad"] = correccion["cantidad"]
+        item["unidad"] = correccion["unidad"]
+        item["qty_corregido"] = True
+    return True
+
+
+def bloque_tecnico(detalhe: dict) -> str:
+    """
+    El bloque "TECHNICAL & DELIVERY REQUIREMENTS" del PDF.
+
+    Solo con lo que el aviso dice. Las lineas que el modelo no devolvio SE
+    OMITEN: cinco guiones vacios en un documento que va a un proveedor dicen
+    "este no lo sabe", y lo que el proveedor hace con eso es devolver la hoja
+    sin cotizar.
+    """
+    if not detalhe:
+        return ""
+    p = str(detalhe.get("manufacturer_part_number") or "").strip()
+    m = str(detalhe.get("manufacturer_brand_name") or "").strip()
+    s = str(detalhe.get("dimensions_or_specs") or "").strip()
+    c = str(detalhe.get("certification_requirements") or "").strip()
+    n = str(detalhe.get("actual_units_required") or "").strip()
+
+    lineas = []
+    if p or m:
+        if p and m:
+            lineas.append(f"<b>Part Number / Manufacturer:</b> {p} - {m}")
+        elif p:
+            lineas.append(f"<b>Part Number:</b> {p}")
+        else:
+            lineas.append(f"<b>Manufacturer:</b> {m}")
+    if s:
+        lineas.append(f"<b>Dimensions / Specifications:</b> {s}")
+    if n:
+        lineas.append(f"<b>Lot contents:</b> {n}")
+    if c:
+        lineas.append(f"<b>Certification required:</b> {c}")
+
+    if not lineas:
+        return ""
+    return "<br/>".join(lineas)
+
+
+def reporte_financiero(analisis: dict, detalle: dict) -> str:
+    """
+    El bloque financiero del mensaje interno de Telegram.
+
+    Va aqui y no en el PDF por una razon que no admite discusion: el margen es
+    informacion de L.A.M.B. Mandarselo a la contraparte es la unica parte de
+    todo este trabajo que seria un error de verdad.
+    """
+    e = analisis.get("estimacion_interna") or {}
+    if not e.get("valor_declarado_usd"):
+        return ""
+
+    def _usd(v):
+        try:
+            return f"${float(v):,.2f}"
+        except (TypeError, ValueError):
+            return "n/d"
+
+    cant = e.get("cantidad_total_licitacion") or 0
+    unit = e.get("precio_unitario_costo") or 0
+    total = e.get("costo_total_usd") or 0
+    # El margen que maneja el barrido: 15-35% menos ~3.5% de factoring. Se
+    # calcula aqui solo como REFERENCIA interna, y con las mismas cifras que
+    # salen de la ficha del Telegram.
+    bruto = float(unit) * 1.25
+    neto = bruto - float(unit) - float(unit) * 0.035
+
+    lineas = [
+        f"Valor declarado en el aviso: <b>{_usd(e['valor_declarado_usd'])}</b>",
+        f"Volumen de la tabla: <b>{cant:,.0f}</b> unidades",
+        f"Referencia de compra: <b>{_usd(unit)}</b>/unidad",
+    ]
+    if cant:
+        lineas.append(f"TOTAL estimado: <b>{_usd(total)}</b>")
+        lineas.append(f"Margen bruto estimado: <b>{_usd(bruto)}</b> "
+                      f"({(bruto - float(unit)) / float(unit) * 100:.0f}%)")
+        lineas.append(f"Netascion de referencia: <b>{_usd(neto)}</b>")
+    cuerpo = "\n".join(f"  <i>•</i> {l}" for l in lineas)
+    return ("\n💰 <b>ANALISIS FINANCIERO (interno)</b>\n" + cuerpo +
+            "\n\n<i>Solo para uso interno. El PDF va sin precios y sin margen: "
+            "eso lo rellena el distribuidor.</i>")

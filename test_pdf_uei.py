@@ -95,6 +95,47 @@ DESC_1 = ("AMD 0001 Narrative... This amendment is being issued to incorporate "
           "Part Number M7A1-100, Quantity: 100 BG. MECHANICAL SEAL KIT, EPDM 70 "
           "SHORE A PER ASTM D2000, PER DRAWING 1110700278.")
 
+# ------------------------------------------------------------------ Gemini
+# Ni esto dobla Gemini. /pdf llama a estructurar(), que va a la API de verdad:
+# cuatro modelos, cuatro 400 en unos segundos, en cada ejecucion.
+#
+# Con la clave falsa que estos tests inyectan no se gasta cuota real (la API la
+# rechaza antes de procesar nada) y no sale documento alguno, pero la suite
+# deja de ser hermetica y depende de que haya red. Un test que necesita
+# internet para probar un formateador no es un test.
+#
+# Se devuelve VACIO a proposito, y no una respuesta buena: es el mismo camino
+# que la suite ya ejercita (el parsing estructurado no esta disponible y el
+# PDF sale por el respaldo de regex). Poner una respuesta buena reprobaria
+# las aserciones contra una rama que estos tests no comprueban.
+import types as _types
+
+_STUB = _types.ModuleType("google.genai")
+
+
+class _RespGemini:
+    text = ""
+
+
+class _Modelos:
+    def generate_content(self, *a, **k):
+        return _RespGemini()
+
+
+class _ClienteGemini:
+    models = _Modelos()
+
+
+_STUB.Client = lambda api_key=None: _ClienteGemini()
+_google = _types.ModuleType("google")
+_google.genai = _STUB
+sys.modules["google"] = _google
+sys.modules["google.genai"] = _STUB
+_tipos = _types.ModuleType("google.genai.types")
+_tipos.GenerateContentConfig = lambda **k: k
+_tipos.ThinkingConfig = lambda **k: k
+sys.modules["google.genai.types"] = _tipos
+
 print("=" * 76)
 print("1) UEI Y NCAGE")
 print("=" * 76)
@@ -242,16 +283,25 @@ check("Y el titulo del contenedor sale limpio",
 
 print()
 celda2 = " ".join(t2.split())
-_celda = _celda[_celda.index("ITEMS ORDERED"):_celda.index("BILL OF MATERIALS")]
+_celda = celda2[celda2.index("ITEMS ORDERED"):celda2.index("BILL OF MATERIALS")]
+# UEI y NCAGE van en la CABECERA, el pie y el glosario, no en la tabla de
+# items. Comprobarlo contra el trozo de la tabla no podia funcionar nunca.
 print("  En el PDF de W912ES27QA004:")
-for lo, debe in ((UEI, True), (NCAGE, True), ("20-FOOT CONTAINER", True),
-                 ("CON", False), ("$0.00", False)):
-    got = lo in _celda
-    check("    %-24s %s" % (lo[:24], "si" if debe else "no"), got == debe)
+check("    El UEI sale en el documento", UEI in celda2)
+check("    El NCAGE sale en el documento", NCAGE in celda2)
+for lo, debe in (("20-FOOT CONTAINER", True), ("Gantry Beam and Chain Lift", True),
+                 ("EA", True), ("$0.00", False)):
+    check("    En la tabla: %-24s %s" % (lo[:24], "si" if debe else "no"),
+          (lo in _celda) == debe)
 check("    Y sale QTY 2 con UNIT EA",
       "2" in _celda and "EA" in _celda)
-check("    Y la descripcion del contenedor, sin 'CON'",
-      "Gantry Beam and Chain Lift" in _celda)
+# "CON" tiene que comprobarse con limites de PALABRA. Como subcadena es
+# imposible: "20-FOOT CONTAINER" contiene "CON", y la descripcion lleva la
+# palabra justo para que se vea que la UNIDAD no se quedo en CON.
+import re as _re
+_con = bool(_re.search(r"\bCON\b", _celda))
+check("    Y la UNIDAD no se quedo en CON, aunque la descripcion diga CONTAINER",
+      not _con)
 
 print()
 print("=" * 76)

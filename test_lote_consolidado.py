@@ -24,8 +24,8 @@ LO QUE SE COMPRUEBA
   1) CAPA A: la bandera consolidated_lot, en las DOS ramas del BOM
   2) CAPA B: solo se llama si hay bandera, y con las mismas barreras de cuota
   3) Que lo que devuelve el modelo se limpia antes de usarlo
-  4) Que el PDF NO lleva el desglose, y sale igual que siempre
-  5) Que el desglose va SOLO al mensaje de Telegram
+  4) Que el PDF lleva lo TECNICO, y solo lo tecnico
+  5) Que el bloque analitico va SOLO al mensaje de Telegram
   6) Que sin clave, sin cuota o con la API caida no pasa nada
 
 LO QUE NO SE COMPRUEBA
@@ -280,7 +280,7 @@ check("  Y se sabe de donde salio cada uno",
 
 print()
 print("=" * 76)
-print("4) EL PDF NO LLEVA EL DESGLOSE")
+print("4) EL PDF LLEVA LO TECNICO, Y SOLO LO TECNICO")
 print("=" * 76)
 _instalar({
     "resolved_product_name": "S-1 Insert Bearings and Von Duprin Exit Devices",
@@ -316,21 +316,40 @@ from pypdf import PdfReader
 txt = " ".join("\n".join(p.extract_text() or "" for p in
                          PdfReader(io.BytesIO(pdf)).pages).split())
 print()
-print("  Lo que NO puede salir en el PDF es el BLOQUE ANALITICO, no las")
-print("  palabras del aviso: Timken y S0594DU0500-S1 estan en la descripcion")
-print("  que publico el gobierno, y en la celda de especificacion TIENEN que")
-print("  estar. Lo que no puede aparecer es la SINTESIS del modelo:")
+# REVERSION DE CRITERIO, y conviene tenerla a la vista.
+#
+# En 3.8.0 todo esto se comprobaba como AUSENCIA: el PDF no debia llevar ni el
+# desglose ni las marcas, porque se considero "informacion interna". El encargo
+# actual lo pide al reves, y el motivo es bueno: un distribuidor de EE.UU. NO
+# PUEDE cotizar sin el parte y la medida. Un "1 LOT" sin saber si son 24
+# rodamientos o 6 cierrapuertas no se cotiza, se rechaza.
+#
+# Lo que NO cambia, y es lo que este test sigue guardando: el PDF no lleva el
+# BLOQUE ANALITICO completo. El parte y la medida sirven para cotizar; el
+# dictamen completo y el "solo para uso interno" son de L.A.M.B.
+print("  Lo que AHORA si tiene que estar, para que se pueda cotizar:")
 for lo, motivo in (
-        ("DETALLE FINO", "el encabezado del bloque"),
+        ("TECHNICAL & DELIVERY REQUIREMENTS", "el encabezado del bloque"),
+        ("S0594DU0500-S1", "el part number exacto"),
+        ("The Timken Company", "el fabricante sugerido"),
+        ("MIL-STD-1333", "el certificado de conformidad"),
+        ("24 bearings", "el contenido real del lote")):
+    print("    %-46s %s" % (lo[:46], "ESTA BIEN" if lo in txt else "FALTA (mal)"))
+    check("  El PDF SI lleva %s" % motivo[:46], lo in txt)
+print()
+print("  Y lo que sigue sin poder salir: el dictamen, no los datos.")
+for lo, motivo in (
+        ("DETALLE FINO", "el encabezado del bloque analitico"),
         ("Solo para uso interno", "el aviso de que es interno"),
-        ("24 bearings, 6 exit devices, 4 mounting kits",
-         "el desglose de unidades, que es sintesis del modelo"),
         ("S-1 Insert Bearings and Von Duprin Exit Devices",
-         "el nombre comercial resuelto, que no esta en el aviso"),
-        ("The Timken Company / Von Duprin",
-         "el emparejamiento de marcas, que no esta en el aviso")):
+         "el nombre comercial resuelto, que no esta en el aviso")):
     print("    %-46s %s" % (lo[:46], "FALTA BIEN" if lo not in txt else "ESTA (mal)"))
     check("  El PDF NO lleva %s" % motivo[:46], lo not in txt)
+print()
+print("  Y el precio sigue en blanco, que es lo que protege la negociacion:")
+check("  Ni una cifra de dinero", "$" not in txt and "$0.00" not in txt)
+check("  Y las celdas vacias siguen ahi para el distribuidor",
+      "UNIT PRICE" in txt and "AMOUNT" in txt)
 check("  El PDF se genera igualmente", len(pdf) > 50000,
       "-> %d bytes" % len(pdf))
 check("  Y sin $0.00", "$0.00" not in txt)
@@ -341,7 +360,7 @@ check("  Y la unidad del lote sale tal cual, LOT, sin retocar",
 
 print()
 print("=" * 76)
-print("5) EL BLOQUE SALE EN TELEGRAM, Y SOLO AHI")
+print("5) TELEGRAM LLEVA EL MISMO DETALLE, MAS EL ANALITICO")
 print("=" * 76)
 bloque = lc.formatear_bloque(detalle)
 print("  %s" % bloque.replace("\n", "\n  "))
@@ -438,5 +457,5 @@ for _s in ("", "-wal", "-shm"):
 if FALLA:
     print("RESULTADO: %d fallo(s)" % FALLA)
     sys.exit(1)
-print("RESULTADO: la capa A marca, la B desglosa, y el PDF no se entera")
+print("RESULTADO: la capa A marca, la B desglosa, y el PDF lleva lo tecnico\n          y solo lo tecnico")
 print("=" * 76)

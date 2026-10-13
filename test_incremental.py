@@ -52,16 +52,24 @@ def aviso(n: int, posted: str) -> dict:
     }
 
 
-def _bloque_falso(desde, hasta, ptype):
+def _bloque_falso(desde, hasta, ptype, rdl_desde="", rdl_hasta="",
+                  ccode=""):
     """
     Simula la API respetando lo que hace la real: los avisos que devuelve
     tienen posted_date DENTRO del bloque pedido. Sin esto el test miente,
     porque la cache separa por posted_date.
+
+    La firma tiene que ser la de sam_api._bloque COMPLETA, y devolver la
+    tupla (lote, total). El doble estaba con la firma de antes de que
+    _bloque ganara rdl_desde/rdl_hasta/ccode y el totalRecords, asi que
+    este test no se ejecutaba desde entonces: reventaba al primer barrido y
+    nadie lo vio, porque el fallo no es una linea "FALLA" sino un TypeError.
     """
     LLAMADAS["n"] += 1
     medio = desde + (hasta - desde) / 2
     posted = medio.strftime("%Y-%m-%d")
-    return [aviso(LLAMADAS["n"] * 10 + k, posted) for k in range(3)]
+    lote = [aviso(LLAMADAS["n"] * 10 + k, posted) for k in range(3)]
+    return lote, len(lote)
 
 
 print("=" * 70)

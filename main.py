@@ -828,6 +828,7 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # blanco, que si importa porque lo rellena el proveedor, queda diluido
         # entre lineas que no le sirven.
         try:
+            import integral as _integral
             _lote = (analisis.get("lote_consolidado") or {})
             if _lote:
                 import lote_consolidado as _lc
@@ -835,6 +836,25 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 if _bloque:
                     await update.message.reply_text(_bloque,
                                                     parse_mode=ParseMode.HTML)
+            # El analisis financiero va aqui y NUNCA en el PDF. Es informacion
+            # de L.A.M.B.: mandarle el margen a la contraparte es lo unico de
+            # todo este trabajo que seria un error de verdad.
+            _fin = _integral.reporte_financiero(analisis, _lote)
+            if _fin:
+                await update.message.reply_text(_fin, parse_mode=ParseMode.HTML)
+            # Y si el QTY se ha corregido con el volumen real, se dice, porque
+            # un QTY que cambia entre el aviso y el documento es justo lo que
+            # hay que querer ver antes de mandarlo.
+            _cor = (analisis.get("qty_corregido") or {})
+            if _cor:
+                await update.message.reply_text(
+                    f"\u26a0 <b>Cantidad corregada</b>\n\nLa tabla del aviso "
+                    f"decia <b>1 {_cor.get('unidad_original', 'LOT')}</b>. "
+                    f"Revisados los documentos adjuntos, el volumen real es "
+                    f"<b>{_cor['cantidad']:,.0f} {_cor['unidad']}</b>, y asi es "
+                    f"como sale en el PDF.\n\n<i>Es la cifra que se cotiza: "
+                    f"cambiarla despues es un problema de pedido.</i>",
+                    parse_mode=ParseMode.HTML)
         except Exception:
             # Informativo. El PDF ya esta generado y entregado.
             pass
