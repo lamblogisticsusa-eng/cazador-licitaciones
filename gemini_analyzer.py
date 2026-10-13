@@ -171,43 +171,54 @@ def verificar_api() -> dict:
         m for m in config.GEMINI_MODELES_ALTERNATIVOS
         if m and m != config.GEMINI_MODEL
     ]
-    caidos = []
-    sin_cuota = []
-    incompatibles = []
-    for m in cola:
-        try:
-            cliente = _get_cliente()
-            cliente.models.generate_content(
-                model=m,
-                contents='Responde solo con la palabra OK, en JSON: {"ok": true}',
-                config=_construir_config(),
-            )
-            if m == config.GEMINI_MODEL:
-                return {"ok": True, "detalle": f"OK - {m} responde", "modelo": m}
-            # El principal estaba caido pero hay respaldo: es una nota, no un
-            # fallo. El escaneo va a funcionar igual.
-            return {
-                "ok": True,
-                "detalle": f"OK via {m} ({config.GEMINI_MODEL} no responde)",
-                "modelo": m,
-                "degradado": True,
-                "avisos": caidos + incompatibles,
-            }
-        except Exception as e:
-            texto = str(e)
-            if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
-                # El tope es por modelo: se sigue con el siguiente, que puede
-                # tener cuota todavia. Antes se rendia aqui y declaraba el
-                # fallo con el primer 429, aunque quedaran modelos libres.
-                sin_cuota.append(m)
-                continue
-            if "401" in texto or "UNAUTHENTICATED" in texto:
-                return {"ok": False, "detalle": f"401: {texto[:200]}"}
-            if "400" in texto or "INVALID_ARGUMENT" in texto:
-                incompatibles.append(f"{m}: 400, no acepta la peticion")
-            else:
-                caidos.append(f"{m}: 503 saturado")
-            continue
+    # Tambien por gemini_conn, con la misma cadena y la misma politica. Un
+    # smoke test que dice "todo bien" mientras el barrido se cairia es peor que
+    # no tenerlo: da una falsa confianza.
+    #
+    # max_intentos=1 porque aqui no se reintenta a proposito: el objetivo es
+    # RECOGER INFORMACION de cada modelo, no conseguir una respuesta. Si
+    # reintentara, un 503 transitorio haria que el informe tardara 2+4+8
+    # segundos por modelo para decir lo mismo.
+    import gemini_conn
+    try:
+        _t, modelo_ok, _r = gemini_conn.consultar_gemini_con_fallback(  # noqa: E501
+            'Responde solo con la palabra OK, en JSON: {"ok": true}',
+            contrato="smoke-test",
+            thinking_budget=config.GEMINI_THINKING_BUDGET,
+            config_extra={
+                "temperature": config.GEMINI_TEMPERATURE,
+                "response_mime_type": "application/json",
+                "max_output_tokens": config.GEMINI_MAX_OUTPUT_TOKENS,
+            },
+            cola=cola,
+            respaldo=config.GEMINI_MODELO_RESPALDO,
+            max_intentos=1,
+            cliente=_get_cliente(),
+            devolver_respuesta=True,
+            reintentar_sin_thinking=False,
+            modulo="gemini_analyzer",
+        )
+        if modelo_ok == config.GEMINI_MODEL:
+            return {"ok": True, "detalle": f"OK - {modelo_ok} responde",
+                    "modelo": modelo_ok}
+        # El principal estaba caido pero hay respaldo: es una nota, no un fallo.
+        caidos = [e for e in getattr(_r, "eventos", [])]
+        return {
+            "ok": True,
+            "detalle": (f"OK via {modelo_ok} "
+                        f"({config.GEMINI_MODEL} no responde)"),
+            "modelo": modelo_ok,
+            "degradado": True,
+            "avisos": caidos,
+        }
+    except gemini_conn.ErrorDeCadena as cadena:
+        sin_cuota = cadena.modelos_de("429")
+        caidos = cadena.modelos_de("503") + cadena.modelos_de("red")
+        incompatibles = (cadena.modelos_de("400")
+                          + cadena.modelos_de("404"))
+        if any(e.get("clase") == "401" for e in cadena.eventos):
+            return {"ok": False,
+                    "detalle": f"401: {cadena.texto_ultimo()[:200]}"}
 
     return {
         "ok": False,
@@ -614,211 +625,136 @@ def analizar(
     cuando un hilo recibe un 429, los demas se enteran por aqui en vez de
     descubrir por su cuenta el mismo 429 y dormir cada uno lo suyo.
     """
+    # La llamada sale por gemini_conn. Aqui no queda politica de reintentos: ni
+    # backoff, ni cambio de modelo, ni el reintento sin thinking_budget. Vive ahi
+    # para que /pdf y el barrido hagan lo mismo ante un 503.
+    #
+    # Lo que SI se queda aqui es el TEXTO PARA EL USUARIO, que es de este
+    # modulo y de ningun otro: el aviso largo que explica cuantos modelos se
+    # quedaron sin cuota, cuantos solo saturados, y que el aviso no se marca
+    # como visto para que el proximo barrido lo recoja. El nucleo devuelve los
+    # datos; el que los cuenta sigue siendo quien debe saber a quien le habla.
+    #
+    # _get_cliente() se sigue usando, y es a proposito: seis suites sustituyen
+    # ESA funcion para meter su doble. Si la llamada se fabricara su propio
+    # cliente, esas seis dejarian de probar nada y seguirian en verde.
     cliente = _get_cliente()
-    prompt = _construir_prompt(opp, descripcion, lugar or filters.lugar_de_entrega(opp))
+    prompt = _construir_prompt(opp, descripcion,
+                               lugar or filters.lugar_de_entrega(opp))
 
-    ultimo_error = None
-    intentos_429 = 0
-    incompatibles = []
-    # El 503 es por MODELO, no de la cuenta. Medido el 28-sep-2026:
-    #   gemini-3.8-flash  OK 5.1s        gemini-3.6-flash    OK 4.2s
-    #   gemini-3.7-flash  503 saturado    gemini-3.5-flash   OK 26.1s
+    # El 503 es por MODELO, no por la cuenta. Medido el 28-sep-2026:
+    #   gemini-3.8-flash  OK 5,1s        gemini-3.6-flash    OK 4,2s
+    #   gemini-3.7-flash  503 saturado    gemini-3.5-flash   OK 26,1s
     # Por eso se prueban alternativas en vez de esperar: los picos duran
     # minutos y hay modelos libres casi siempre.
     cola = [config.GEMINI_MODEL] + [
         m for m in config.GEMINI_MODELES_ALTERNATIVOS
         if m and m != config.GEMINI_MODEL
     ]
-    indice = 0
-    # Modelos que ya respondieron 429: se anotan para poder decir
-    # al usuario cuales se quedaron sin cuota en vez de un 'agotado' generico.
-    ya_probados: list[str] = []
-    # Los que respondieron 503 (saturados, no sin cuota). Se anotan aparte
-    # porque la causa y el remedio son distintos: uno espera a que se le pase
-    # la demanda, el otro a medianoche del Pacifico.
-    saturados: list[str] = []
-    # Suficientes intentos para recorrer TODA la cola mas margen para los
-    # errores que no sean de saturacion.
-    total_intentos = max(config.MAX_REINTENTOS, len(cola) + 1)
 
-    sin_pensar = False
-    for intento in range(total_intentos):
-        # Si otro hilo ya descubririo que se acabo la cuota, no se llama a
-        # Google ni se duerme: se sale ahora. El unico modo de que un hilo
-        # sepa lo que le paso a otro es preguntarselo.
-        if continuar is not None and not continuar():
+    import gemini_conn
+    try:
+        (texto, modelo_usado,
+         respuesta) = gemini_conn.consultar_gemini_con_fallback(
+            prompt,
+            contrato=(opp or {}).get("solicitationNumber", ""),
+            thinking_budget=config.GEMINI_THINKING_BUDGET,
+            config_extra={
+                "temperature": config.GEMINI_TEMPERATURE,
+                "response_mime_type": "application/json",
+                "max_output_tokens": config.GEMINI_MAX_OUTPUT_TOKENS,
+            },
+            cola=cola,
+            respaldo=config.GEMINI_MODELO_RESPALDO,
+            # OJO: esto son intentos POR MODELO, no el total de la cola.
+            # Antes un solo bucle recorria los dos, asi que el numero grande
+            # (len(cola)+1) servia para que cuadrase. Pasado tal cual aqui
+            # multiplicaba: 6 modelos x 7 intentos x (2+4+8+16+32+64) son
+            # horas de sueño, y test_resiliencia se colgaba a los 900s.
+            max_intentos=config.MAX_REINTENTOS,
+            esperar=time.sleep,
+            continuar=continuar,
+            cliente=cliente,
+            devolver_respuesta=True,
+            modulo="gemini_analyzer",
+        )
+    except gemini_conn.ErrorDeCadena as cadena:
+        # El nucleo devuelve la EVIDENCIA, no el mensaje. Aqui se cuenta.
+        ya_probados = cadena.modelos_de("429")
+        saturados = cadena.modelos_de("503") + cadena.modelos_de("red")
+        incompatibles = cadena.modelos_de("400") + cadena.modelos_de("404")
+        texto_err = cadena.texto_ultimo()
+
+        if any(e.get("clase") == "401" for e in cadena.eventos):
             raise GeminiError(
-                "Se abandono el resto del lote: otro aviso ya confirmo que la "
-                "cuota de Google se agoto (429).\n"
-                "Lo que no se analice no se pierde: queda pendiente para el "
+                "Google respondio 401: no reconoce GEMINI_API_KEY como "
+                "credencial valida para la API de Gemini.\n"
+                "1. La clave se copio incompleta (~53 caracteres con un punto; "
+                "un solo caracter mal da 401). Copiala con el boton de copiar.\n"
+                "2. La clave tiene restriccion de IP. Render usa IPs dinamicas, "
+                "asi que una clave restringida a tu IP local falla ahi.\n"
+                "3. La API Generative Language no esta habilitada.\n"
+                "Verificalo sin escribirla: python probar_clave.py"
+            ) from cadena.ultimo
+
+        if ya_probados and len(ya_probados) >= len(cola):
+            raise GeminiError(
+                "Se agotaron TODOS los modelos de la lista (429).\n"
+                "Tu clave SI funciona: esto es el tope del plan gratis, no "
+                "un error del codigo. Se reinicia a las 00:00 del "
+                "Pacifico (~03:00 hora de Chile).\n"
+                + _detalle_de_cuota(texto_err)
+                + _modelos_sin_cuota(ya_probados)
+                + "\n\nCOMO SOLUCIONARLO\n"
+                "   1. Activa facturacion en https://aistudio.google.com "
+                "(Settings > Billing). Eso quita el tope gratis de "
+                f"{config.PRESUPUESTO_GEMINI_DIARIO}/dia y el bot puede "
+                "analizar todo lo que encuentre. Con flash cuesta "
+                "centimos.\n"
+                "   2. Si no quieres pagar, baja "
+                f"PRESUPUESTO_GEMINI_DIARIO (hoy "
+                f"{config.PRESUPUESTO_GEMINI_DIARIO}) y acepta fewer "
+                "licitaciones al dia.\n"
+                "   3. O usa otra cuenta de Google con su propia cuota.\n"
+                "Nada se pierde: los avisos NO se marcan como vistos, "
+                "asi que lo que no alcanzo queda pendiente para el "
                 "proximo barrido."
-            )
-        modelo = cola[indice]
-        try:
-            respuesta = cliente.models.generate_content(
-                model=modelo,
-                contents=prompt,
-                config=_construir_config(sin_pensar=sin_pensar),
-            )
-            if modelo != config.GEMINI_MODEL:
-                log.info("Va con %s: el de verdad iba saturado", modelo)
-            break
-        except Exception as e:
-            ultimo_error = e
-            texto = str(e)
+            ) from cadena.ultimo
 
-            # --- 429: este MODELO se quedo sin cuota. ---
-            # El tope es POR MODELO, no de la cuenta. Medido el 29-sep-2026:
-            # gemini-3.5-flash-lite respondia mientras gemini-3.8-flash y
-            # gemini-flash-latest ya estaban sin cuota. Si fuera de la cuenta,
-            # cuando uno se agota se agotan todos.
-            #
-            # Antes de arreglar esto, el bot se rendia en el primer 429 y
-            # tiraba la llamada entera, dejando sin usar todos los modelos que
-            # si tenian cuota.
-            if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
-                intentos_429 += 1
-                ya_probados.append(modelo)
-                if indice + 1 < len(cola):
-                    siguiente = cola[indice + 1]
-                    log.warning(
-                        "429 en %s (este modelo ya agoto su cuota). "
-                        "Cambio a %s.", modelo, siguiente,
-                    )
-                    indice += 1
-                    intentos_429 = 0
-                    time.sleep(1)
-                    continue
-                if intentos_429 > config.GEMINI_REINTENTOS_429:
-                    raise GeminiError(
-                        "Se agotaron TODOS los modelos de la lista (429).\n"
-                        "Tu clave SI funciona: esto es el tope del plan gratis, no "
-                        "un error del codigo. Se reinicia a las 00:00 del "
-                        "Pacifico (~03:00 hora de Chile).\n"
-                        + _detalle_de_cuota(texto)
-                        + _modelos_sin_cuota(ya_probados)
-                        + "\n\nCOMO SOLUCIONARLO\n"
-                        "   1. Activa facturacion en https://aistudio.google.com "
-                        "(Settings > Billing). Eso quita el tope gratis de "
-                        f"{config.PRESUPUESTO_GEMINI_DIARIO}/dia y el bot puede "
-                        "analizar todo lo que encuentre. Con flash cuesta "
-                        "centimos.\n"
-                        "   2. Si no quieres pagar, baja "
-                        f"PRESUPUESTO_GEMINI_DIARIO (hoy "
-                        f"{config.PRESUPUESTO_GEMINI_DIARIO}) y acepta fewer "
-                        "licitaciones al dia.\n"
-                        "   3. O usa otra cuenta de Google con su propia cuota.\n"
-                        "Nada se pierde: los avisos NO se marcan como vistos, "
-                        "asi que lo que no alcanzo queda pendiente para el "
-                        "proximo barrido."
-                    ) from e
-                # Si otro hilo ya esta esperando por lo mismo, no se suma una
-                # segunda espera: se rinde y deja que el lote se detenga.
-                if continuar is not None and not continuar():
-                    raise GeminiError(
-                        "Otro aviso ya confirmo que la cuota se agoto (429)."
-                    ) from e
-                log.warning("429 de cuota. Pausa %.0fs.", config.GEMINI_PAUSA_SEG * 3)
-                time.sleep(config.GEMINI_PAUSA_SEG * 3)
-                continue
+        if incompatibles and len(incompatibles) >= len(cola):
+            raise GeminiError(
+                "Ningun modelo de la lista acepta la peticion (400 "
+                "INVALID_ARGUMENT): " + "; ".join(
+                    "%s: no acepta la peticion" % m for m in incompatibles)
+                + ".\nNo es tu clave ni un problema de cuota. Suele ser que el "
+                "modelo no admite alguna opcion de la config. Prueba: "
+                "python sondear_modelos.py"
+            ) from cadena.ultimo
 
-            # --- 503: el modelo esta saturado. Probar el siguiente. ---
-            if "503" in texto or "UNAVAILABLE" in texto:
-                saturados.append(modelo)
-                if indice + 1 < len(cola):
-                    log.warning("503 en %s. Cambio a %s.", modelo, cola[indice + 1])
-                    indice += 1
-                    time.sleep(2)
-                    continue
-                raise GeminiError(
-                    "Ningun modelo de la lista sirve ahora mismo.\n"
-                    "   · Sin cuota (429): "
-                    + (", ".join(dict.fromkeys(ya_probados)) or "ninguno")
-                    + "\n   · Sin respuesta (503): "
-                    + (", ".join(dict.fromkeys(saturados)) or "ninguno")
-                    + "\n\n"
-                    + (
-                        "La cuota se agota POR MODELO y se reinicia a las 00:00 "
-                        "del Pacifico (~03:00 Chile). NO es tu clave ni el codigo: "
-                        "es el tope del plan gratis. Kyomoto reintentara en el "
-                        "proximo barrido y lo que no se analice no se pierde."
-                        if ya_probados
-                        else "Es la saturacion de Google, que es transitoria y "
-                        "cambia cada hora. NO es tu clave ni el codigo. Kyomoto "
-                        "reintentara en el proximo barrido y lo que no se analice "
-                        "no se pierde."
-                    )
-                ) from e
-
-            # --- 401: la credencial no es reconocida. No cambiar de modelo. ---
-            if "401" in texto or "UNAUTHENTICATED" in texto:
-                raise GeminiError(
-                    "Google respondio 401: no reconoce GEMINI_API_KEY como "
-                    "credencial valida para la API de Gemini.\n"
-                    "1. La clave se copio incompleta (~53 caracteres con un punto; "
-                    "un solo caracter mal da 401). Copiala con el boton de copiar.\n"
-                    "2. La clave tiene restriccion de IP. Render usa IPs dinamicas, "
-                    "asi que una clave restringida a tu IP local falla ahi.\n"
-                    "3. La API Generative Language no esta habilitada.\n"
-                    "Verificalo sin escribirla: python probar_clave.py"
-                ) from e
-
-            # --- 404: modelo retirado o inexistente. ---
-            if "no longer available" in texto.lower() or "not_found" in texto.lower():
-                incompatibles.append(f"{modelo}: no existe")
-                if indice + 1 < len(cola):
-                    indice += 1
-                    continue
-                raise GeminiError(
-                    "Ningun modelo de la lista existe para esta cuenta: "
-                    + "; ".join(incompatibles) + ".\n"
-                    "Sondea los disponibles con: python sondear_modelos.py"
-                ) from e
-
-            # --- 400: el modelo no acepta la peticion. ---
-            # NO es transitorio: es que ese modelo no sirve con esta config
-            # (thinking_budget, response_mime_type, tokens...). Reintentarlo
-            # igual da el mismo 400 y quema tiempo. Se cambia de modelo.
-            #
-            # Medido el 28-sep-2026: gemini-3.5-flash-lite respondia "OK" al
-            # smoke test pero devolvia 400 INVALID_ARGUMENT con el prompt real.
-            if "400" in texto or "INVALID_ARGUMENT" in texto:
-                # El 400 mas frecuente es thinking_budget=0, y es facil de
-                # arreglar: se reintenta el MISMO modelo sin ese campo antes
-                # de pasar al siguiente. Antes de perder un modelo entero por
-                # un campo que se puede apagar, se prueba apagandolo.
-                #
-                # Se hace una sola vez: si ya se reintento sin pensar y vuelve
-                # a fallar, es que el problema es otro y hay que cambiar de
-                # modelo. Sin este guardia seria un bucle infinito.
-                if not sin_pensar:
-                    sin_pensar = True
-                    log.info(
-                        "%s rechazo la peticion (400). Reintento sin "
-                        "thinking_budget.", modelo,
-                    )
-                    continue
-
-                incompatibles.append(f"{modelo}: no acepta la peticion (400)")
-                if indice + 1 < len(cola):
-                    log.warning("400 en %s. Cambio a %s.", modelo, cola[indice + 1])
-                    indice += 1
-                    continue
-                raise GeminiError(
-                    "Ningun modelo de la lista acepta la peticion (400 "
-                    "INVALID_ARGUMENT): " + "; ".join(incompatibles) + ".\n"
-                    "No es tu clave ni un problema de cuota. Suele ser que el "
-                    "modelo no admite alguna opcion de la config. Prueba: "
-                    "python sondear_modelos.py"
-                ) from e
-
-            log.warning("Gemini fallo (intento %s): %s", intento + 1, texto[:200])
-            time.sleep(2 ** intento)
-    else:
         raise GeminiError(
-            f"Gemini fallo tras {total_intentos} intentos: "
-            f"{type(ultimo_error).__name__}: {str(ultimo_error)[:250]}"
-        ) from ultimo_error
+            "Ningun modelo de la lista sirve ahora mismo.\n"
+            "   · Sin cuota (429): "
+            + (", ".join(dict.fromkeys(ya_probados)) or "ninguno")
+            + "\n   · Sin respuesta (503): "
+            + (", ".join(dict.fromkeys(saturados)) or "ninguno")
+            + "\n   · No aceptan la peticion: "
+            + (", ".join(dict.fromkeys(incompatibles)) or "ninguno")
+            + "\n\n"
+            + (
+                "La cuota se agota POR MODELO y se reinicia a las 00:00 "
+                "del Pacifico (~03:00 Chile). NO es tu clave ni el codigo: "
+                "es el tope del plan gratis. Kyomoto reintentara en el "
+                "proximo barrido y lo que no se analice no se pierde."
+                if ya_probados
+                else "Es la saturacion de Google, que es transitoria y "
+                "cambia cada hora. NO es tu clave ni el codigo. Kyomoto "
+                "reintentara en el proximo barrido y lo que no se analice "
+                "no se pierde."
+            )
+        ) from cadena.ultimo
+
+    if modelo_usado != config.GEMINI_MODEL:
+        log.info("Va con %s: el de verdad iba saturado", modelo_usado)
 
     try:
         texto = respuesta.text

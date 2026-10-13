@@ -75,7 +75,10 @@ MODELO_RESPALDO = str(getattr(config, "GEMINI_MODELO_RESPALDO", "") or
                       "gemini-flash-latest")
 
 MAX_INTENTOS = 3           # El encargo: tres.
-ESPERA_BASE = 2.0          # El encargo: 2s -> 4s -> 8s.
+# El encargo fija 2s -> 4s -> 8s. Sale de config para que se pueda bajar sin
+# tocar codigo: en un contenedor de Render el margen es distinto, y una prueba
+# que simula seis modelos caidos tardaria 900s con la espera clavada.
+ESPERA_BASE = float(getattr(config, "GEMINI_ESPERA_BACKOFF_SEG", 2) or 2)
 TIMEOUT_MS = 15_000        # El encargo: 15 segundos por peticion.
 
 
@@ -92,6 +95,7 @@ def clasificar(exc: BaseException) -> str:
         "429"  cuota agotada, NO se reintenta, se cambia de modelo
         "404"  el modelo no existe para esta cuenta, se salta
         "400"  peticion invalida, reintentar es perder el tiempo
+        "401"  credencial no reconocida, es fatal, no se cambia de modelo
         "red"  timeout o conexion, se reintenta
         "otro" cualquier otra cosa
 
@@ -105,6 +109,31 @@ def clasificar(exc: BaseException) -> str:
 
     # El 503 primero: ServiceUnavailable y Unavailable son el mismo fallo, y
     # "unavailable" aparece tambien dentro de otros nombres.
+    # El CODIGO primero, y es lo primero de todo. google.genai lo pone en
+    # .code, y es el dato mas fiable: el texto del error lo cambia Google entre
+    # versiones, el codigo no. Antes solo se miraba el texto, asi que un
+    # ClientError(503) cuyo mensaje no llevara el "503" dentro se clasificaba
+    # como "otro" y se reintentaba en vez de cambiar de modelo.
+    codigo = getattr(exc, "code", None)
+    if not isinstance(codigo, int):
+        codigo = getattr(exc, "status_code", None)
+    if not isinstance(codigo, int):
+        resp = getattr(exc, "response", None)
+        codigo = getattr(resp, "status_code", None)
+    if isinstance(codigo, int):
+        if codigo == 503:
+            return "503"
+        if codigo == 429:
+            return "429"
+        if codigo == 404:
+            return "404"
+        if codigo == 400:
+            return "400"
+        if codigo == 401:
+            return "401"
+        if codigo in (408, 504):
+            return "red"
+
     if "serviceunavailable" in nombre or "unavailable" in nombre:
         return "503"
     if "resourceexhausted" in nombre:
@@ -115,6 +144,11 @@ def clasificar(exc: BaseException) -> str:
         return "red"
     if "429" in texto or "RESOURCE_EXHAUSTED" in texto or "quota" in texto.lower():
         return "429"
+    if "401" in texto or "UNAUTHENTICATED" in texto or "unauthenticated" in texto.lower():
+        # El 401 es FATAL: la credencial esta mal y ningun modelo de la lista la
+        # va a arreglar. Antes solo se reconocia por .code, y un RuntimeError
+        # con el texto de Google se colaba por el otro lado.
+        return "401"
     if "503" in texto or "Service Unavailable" in texto:
         return "503"
     if "400" in texto or "INVALID_ARGUMENT" in texto:
@@ -256,7 +290,7 @@ def llamar(prompt: str, contrato: str = "", *,
                 clase = clasificar(e)
                 # Cuota, peticion invalida o modelo inexistente: insistir es
                 # perder el tiempo. Se registra y se pasa al respaldo.
-                if clase in ("429", "400", "404"):
+                if clase in ("429", "400", "404", "401"):
                     log.warning(
                         "%s [WARNING] Solicitud [%s]: %s en [%s] (intento "
                         "%s/%s). No se reintenta un %s.", _marca(), contrato,
@@ -282,6 +316,224 @@ def llamar(prompt: str, contrato: str = "", *,
     raise RuntimeError(
         "Solicitud [%s]: no hay modelo disponible. Se probaron: %s"
         % (contrato, ", ".join(cola) or "(ninguno)"))
+
+
+class ErrorDeCadena(Exception):
+    """
+    Se agoto la cola de modelos. NO lleva el mensaje de usuario: lleva los
+    DATOS, y es quien los componga el modulo que llamo.
+
+    El motivo es que cada modulo tiene su propio texto para el usuario y sus
+    propios contadores. Un unico "fallo de Gemini" aqui obligaria a todos a
+    inventar el suyo, y el de un barrido completo es largo de verdad: explica
+    cuantos modelos se quedaron sin cuota, cuantos solo saturados, y avisa de
+    que el aviso no se marca como visto para que el proximo barrido lo recoja.
+
+    Asi que aqui solo se junta la evidencia:
+
+        eventos  [{"clase": "429", "modelo": "...", "texto": "..."}, ...]
+        ultimo   la ultima excepcion, con su tipo y su mensaje
+
+    Y el que llama decide que le cuenta a su usuario.
+    """
+
+    def __init__(self, motivo: str, eventos=None, ultimo=None):
+        super().__init__(motivo)
+        self.motivo = motivo
+        self.eventos = list(eventos or [])
+        self.ultimo = ultimo
+
+    def modelos_de(self, clase: str) -> list[str]:
+        """Los modelos que fallaron de una clase concreta, sin repetir."""
+        return list(dict.fromkeys(e.get("modelo", "") for e in self.eventos
+                                  if e.get("clase") == clase))
+
+    def texto_ultimo(self) -> str:
+        return str(self.ultimo) if self.ultimo is not None else ""
+
+
+def _config_con_thinking(types, extra: dict, presupuesto, sin_pensar: bool):
+    """
+    El GenerateContentConfig, con o sin thinking_budget.
+
+    El presupuesto se mete como ESTRUCTURA, no dentro del prompt. Va en la
+    config de la llamada porque es ahi donde el modelo lo recibe, y porque
+    ponerlo en el prompt no lo limita: solo se lo cuenta como texto.
+
+    Y se mete aqui y no en el modulo que llama, por un motivo concreto: asi el
+    modelo de respaldo hereda el limite sin que nadie tenga que acordarse. Si
+    el limite se construyera arriba, el dia que se anadiera un modelo nuevo se
+    podria olvidar, y ese modelo se comeria el presupuesto entero.
+    """
+    cfg = dict(extra or {})
+    if sin_pensar or presupuesto is None:
+        cfg.pop("thinking_config", None)
+        return types.GenerateContentConfig(**cfg)
+    try:
+        cfg["thinking_config"] = types.ThinkingConfig(
+            thinking_budget=int(presupuesto))
+    except Exception:
+        # SDK sin ThinkingConfig, o sin ese campo: se sigue sin el limite
+        # explicito en vez de reventar. Es una degradacion, no un fallo: el
+        # modelo sigue trabajando, solo que pensando mas.
+        cfg.pop("thinking_config", None)
+    return types.GenerateContentConfig(**cfg)
+
+
+def consultar_gemini_con_fallback(prompt: str, contrato: str = "", *,
+                                   thinking_budget=None, config_extra=None,
+                                   cola=None, respaldo: str = "",
+                                   max_intentos: int = MAX_INTENTOS,
+                                   esperar=None, continuar=None,
+                                   reintentar_sin_thinking: bool = True,
+                                   cliente=None, devolver_respuesta: bool = False,
+                                   modulo: str = "gemini_conn"):
+    """
+    LA ENTRADA UNICA. Devuelve (texto, modelo) o levanta ErrorDeCadena.
+
+    Aqui vive toda la politica y en ningun otro sitio:
+
+      · 503 y red -> reintento con backoff 2/4/8, y luego al siguiente modelo
+      · 429       -> sin reintentos, directo al siguiente. La cuota es por
+                    modelo y por dia; insistir no puede funcionar
+      · 400       -> un reintento del MISMO modelo sin thinking_budget, que es el
+                    fallo mas frecuente y el mas facil de arreglar. UNA vez
+                    sola, o seria un bucle infinito
+      · 404       -> al siguiente, anotado como incompatible
+      · 401       -> nada de reintentar ni de cambiar. La clave esta mal y
+                    ningun modelo la va a arreglar
+
+    `continuar` es el cortacircuito. Se consulta ANTES de llamar y ANTES de
+    dormir, nunca despues: si otro aviso ya confirmo que la cuota se agoto,
+    este no deberia ni despertarse para comprobarlo.
+    """
+    esperar = esperar or time.sleep
+    contrato = contrato or "sin-numero"
+    # El cliente se puede INYECTAR, y esa es la via por la que las pruebas
+    # meten un doble: seis suites sustituyen gemini_analyzer._get_cliente() y
+    # dependen de que la llamada salga por ahi. Si este modulo se fabricara su
+    # propio cliente sin mirar, esas seis dejarian de probar nada y seguirian
+    # dando verde sin comprobar nada. Por eso el cliente entra por parametro.
+    _cliente_inyectado = cliente is not None
+    cola = [m for m in (cola or [config.GEMINI_MODEL]) if m]
+    if respaldo and respaldo not in cola:
+        cola.append(respaldo)
+    extra = dict(config_extra or {})
+    eventos: list[dict] = []
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as e:
+        raise ErrorDeCadena("el SDK de Gemini no esta instalado: %s" % e)
+
+    ultimo = None
+    indice = 0
+    while indice < len(cola):
+        modelo = cola[indice]
+        sin_pensar = False
+        for intento in range(1, max(1, max_intentos) + 1):
+            if continuar is not None and not continuar():
+                raise ErrorDeCadena(
+                    "cortocircuito: otro aviso ya confirmo que se acabo la "
+                    "cuota de Google", eventos, ultimo)
+            try:
+                # El timeout de red se fija al construir el cliente. Un
+                # cliente INYECTADO viene con el suyo, si viene: no se toca,
+                # porque si lo creo aqui perderia el doble de la prueba.
+                el = (cliente if _cliente_inyectado
+                      else _cliente(genai, types, TIMEOUT_MS))
+                respuesta = el.models.generate_content(
+                    model=modelo,
+                    contents=prompt,
+                    config=_config_con_thinking(types, extra,
+                                                thinking_budget, sin_pensar),
+                )
+                texto = str(getattr(respuesta, "text", "") or "")
+                if texto.strip():
+                    if modelo != cola[0]:
+                        log.info("%s [INFO] Responde [%s] a traves de [%s].",
+                                 _marca(), contrato, modelo)
+                    if devolver_respuesta:
+                        return texto, modelo, respuesta
+                    return texto, modelo
+                ultimo = RuntimeError(
+                    "Solicitud [%s]: %s devolvio vacio" % (contrato, modelo))
+            except Exception as e:
+                ultimo = e
+                clase = clasificar(e)
+                eventos.append({"clase": clase, "modelo": modelo,
+                                "texto": str(e)[:200],
+                                "intento": intento})
+                if clase == "401":
+                    raise ErrorDeCadena(
+                        "401: Google no reconoce la credencial", eventos,
+                        ultimo) from e
+                if clase == "400" and reintentar_sin_thinking                         and not sin_pensar and thinking_budget is not None:
+                    sin_pensar = True
+                    log.info(
+                        "%s [INFO] Solicitud [%s]: [%s] rechazo la peticion "
+                        "(400). Reintento el MISMO modelo sin thinking_budget "
+                        "(%s).", _marca(), contrato, modelo, thinking_budget)
+                    continue
+                if clase == "400" and reintentar_sin_thinking \
+                        and not sin_pensar and thinking_budget is None:
+                    sin_pensar = True
+                    continue
+                if clase in ("429", "400", "404"):
+                    if indice + 1 < len(cola):
+                        log.warning(
+                            "%s [WARNING] Solicitud [%s]: %s en [%s]. Cambio "
+                            "a [%s].", _marca(), contrato, clase, modelo,
+                            cola[indice + 1])
+                    break
+                # 503 o fallo de red: transitorio, se insiste con espera.
+                if intento < max_intentos:
+                    if continuar is not None and not continuar():
+                        raise ErrorDeCadena(
+                            "cortocircuito antes de la espera", eventos,
+                            ultimo)
+                    espera = ESPERA_BASE * (2 ** (intento - 1))
+                    log.warning(
+                        "%s [WARNING] Error 503 detectado en Solicitud [%s]. "
+                        "Aplicando backoff exponencial. Intento %s/%s.",
+                        _marca(), contrato, intento, max_intentos)
+                    try:
+                        esperar(espera)
+                    except Exception:
+                        pass
+                    continue
+                break
+        indice += 1
+        if indice < len(cola):
+            # El punto de transicion a contingencia. El modulo que llama decide
+            # si esto merece un mensaje propio o solo una linea en el log.
+            _log_contingencia(contrato, cola[indice], modulo)
+
+    # Cuando la cola ENTERA se agota por CUOTA, hay una pausa antes de
+    # rendirse. No es un capricho: mientras un aviso duerme, los demas pueden
+    # leer el cortacircuito y abandonar el lote sin gastar su propia cuota en
+    # descubrir lo mismo. Solo con 429; si fue saturacion, esperar no sirve de
+    # nada, porque no hay cuota que reponer.
+    if any(e.get("clase") == "429" for e in eventos):
+        pausa = float(getattr(config, "GEMINI_PAUSA_SEG", 0) or 0) * 3
+        if pausa > 0:
+            log.warning("%s [WARNING] Solicitud [%s]: la cola entera se quedo "
+                        "sin cuota. Pausa %.0fs antes de rendirse.",
+                        _marca(), contrato, pausa)
+            try:
+                esperar(pausa)
+            except Exception:
+                pass
+
+    raise ErrorDeCadena(
+        "Se agotaron los %d modelos de la cola" % len(cola), eventos, ultimo)
+
+
+def _log_contingencia(contrato: str, modelo: str, modulo: str) -> None:
+    log.info(
+        "%s [INFO] Modulo %s transicionando a politica de contingencia para "
+        "contrato [%s]: [%s].", _marca(), modulo, contrato, modelo)
 
 
 def limpiar_cache(clave: str) -> None:

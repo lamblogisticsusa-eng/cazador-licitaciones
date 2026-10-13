@@ -188,23 +188,36 @@ print("4) EL CODIGO: LA COMPROBACION ESTA ANTES DE DORMIR")
 print("=" * 70)
 # No basta con que funcione: hay que comprobar que la comprobacion este
 # realmente antes de la espera, y no despues.
+# La comprobacion se ha ido con la politica: ahora la hace gemini_conn, y
+# analizar() se limita a handing-over el callback. Lo que hay que comprobar
+# sigue siendo lo mismo de siempre, solo que en el sitio donde vive ahora:
+# que el cortacircuito se consulta ANTES de llamar a Google y ANTES de dormir.
 _arbol = ast.parse(io.open(ga.__file__, encoding="utf-8").read())
 _fn = next(n for n in _arbol.body
            if isinstance(n, ast.FunctionDef) and n.name == "analizar")
 _cuerpo = ast.unparse(_fn)
-check("Prueba 'continuar' dentro de analizar()", "continuar()" in _cuerpo)
+check("analizar() le pasa el cortacircuito al nucleo",
+      "continuar=continuar" in _cuerpo,
+      f"-> no lo pasa: {_cuerpo[:80]}")
 
-i_cont = _cuerpo.find("continuar()")
-i_sleep = _cuerpo.find("time.sleep")
-i_call = _cuerpo.find("generate_content")
+import gemini_conn as _gc
+_arbol_gc = ast.parse(io.open(_gc.__file__, encoding="utf-8").read())
+_fc = next(n for n in _arbol_gc.body
+           if isinstance(n, ast.FunctionDef)
+           and n.name == "consultar_gemini_con_fallback")
+_cuerpo_gc = ast.unparse(_fc)
+check("El nucleo lo consulta antes de llamar", "continuar()" in _cuerpo_gc)
+i_cont = _cuerpo_gc.find("continuar()")
+i_call = _cuerpo_gc.find("generate_content")
 check("La comprobacion va ANTES de la llamada a Google",
-      i_cont < i_call, f"-> continua en {i_cont}, llama en {i_call}")
-check("Y ANTES de la espera del 429",
-      i_cont < i_sleep, f"-> continua en {i_cont}, duerme en {i_sleep}")
-# Y hay una segunda comprobacion justo antes de la espera del 429.
-check("Hay una segunda comprobacion antes de la espera del 429",
-      _cuerpo.count("continuar()") >= 2,
-      f"-> {_cuerpo.count('continuar()')} comprobaciones")
+      0 <= i_cont < i_call, f"-> continua en {i_cont}, llama en {i_call}")
+check("Y hay una segunda comprobacion ANTES de la espera",
+      _cuerpo_gc.count("continuar()") >= 2,
+      f"-> {_cuerpo_gc.count('continuar()')} comprobaciones")
+_i_espera = _cuerpo_gc.find("esperar(espera)")
+check("Y esa segunda esta antes de esperar",
+      _i_espera == -1 or 0 <= i_cont < _i_espera,
+      f"-> continua en {i_cont}, espera en {_i_espera}")
 print("  Con una sola comprobacion, el primer 429 todavia dormiria.")
 
 print()

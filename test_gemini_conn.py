@@ -176,6 +176,37 @@ for exc, esperado in CASOS:
           "esperaba %s" % esperado)
 
 print()
+print("  Con EXCEPCIONES NATIVAS del SDK, no con RuntimeError de adorno.")
+print("  El codigo va en .code y es lo unico que no cambia entre versiones:")
+print("  ahi esta clasificar() de verdad.")
+try:
+    from google.api_core import exceptions as _apicore
+    _ORIGEN = "google.api_core.exceptions"
+except ImportError:
+    # google.api_core no viene con el SDK que hay instalado. Se usa el nativo
+    # que si: google.genai.errors, con la misma forma (code + response_json).
+    from google.genai import errors as _apicore
+    _ORIGEN = "google.genai.errors"
+print("  Origen: %s" % _ORIGEN)
+_NATIVAS = [
+    ("ServiceUnavailable", 503, "503", _apicore.ClientError),
+    ("ResourceExhausted", 429, "429", _apicore.ClientError),
+    ("InvalidArgument", 400, "400", _apicore.ClientError),
+    ("NotFound", 404, "404", _apicore.ClientError),
+    ("Unauthenticated", 401, "401", _apicore.ClientError),
+]
+for nombre, codigo, esperado, fab in _NATIVAS:
+    _e = fab(codigo, {"error": {"code": codigo, "message": "sin texto util"}})
+    check("  %-20s(%s) -> %s" % (nombre, codigo, esperado),
+          gc.clasificar(_e) == esperado,
+          "-> %s" % gc.clasificar(_e))
+# El mensaje vacio es la prueba de que se mira el .code y no el texto: con un
+# texto sin el numero, la version antigua de clasificar() no lo reconoceria.
+_e503 = _apicore.ClientError(503, {"error": {"code": 503, "message": "x"}})
+check("  Y con un mensaje que NO dice 503 tambien sale 503",
+      gc.clasificar(_e503) == "503")
+
+print()
 print("  Y por TIPO de excepcion, no solo por el texto, porque Google cambia")
 print("  los mensajes entre versiones y los tipos se mantienen:")
 try:

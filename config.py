@@ -50,7 +50,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "4.1.0"
+KYOMOTO_VERSION = "4.2.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -295,6 +295,14 @@ MAX_CHARS_DESCRIPCION = _int("MAX_CHARS_DESCRIPCION", 3000)
 GEMINI_MAX_OUTPUT_TOKENS = _int("GEMINI_MAX_OUTPUT_TOKENS", 2048)
 TIMEOUT_HTTP = _int("TIMEOUT_HTTP", 45)
 MAX_REINTENTOS = _int("MAX_REINTENTOS", 3)
+
+# Espera base del backoff exponencial ante un 503: 2s, 4s, 8s.
+#
+# Vive aqui y no como constante en gemini_conn porque hay dos motivos: se puede
+# bajar si en un servidor de Render el contenedor se queda corto de tiempo, y
+# las pruebas la bajan a 0,1 para no tardar medio minuto. Con la espera fija en
+# el modulo, una prueba que simula seis modelos caidos se comia 900s y colgaba.
+GEMINI_ESPERA_BACKOFF_SEG = float(os.getenv("GEMINI_ESPERA_BACKOFF_SEG", "2"))
 
 # --- Operacion ---
 # Dos barridos al dia. Cada uno gasta como 1/12 del presupuesto diario, asi

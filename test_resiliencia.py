@@ -24,6 +24,9 @@ os.environ["TELEGRAM_BOT_TOKEN"] = "123:FAKE"
 os.environ["TELEGRAM_CHAT_ID"] = "1"
 os.environ["GEMINI_ESPERA_503"] = "0.1"
 os.environ["GEMINI_PAUSA_SEG"] = "0.1"
+# El backoff del 503 tambien espera, y con la base en 2s una prueba que
+# simula seis modelos caidos tardaria 900s y se colgaria.
+os.environ["GEMINI_ESPERA_BACKOFF_SEG"] = "0.1"
 
 FALLA = 0
 
@@ -260,12 +263,25 @@ _llamadas = [
     # Es cliente.models.generate_content: una Attribute, no un Name suelto.
     and getattr(n.func, "attr", "") == "generate_content"
 ]
-check("verificar_api llama a _construir_config()",
-      any("_construir_config()" in c for c in _llamadas),
-      f"-> generate_content recibe: {_llamadas}")
-check("Y no manda un config literal",
-      not any('"max_output_tokens"' in c for c in _llamadas),
-      f"-> generate_content recibe: {_llamadas}")
+# La intencion de estas dos comprobaciones no es "donde vive el codigo", es
+# "el smoke test usa LA MISMA CONFIG que el escaneo real, y ningun numero
+# escrito a mano". Eso sigue siendo verdad, pero ahora la config la construye
+# gemini_conn a partir de config_extra, y verificar_api lo pasa.
+_llamadas = [
+    _ast.unparse(n) for n in _ast.walk(_fn)
+    if isinstance(n, _ast.Call)
+    and "gemini_conn" in _ast.unparse(n.func)
+]
+check("verificar_api enruta por gemini_conn.consultar_gemini_con_fallback",
+      any("consultar_gemini_con_fallback" in c for c in _llamadas),
+      f"-> {[_llamadas]}")
+_fuente_fn = _ast.unparse(_fn)
+check("Y no manda un config literal, sino el de config.py",
+      '"max_output_tokens"' not in _fuente_fn
+      or "config.GEMINI_MAX_OUTPUT_TOKENS" in _fuente_fn,
+      f"-> hay un max_output_tokens escrito a mano")
+check("Y con el mismo thinking_budget que el escaneo",
+      "config.GEMINI_THINKING_BUDGET" in _fuente_fn)
 check("Y el prompt exige JSON, como el escaneo real",
       any("JSON" in _ast.unparse(n) for n in _ast.walk(_fn)
           if isinstance(n, _ast.Constant) and isinstance(n.value, str)))
