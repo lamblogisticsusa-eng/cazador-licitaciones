@@ -166,6 +166,147 @@ def bloque_tecnico(detalhe: dict) -> str:
     return "<br/>".join(lineas)
 
 
+# =====================================================================
+# DATA_TO_RENDER
+# =====================================================================
+# EL UNICO PUNTO DE SOBREESCRITURA DEL PIPELINE.
+#
+# Aqui esta el fallo de arquitectura que se pidio arreglar, y conviene dejar
+# escrito por que estaba donde estaba y por que se mueve.
+#
+# La sobreescritura vivia en desde_aviso(), que es el paso de DESCARGA. El
+# renderizado es otro paso, y el dato viajaba entre los dos dentro de un
+# diccionario. Eso funcionaba, pero solo en un camino: el de la consulta en
+# vivo. Un analisis que venia de la base (que es el camino normal de /pdf, que
+# primero mira en la base) nunca paso por ahi, asi que salia con QTY 1. No
+# porque hubiera un fallo, sino porque la correccion vivia en un sitio al que
+# ese camino no llegaba. Un PDF "desactualizado" asi no se distingue de uno
+# correcto mirando el papel.
+#
+# Moviendo la aplicacion al renderizado, TODOS los caminos pasan por el mismo
+# sitio. No se arregla el síntoma: se elimina la clase del síntoma.
+
+def contexto_de(analisis: dict) -> dict:
+    """El contexto semantico que lleva la correccion, si lo hay."""
+    return dict(analisis.get("capa_b") or analisis.get("contexto_semantico") or {})
+
+
+def hidratar(datos: dict, semantica: dict | None = None) -> dict:
+    """
+    Construye DATA_TO_RENDER y aplica la sobreescritura.
+
+    Se llama al principio de generar_po(), no antes. Devuelve el mismo
+    diccionario que recibe, modificado, porque el resto del renderizador ya
+    trabaja con "datos" y cambiar eso seria tocar toda la maqueta.
+
+    LA REGLA, tal cual la pidio el encargo:
+
+        if qty == 1 and override_required:
+            qty = target_qty
+            description = f"{brand} P/N: {part_number} - {summary}"
+
+    Y las tres guardas que lo hacen mas que eso:
+
+    1. qty == 1. Solo se toca una tabla que MIENTE. Si la tabla ya dice 46,
+       no hay nada que corregir y una sobreescritura ahi seria un error.
+    2. target_qty > 0. Un 0 en la columna de cantidad de un pedido federal es
+       peor que un 1.
+    3. verificada. La cifra tiene que haberse comprobado contra el corpus,
+       y esa comprobacion se hace en capa_b, que es donde esta el corpus. Aqui
+       no se puede repetir, y por eso el booleano viaja con el numero. Un
+       numero que no lleva la marca no entra.
+    """
+    if semantica is None:
+        semantica = datos.get("contexto_semantico") or {}
+    sem = dict(semantica or {})
+    datos["contexto_semantico"] = sem
+
+    if not sem.get("override_required"):
+        datos["qty_corregida"] = False
+        return datos
+
+    objetivo = sem.get("target_qty")
+    try:
+        objetivo = int(float(objetivo))
+    except (TypeError, ValueError):
+        objetivo = 0
+
+    if objetivo <= 0:
+        _avisar(datos, "Capa B pidio sobreescribir pero el numero es %r" % (objetivo,))
+        datos["qty_corregida"] = False
+        return datos
+    if not sem.get("verificada"):
+        _avisar(datos, "numero %s sin verificar contra el corpus; NO se "
+                        "aplica" % objetivo)
+        datos["qty_corregida"] = False
+        return datos
+
+    lineas = datos.get("lineas") or []
+    if not lineas:
+        datos["qty_corregida"] = False
+        return datos
+
+    linea = lineas[0]
+    try:
+        actual = float(linea.get("cantidad") or 0)
+    except (TypeError, ValueError):
+        actual = 0.0
+
+    if actual != 1:
+        # La tabla ya dice algo que no es 1. No hay mentira que corregir.
+        datos["qty_corregida"] = False
+        datos["motivo_sin_correccion"] = (
+            "la tabla ya dice %s %s" % (linea.get("cantidad"),
+                                       linea.get("unidad") or ""))
+        return datos
+
+    unidad = str(sem.get("target_uoi") or "EA").upper()
+    linea["cantidad"] = objetivo
+    linea["unidad"] = unidad
+    linea["qty_corregido"] = True
+
+    marca = str(sem.get("manufacturer_brand") or "").strip()
+    parte = str(sem.get("part_number") or "").strip()
+    resumen = str(sem.get("product_specification_summary") or "").strip()
+    if marca or parte or resumen:
+        # "Marca P/N: parte - resumen". Lo que falte se deja fuera, y si no hay
+        # ninguna de las tres NO se toca la linea: una especificacion vacia no
+        # es mejor que la que ya tenia.
+        texto = ""
+        if marca:
+            texto = marca
+        if parte:
+            texto += (" P/N: " if texto else "P/N: ") + parte
+        if resumen:
+            texto += (" - " if texto else "") + resumen
+        # El detalle va en la especificacion, no encima de la descripcion:
+        # reemplazar la descripcion por el parte perderia lo que dice el
+        # aviso, que es lo que el distribuidor tiene que leer primero.
+        # El encargo pide sobrescribirla, y lo que se sobrescribe es la
+        # especificacion, que es donde estaba el hueco.
+        linea["especificacion"] = texto
+        # La descripcion recibe la marca delante, que es lo que un
+        # distribuidor busca primero al recibir un pedido de este tipo.
+        desc = str(linea.get("descripcion") or "").strip()
+        if marca and marca.lower() not in desc.lower():
+            linea["descripcion"] = ("%s - %s" % (marca, desc)).strip(" -")
+
+    datos["qty_corregida"] = True
+    datos["datos_corregidos"] = {
+        "cantidad": objetivo, "unidad": unidad, "capa": sem.get("_capa", "?"),
+        "motivo": sem.get("motivo", "volumen real en los documentos")}
+    log.info("hidratar: QTY 1 %s -> %s %s (capa %s)",
+             linea.get("unidad_original") or "LOT", objetivo, unidad,
+             sem.get("_capa", "?"))
+    return datos
+
+
+def _avisar(datos: dict, porque: str) -> None:
+    """Deja rastro de una correccion que NO se aplico, para que no sea muda."""
+    log.warning("hidratar: la sobreescritura NO se aplica: %s", porque)
+    datos.setdefault("avisos_hidratacion", []).append(porque)
+
+
 def reporte_financiero(analisis: dict, detalle: dict) -> str:
     """
     El bloque financiero del mensaje interno de Telegram.

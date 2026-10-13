@@ -410,6 +410,14 @@ DESC_LOTE = (
 # response_mime_type="application/json". Un stub con "clave: valor" no probaria
 # nada: _leer_json lo devolveria vacio y todo lo de abajo pasaria por casualidad.
 DETALLE = {
+    # El esquema de la Capa B. Las claves de abajo las usa el respaldo.
+    "override_required": True,
+    "target_qty": 100,
+    "target_uoi": "EA",
+    "manufacturer_brand": "The Timken Company",
+    "part_number": "S0594DU0500-S1",
+    "product_specification_summary": ("S-1 insert bearings - The Timken "
+                                      "Company - 5.00 x 96 in bore"),
     "resolved_product_name": "S-1 insert bearings",
     "actual_units_required": "100 each",
     "manufacturer_part_number": "S0594DU0500-S1",
@@ -457,15 +465,19 @@ check("  Y el numero viene de un documento, no del aire",
 # desde_aviso no devuelve "cantidad" arriba: devuelve las lineas del BOM en
 # "bom_lineas", y de ahi sacan despues cantidad y unidad.
 lineas = an.get("bom_lineas") or []
-check("  Y el BOM lleva la cantidad corregida",
-      lineas and float(lineas[0].get("cantidad") or 0) == 100,
+# El BOM sale SIN tocar, a proposito. La correccion no se aplica en la
+# descarga sino al hidratar, dentro de generar_po(), que es el punto unico.
+# Este test existed para comprobar que el cambio llegaba al PDF, asi que lo
+# que se comprueba es el contexto y, mas abajo, el PDF ya renderizado.
+check("  Y el BOM sale SIN tocar todavia",
+      lineas and float(lineas[0].get("cantidad") or 0) == 1
+      and lineas[0].get("unidad") == "LOT",
       "-> %r" % (lineas[0] if lineas else None))
-check("  Con la unidad corregida tambien",
-      lineas and lineas[0].get("unidad") == "EA",
-      "-> %r" % (lineas[0].get("unidad") if lineas else None))
-check("  Y marcada como corregida, para que se vea",
-      lineas and lineas[0].get("qty_corregido"),
-      "-> %r" % (lineas[0] if lineas else None))
+_ctx = an.get("contexto_semantico") if False else (an.get("capa_b") or {})
+check("  Y la INTENCION viaja en el contexto, verificada",
+      _ctx.get("target_qty") == 100 and _ctx.get("verificada") is True,
+      "-> %r" % (_ctx,))
+check("  Con la unidad que decidio la capa", _ctx.get("target_uoi") == "EA")
 
 pdf = pdfg.generar_po(pdfg.desde_analisis(
     an, {"nombre": "Radwell International"}))

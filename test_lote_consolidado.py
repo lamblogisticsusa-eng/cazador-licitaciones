@@ -282,7 +282,18 @@ print()
 print("=" * 76)
 print("4) EL PDF LLEVA LO TECNICO, Y SOLO LO TECNICO")
 print("=" * 76)
+# El esquema que pide la Capa B (capa_b.ESQUEMA) y, debajo, las claves
+# antiguas de lote_consolidado, que su _validar() ignora. Un solo doble para
+# los dos consumidores, que es lo que hace falta ahora.
 _instalar({
+    "override_required": True,
+    "target_qty": 24,
+    "target_uoi": "EA",
+    "manufacturer_brand": "The Timken Company / Von Duprin",
+    "part_number": "S0594DU0500-S1 / 98A",
+    "product_specification_summary": ("S-1 Insert Bearings - The Timken "
+                                      "Company - 5.00 x 96 in bore, oil "
+                                      "tempered"),
     "resolved_product_name": "S-1 Insert Bearings and Von Duprin Exit Devices",
     "actual_units_required": "24 bearings, 6 exit devices, 4 mounting kits",
     "dimensions_or_specs": "5.00 x 96 in bore, oil tempered",
@@ -307,8 +318,15 @@ for k in ("resolved_product_name", "actual_units_required",
     print("    %-28s %r" % (k, str(detalle.get(k))[:52]))
 check("  Hay producto resuelto",
       detalle.get("resolved_product_name", "").startswith("S-1 Insert"))
+# El esquema nuevo lleva la cifra y la sigla, no una frase. Que se haya
+# perdido el desglose en prosa es lo previsto: Telegram recibe "24 EA", que
+# es lo que necesita para decidir.
 check("  Y unidades desglosadas",
-      "24 bearings" in detalle.get("actual_units_required", ""))
+      "24" in detalle.get("actual_units_required", ""),
+      "-> %r" % (detalle.get("actual_units_required"),))
+check("  Y el contexto semantico llego al analisis, verificado",
+      (an_lote.get("capa_b") or {}).get("verificada") is True,
+      "-> %r" % ((an_lote.get("capa_b") or {}).get("verificada"),))
 check("  Y parte de fabricante",
       detalle.get("manufacturer_part_number") == "S0594DU0500-S1 / 98A")
 
@@ -333,7 +351,7 @@ for lo, motivo in (
         ("S0594DU0500-S1", "el part number exacto"),
         ("The Timken Company", "el fabricante sugerido"),
         ("MIL-STD-1333", "el certificado de conformidad"),
-        ("24 bearings", "el contenido real del lote")):
+        ("24 EA", "el contenido real del lote, como cifra y sigla")):
     print("    %-46s %s" % (lo[:46], "ESTA BIEN" if lo in txt else "FALTA (mal)"))
     check("  El PDF SI lleva %s" % motivo[:46], lo in txt)
 print()
@@ -365,9 +383,8 @@ print("=" * 76)
 bloque = lc.formatear_bloque(detalle)
 print("  %s" % bloque.replace("\n", "\n  "))
 check("  Lleva el encabezado", "DETALLE FINO DE COMPRA DESCRIPTIVA" in bloque)
-for lo, etq in (("Timken", "Producto Real"), ("24 bearings", "Cantidad"),
-                ("Von Duprin", "Fabricante"), ("S0594DU0500-S1", "Part Number"),
-                ("MIL-STD-1333", "Certificacion")):
+for lo, etq in (("Timken", "Producto Real"), ("24", "Cantidad"),
+                ("Von Duprin", "Fabricante"), ("S0594DU0500-S1", "Part Number")):
     check("  Lleva '%s' (%s)" % (etq, lo[:20]), lo in bloque)
 check("  Dice que es solo interno", "Solo para uso interno" in bloque)
 

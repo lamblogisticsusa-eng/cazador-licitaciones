@@ -54,9 +54,12 @@ Un adjunto de un gobierno puede pesar 40 MB. Se corta a MAX_BYTES, y se avisa,
 porque truncar en silencio y no decirlo seria lo peor: el LLM daria por hecho
 que ha leido el documento entero.
 """
+import io
 import json
 import logging
+import os
 import re
+import tempfile
 
 import config
 
@@ -67,6 +70,33 @@ MAX_BYTES = 3_000_000       # 3 MB por adjunto
 MAX_CORPUS = 24_000         # caracteres que se Ilegan al modelo
 
 _SIN_ADJUNTOS = "__sin_adjuntos__"
+
+# DONDE SE ESCRIBE EL CORPUS UNIFICADO.
+#
+# No se usa "/tmp" a pelo: es un nombre fijo, y dos comandos /pdf a la vez
+# (o dos contenedores de Render) se pisan el fichero. El nombre lleva el
+# notice_id, que es lo unico que distingue una corpora de otra. Se puede mover
+# con RUTA_CORPUS por entorno.
+RUTA_CORPUS = os.environ.get("RUTA_CORPUS", "").strip() or tempfile.gettempdir()
+NOMBRE_CORPUS = "corpus_adjuntos.txt"
+
+# QUE DOCUMENTOS SON LAS ESPECIFICACIONES CRITICAS.
+#
+# En un aviso consolidado el desglose no esta en la tabla: esta en el anexo. Y
+# los anexos no se llaman todos igual. Estos son los nombres con los que un
+# comprador militar nombra las cosas, y van antes que el resto porque el corpus
+# se corta por tamaño y lo que se queda fuera es lo último.
+ETIQUETAS_ESPECIFICACION = ("attachment", "purchase description", "purchase "
+                            "descrip", "sow", "statement of work",
+                            "specification", "specs", "attachment 0002",
+                            "0002")
+
+# Aviso que se lanza cuando habia especificaciones que bajar y no seGot.
+# Deliberadamente NO se lanza cuando el aviso no declara ningun adjunto: eso
+# no es un fallo de descarga, es un aviso sin anexos, y abortar ahi impediria
+# generar el PDF de todas las licitaciones consolidadas que no los traen.
+class FalloDescargaEspecificaciones(Exception):
+    """[ERROR] Descarga de especificaciones criticas fallida. Abortando pipeline."""
 
 _EXT_TEXTO = (".txt", ".csv", ".htm", ".html", ".xml", ".md", ".json")
 _EXT_PDF = (".pdf",)
@@ -304,25 +334,42 @@ def corpus_documental(opp: dict, notice_id: str, usar_cache: bool = True) -> str
     if not _api_key():
         return ""
 
-    vistos, bloques, bajados = set(), [], 0
+    # Las especificaciones criticas van PRIMERO. El corpus se corta a
+    # MAX_CORPUS caracteres, asi que lo que se queda fuera es lo ultimo: si se
+    # baja primero un Excel de costes, el anexo con el desglose puede no caber,
+    # y sin desglose no hay nada que corregir.
+    #
+    # El indice de cada enlace se pide una vez y se guarda, para no repetir la
+    # llamada al ordenar. Es el mismo numero de peticiones que antes.
+    indices = []
     for url in links:
+        for rec in _listar_recursos(url):
+            indices.append(rec)
+    criticos = [r for r in indices if _especificacion(r.get("filename"))]
+    resto = [r for r in indices if not _especificacion(r.get("filename"))]
+    if criticos and resto:
+        log.info("corpus: '%s' %d especificacion(es) antes que %d documento(s) "
+                 "administrativo(s)", nid[:24], len(criticos), len(resto))
+    indices = criticos + resto
+
+    vistos, bloques, bajados = set(), [], 0
+    for rec in indices:
         if bajados >= MAX_POR_LICITACION:
             log.info("corpus: '%s' se paran en %d adjuntos (de %d enlaces)",
                      nid[:24], MAX_POR_LICITACION, len(links))
             break
-        for rec in _listar_recursos(url):
-            nombre = str(rec.get("filename") or "")
-            if nombre in vistos:
-                continue
-            vistos.add(nombre)
-            nombre, texto = _bajar_uno(rec)
-            if not texto.strip():
-                if nombre:
-                    # El nombre solo, que para un LLM ya dice algo.
-                    bloques.append("--- %s (texto no disponible) ---" % nombre)
-                continue
-            bloques.append("--- %s ---\n%s" % (nombre, texto.strip()))
-            bajados += 1
+        nombre = str(rec.get("filename") or "")
+        if nombre in vistos:
+            continue
+        vistos.add(nombre)
+        nombre, texto = _bajar_uno(rec)
+        if not texto.strip():
+            if nombre:
+                # El nombre solo, que para un LLM ya dice algo.
+                bloques.append("--- %s (texto no disponible) ---" % nombre)
+            continue
+        bloques.append("--- %s ---\n%s" % (nombre, texto.strip()))
+        bajados += 1
 
     cuerpo = "\n\n".join(bloques).strip()[:MAX_CORPUS]
     if not cuerpo:
@@ -341,3 +388,81 @@ def corpus_documental(opp: dict, notice_id: str, usar_cache: bool = True) -> str
         except Exception:
             pass
     return cuerpo
+
+
+def _especificacion(nombre: str) -> bool:
+    """El nombre del fichero dice que es una especificacion critica."""
+    n = str(nombre or "").lower()
+    return any(et in n for et in ETIQUETAS_ESPECIFICACION)
+
+
+def ruta_corpus(notice_id: str) -> str:
+    """El fichero donde vive el corpus de ESTE aviso."""
+    limpio = re.sub(r"[^A-Za-z0-9_.-]", "_", str(notice_id or "sin_id"))[:60]
+    return os.path.join(RUTA_CORPUS, "corpus_%s.txt" % limpio)
+
+
+def volcar_corpus(notice_id: str, texto: str) -> str:
+    """
+    Escribe el corpus unificado a disco y devuelve la ruta.
+
+    Se escribe SIEMPRE, incluso vacio. Un fichero vacio es informacion: dice
+    "se probo y no habia nada", que es distinto de "no se probo".
+    """
+    ruta = ruta_corpus(notice_id)
+    try:
+        with io.open(ruta, "w", encoding="utf-8", newline="\n") as f:
+            f.write(str(texto or ""))
+    except OSError as e:
+        log.warning("adjuntos: no se pudo escribir el corpus en %s: %s",
+                    ruta[:60], e)
+    return ruta
+
+
+def especificaciones(aviso: dict, notice_id: str = "",
+                    usar_cache: bool = True) -> tuple[str, str]:
+    """
+    PASO 1 DEL PIPELINE. BLOQUEANTE, A PROPOSITO.
+
+    Devuelve (ruta_del_fichero, texto_del_corpus).
+
+    Que sea bloqueante es el punto entero de este paso. Si la descarga corriera
+    en segundo plano y el renderizado no esperara, el PDF se compilaria contra
+    un corpus vacio y saldria con QTY 1 sin que nadie se enterase: el fallo
+    seria silencioso, y la correccion dependeria del orden en que el sistema tenga a
+    bien terminar las cosas. Un documento comercial no puede depender de eso.
+
+    ORDEN DE PRIORIDAD
+    Las especificaciones criticas se piden ANTES que el resto, porque el corpus
+    se corta a MAX_CORPUS caracteres y lo que se queda fuera es lo ultimo. Un
+    "Attachment 0002" con el desglose vale mas que un=".xlsx" de costes.
+
+    CUANDO ABORTA
+    Solo si el aviso DECLARABA adjuntos y no se pudo bajar ninguno. Un aviso
+    sin resourceLinks no es un fallo: no hay nada que bajar, y abortar ahi
+    dejaria sin PDF a toda licitacion consolidada que venga sin anexos.
+    """
+    import store
+
+    nid = str(notice_id or aviso.get("noticeId") or "")
+    texto = corpus_documental(aviso, nid, usar_cache=usar_cache)
+    ruta = volcar_corpus(nid, texto)
+
+    if texto.strip():
+        log.info("especificaciones: '%s' -> %d caracteres en %s",
+                 nid[:24], len(texto), os.path.basename(ruta))
+        return ruta, texto
+
+    # Sin texto. La pregunta es si el aviso declaraba algo que bajarse.
+    declarados = resource_links(aviso)
+    if declarados:
+        log.error("[ERROR] Descarga de especificaciones criticas fallida. "
+                  "Abortando pipeline.")
+        raise FalloDescargaEspecificaciones(
+            "[ERROR] Descarga de especificaciones criticas fallida. "
+            "Abortando pipeline. %s declaraba %d adjunto(s) y no se pudo "
+            "leer ninguno." % (nid[:24] or "(sin id)", len(declarados)))
+
+    log.info("especificaciones: '%s' no declara adjuntos; no hay nada que "
+             "bajar y no es un fallo", nid[:24])
+    return ruta, ""

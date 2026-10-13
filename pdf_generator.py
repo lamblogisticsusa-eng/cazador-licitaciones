@@ -212,6 +212,15 @@ def _encabezado_logo(canvas, doc, ancho: float) -> None:
 # ======================================================================
 #  Estilos
 # ======================================================================
+def _int_unidades(texto) -> int:
+    """Un entero desde "24 bearings" o "100 each". 0 si no hay uno claro."""
+    try:
+        import lote_consolidado as _lc_u
+        return _lc_u._unidades_numericas(texto)
+    except Exception:
+        return 0
+
+
 def _estilos() -> dict:
     e = {}
     e["empresa"] = ParagraphStyle("empresa", fontName="Helvetica-Bold",
@@ -282,7 +291,33 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         instrucciones     str, instrucciones de despacho
         condiciones       str, terminos de pago y entrega
         notas             str
+        contexto_semantico dict, la salida de la Capa B / Capa C
+
+    HIDRATACION, Y POR QUE ESTA AQUI Y NO ANTES
+    El renderizador no lee de SAM.gov, ni de la base, ni de un fichero. Lee
+    "datos", y solo "datos". Por eso la sobreescritura va en la primera linea
+    de esta funcion: es el primer punto por el que pasa el documento entero, y
+    por tanto el unico sitio donde una correccion no puede quedar en el camino.
+
+    Va aqui y no en desde_analisis() a proposito. desde_analisis() es el paso
+    que traduce el analisis al documento, y hay mas de un camino que llega a
+    generar_po() sin pasar por el (una segunda consulta, una regeneracion, un
+    documento repetido). Poner la correccion en el renderizador es lo que
+    garantiza que ninguno se quede con la tabla base.
+
+    Y va aqui y no en desde_aviso() por lo mismo en sentido inverso: desde_
+    aviso() es el paso de DESCARGA, y un analisis que viene de la base nunca
+    pasa por el.
     """
+    try:
+        import integral as _integral
+        datos = _integral.hidratar(datos)
+    except Exception as e:
+        # Un fallo de hidratacion no puede impedir que salga un documento.
+        # Lo que sale es la tabla base, que es fea pero es cierta.
+        log.warning("generar_po: la hidratacion fallo (%s); sale la tabla "
+                    "base", e)
+
     e = _estilos()
     buffer = io.BytesIO()
 
@@ -417,7 +452,17 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
     total = 0.0
     # El documento no lleva precios: los pone el distribuidor. Ver la nota en
     # desde_analisis(), que explica por que el estimado propio NO se imprime.
-    _sin_precio = not datos.get("mostrar_precios", True)
+    # EL DEFAULT ES "SIN PRECIO", y no al reves.
+    #
+    # Antes era mostrar_precios=True, y desde_analisis() pasaba False. Funcionaba
+    # por ese False explicito. Pero el default era el lado peligroso: cualquier
+    # llamante que se olvidara de la clave sacaba un documento con "$0.00" en
+    # UNIT PRICE y AMOUNT, y un cero es un precio FALSO, no un hueco. El
+    # proveedor no lee "no hay precio", lee "cero".
+    #
+    # Ponerlo al reves hace que el fallo sea imposible en vez de improbable: las
+    # celdas salen en blanco salvo que alguien pida verlas a proposito.
+    _sin_precio = not datos.get("mostrar_precios", False)
     # El bloque tecnico se calcula UNA vez y solo si hay detalle del lote. Sin
     # detalle, _tec es "" y el documento sale exactamente igual que antes: ni una
     # linea de mas, ni un ancho cambiado, ni una maqueta tocada.
@@ -1981,43 +2026,121 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
     # Y va envuelta en try/except porque el PDF de una licitacion que NO es un
     # lote se tiene que poder generar SIEMPRE. Esta capa no puede ser la
     # razon de que un documento no salga.
-    lote, correccion = {}, {}
+    # El pipeline del encargo, en orden y SINCRONO. No hay segundo plano, no
+    # hay hilo, no hay futuro que esperar: se baja, se extrae, se decide, y lo
+    # que se decide viaja en el analisis. El renderizado va despues.
+    semantica, correccion, lote = {}, {}, {}
+    corpus = ""
     try:
         if any(it.get("consolidated_lot") for it in (bom or [])):
-            import lote_consolidado
-            import integral
-            # Los adjuntos se piden SOLO aqui. Es lo que hace que esto no
-            # contradiga la decision de sam_api.obtener_descripcion(): no se
-            # pide /resources para todos los avisos, solo para los que tienen
-            # la tabla diciendo "1 LOT", que son los unicos donde los adjuntos
-            # pueden corregir un QTY que va a un distribuidor.
+            import integral as _int
+            import capa_b as _cb
+            import adjuntos as _adj
+
+            # PASO 1, BLOQUEANTE. Se espera a que termine. Si esto corriera en
+            # segundo plano, el PDF se maquetaria contra un corpus vacio y
+            # saldria con QTY 1 sin que nadie se entere: el fallo seria
+            # silencioso y dependeria del orden en que acaben las hilos.
             #
-            # Y resourceLinks ya venia en la respuesta del search, asi que
-            # descubrir los adjuntos no cuesta ninguna llamada.
-            corpus = ""
+            # Y levanta FalloDescargaEspecificaciones si el aviso DECLARABA
+            # adjuntos y no se pudo leer ninguno. Ahi si se aborta, y con
+            # razon: es un aviso que TIENE especificaciones, no las hemos
+            # podido mirar, y vamos a mandar un documento sin mirarlas.
             try:
-                import adjuntos
-                corpus = adjuntos.corpus_documental(
+                _ruta, corpus = _adj.especificaciones(
                     aviso, str(aviso.get("noticeId") or ""))
+            except _adj.FalloDescargaEspecificaciones:
+                raise
             except Exception as e:
-                log.warning("desde_aviso: los adjuntos fallaron (%s); se "
-                            "sigue con la descripcion", e)
+                log.warning("desde_aviso: la descarga fallo (%s); se sigue con "
+                            "la descripcion", e)
 
-            lote = lote_consolidado.resolver_lote(
-                aviso, desc, corpus=corpus) or {}
-            log.info("desde_aviso: lote consolidado en %s -> %s (%d "
-                     "caracteres de adjuntos)", aviso.get("noticeId"),
-                     "desglosado" if lote else "sin desglose", len(corpus))
+            # PASO 2, la IA. Solo lee: texto entra, JSON sale.
+            semantica = _cb.extraer(corpus, str(aviso.get("title") or "")) or {}
 
-            # Si el desglose trae un volumen real, se corrige el QTY, con las
-            # tres comprobaciones de integral.corregir_qty() que evitan que un
-            # numero inventado llegue a un pedido federal.
-            if lote:
-                _corpus = (desc or "") + "\n" + corpus
-                correccion = integral.corregir_qty(bom, lote, _corpus) or {}
-                if correccion and integral.aplicar_correccion(bom, correccion):
-                    log.info("desde_aviso: QTY corregido -> %s %s",
-                             int(correccion["cantidad"]), correccion["unidad"])
+            # RESPALDO. Sin corpus no hay estructura que leer en los adjuntos,
+            # y la Capa B se sale sin llamar a Gemini. Ahi se usa la lectura
+            # antigua, que trabaja sobre la DESCRIPCION sola, y su resultado
+            # se traduce al esquema nuevo.
+            #
+            # No es una ruta muerta: es la que cubre a las licitaciones
+            # consolidadas que vienen sin anexos, que son muchas.
+            if not (semantica.get("override_required") or
+                    semantica.get("part_number") or
+                    semantica.get("product_specification_summary")):
+                try:
+                    import lote_consolidado as _lc_ant
+                    _viejo = _lc_ant.resolver_lote(
+                        aviso, desc, corpus=corpus) or {}
+                    if _viejo:
+                        # Asignacion directa, NO setdefault. _vacio() ya
+                        # deja estos cuatro a "" o a 0, asi que setdefault no
+                        # llega a disparar jamas y el respaldo se quedaba
+                        # entero sin hacer nada: target_qty seguia en 0 y el
+                        # bloque tecnico no salia nunca.
+                        semantica["product_specification_summary"] = (
+                            _viejo.get("resolved_product_name") or "")
+                        semantica["part_number"] = (
+                            _viejo.get("manufacturer_part_number") or "")
+                        semantica["manufacturer_brand"] = (
+                            _viejo.get("manufacturer_brand_name") or "")
+                        semantica["dimensions_or_specs"] = (
+                            _viejo.get("dimensions_or_specs") or "")
+                        semantica["certification_requirements"] = (
+                            _viejo.get("certification_requirements") or "")
+                        semantica["target_qty"] = _int_unidades(
+                            _viejo.get("actual_units_required"))
+                        semantica["_capa"] = "B-ant"
+                        log.info("desde_aviso: la Capa B nueva no devolvio "
+                                 "nada; se usa la lectura sobre la descripcion")
+                except Exception as e:
+                    log.info("desde_aviso: el respaldo tampoco pudo (%s)", e)
+
+            # La verificacion va AQUI y no en hidratar(), porque aqui esta el
+            # corpus. Si la cifra no esta escrita en el corpus, no se aplica,
+            # por muy segura que parezca la respuesta del modelo.
+            _cuerpo = (desc or "") + "\n" + (corpus or "")
+            try:
+                _n = int(semantica.get("target_qty") or 0)
+            except (TypeError, ValueError):
+                _n = 0
+            semantica["verificada"] = bool(
+                _n > 0 and _int._numero_en_corpus(_n, _cuerpo))
+            if _n and not semantica["verificada"]:
+                log.warning("desde_aviso: la Capa %s propuso %s, pero esa cifra "
+                            "no esta en el corpus; NO se aplica",
+                            semantica.get("_capa", "?"), _n)
+                semantica["override_required"] = False
+
+            # El detalle para Telegram, en el formato que ya pide
+            # formatear_bloque(). Se traduce del esquema de la Capa B para no
+            # tener dos estructuras distintas para lo mismo.
+            if semantica.get("override_required") or semantica.get("part_number"):
+                uoi = semantica.get("target_uoi") or "EA"
+                lote = {
+                    "resolved_product_name": semantica.get(
+                        "product_specification_summary", ""),
+                    "actual_units_required": ("%s %s" % (_n, uoi)).strip(),
+                    "manufacturer_brand_name": semantica.get(
+                        "manufacturer_brand", ""),
+                    "manufacturer_part_number": semantica.get(
+                        "part_number", ""),
+                    "dimensions_or_specs": semantica.get(
+                        "dimensions_or_specs", ""),
+                    "certification_requirements": semantica.get(
+                        "certification_requirements", ""),
+                }
+                correccion = {
+                    "cantidad": _n, "unidad": uoi,
+                    "unidad_original": str((bom or [{}])[0].get("unidad")
+                                           or "LOT").upper(),
+                    "motivo": "volumen real en los documentos del aviso",
+                    "capa": semantica.get("_capa", ""),
+                }
+            log.info("desde_aviso: lote consolidado en %s -> capa %s, %d "
+                     "caracteres de adjuntos, qty %s",
+                     aviso.get("noticeId"), semantica.get("_capa", "-"),
+                     len(corpus), _n or "sin numero")
     except Exception as e:
         log.warning("desde_aviso: la Capa B fallo (%s); el PDF sigue igual", e)
 
@@ -2096,8 +2219,16 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         # El desglose del lote consolidado, o {}. Lo lleva SOLO el mensaje de
         # Telegram; el PDF no lo ve, por diseno.
         "lote_consolidado": lote or {},
-        # Si el QTY de la tabla se ha corregido con el volumen real, y por que.
+        # Si el QTY de la tabla se va a corregir con el volumen real, y por
+        # que. Esto es la INTENCION, no el efecto.
+        #
+        # El BOM NO se toca aqui a proposito: la aplicacion ocurre en
+        # generar_po(), con integral.hidratar(), que es el punto unico. Si se
+        # corrigiera aqui, un analisis que vuelve de la base no tendria por
+        # donde corregirse, que es exactamente el fallo que esto arregla.
         "qty_corregido": correccion or {},
+        # El contexto semantico entero. Lo lee generar_po() al hidratar.
+        "capa_b": dict(semantica or {}),
         # El precio lo hereda Kyomoto del valor que declara el propio aviso.
         #
         # Antes iban a None, y la tabla ITEMS ORDERED multiplicaba None por la
@@ -2234,6 +2365,14 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     # cuando vino de una consulta en vivo). En un analisis ya guardado por el
     # barrido no esta, y da igual: esos datos ya salieron de Gemini.
     _est_analisis = dict(analisis.get("estructurado") or {})
+    # El contexto semantico lo lee generar_po() a la hora de hidratar. Aqui
+    # solo se saca del analisis y se pasa; aplicarlo aqui seria el problema
+    # que se acaba de corregir.
+    try:
+        import integral as _integral_ctx
+        _contexto = _integral_ctx.contexto_de(analisis)
+    except Exception:
+        _contexto = {}
     lineas = []
     cant = _num(analisis.get("cantidad_total")) or 1
     unidad = analisis.get("unidad_medida") or "EA"
@@ -2394,6 +2533,10 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # El detalle del lote consolidado, para el bloque tecnico del PDF. Va
         # solo si hay: sin detalle, generar_po() no dibuja nada.
         "lote_detalle": dict(analisis.get("lote_consolidado") or {}),
+        # El contexto semantico viaja HASTA el documento, no se aplica aqui.
+        # Lo aplica generar_po(), que es donde vive el punto unico. Asi una
+        # sobreescritura no puede perderse por el camino.
+        "contexto_semantico": _contexto,
         "instrucciones": "\n".join(inst),
         # Condiciones en ingles, por lo mismo que las instrucciones: van al
         # proveedor. El factoring se declara porque es lo que hace posible la
