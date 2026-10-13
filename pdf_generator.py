@@ -78,8 +78,8 @@ EMPRESA = "L.A.M.B. Logistics LLC"
 DIRECCION = ["1209 Mountain Rd. PL. NE, Ste. H", "Albuquerque, NM 87110"]
 FIRMANTE = "Bastian Cordero"
 CARGO_FIRMANTE = "CEO"
-EMAIL = "operations@lamblogistics.com"
-TELEFONO = "+1 (505) 555-0142"
+EMAIL = "lamblogisticsusa@gmail.com"
+TELEFONO = "+1 (702) 516-6086"
 
 # Colores de la marca. El azul del logo es #1B3B6F y el gris #5B6770.
 AZUL = colors.HexColor("#1B3B6F")
@@ -399,6 +399,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
                 "QTY", "UNIT", "UNIT PRICE", "AMOUNT"]
     filas = [[Paragraph(h, e["celda_b"]) for h in cabecera]]
     total = 0.0
+    _sin_precio = bool(datos.get("precio_desconocido"))
     for i, ln in enumerate(datos.get("lineas") or [], start=1):
         cant = _num(ln.get("cantidad"))
         precio = _num(ln.get("precio_unitario"))
@@ -416,11 +417,14 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             Paragraph(desc, e["celda"]),
             Paragraph(_fmt(cant), e["celda"]),
             Paragraph(ln.get("unidad") or "EA", e["celda"]),
-            Paragraph(_usd(precio), e["celda"]),
-            Paragraph(_usd(importe), e["celda_b"]),
+            # Celda en blanco en vez de $0.00 cuando el aviso no declara valor.
+            # Ver la nota de "precio_desconocido" en desde_analisis().
+            Paragraph("" if _sin_precio else _usd(precio), e["celda"]),
+            Paragraph("" if _sin_precio else _usd(importe), e["celda_b"]),
         ])
     filas.append(["", Paragraph("TOTAL (USD)", e["celda_b"]), "", "",
-                  "", Paragraph(_usd(total), e["celda_b"])])
+                  "",
+                  Paragraph("" if _sin_precio else _usd(total), e["celda_b"])])
 
     anchos = [0.62 * inch, ancho - 3.02 * inch, 0.52 * inch, 0.48 * inch,
               0.90 * inch, 0.90 * inch]
@@ -658,10 +662,247 @@ _RE_UOI = re.compile(r"\b(?:UOI|UNIT OF ISSUE|UNIT|MEASURE)\s*[:#]?\s*"
 # Las unidades reales de los catalogos de SAM.gov. Se acotan porque si se
 # busca "UNIT" a secas salen cosas como "UNITED STATES", que como unidad de
 # medida no significan nada.
-_UOIS = {"EA", "KT", "KTN", "RO", "LOT", "SET", "PR", "CS", "CA", "BX",
-         "PL", "PK", "DZ", "FT", "LB", "GA", "ML", "L", "M", "KG", "GAL"}
-_RE_CANT = re.compile(r"\b(\d{1,7})\s*(EA|KTN|KT|RO|LOT|SET|PR|CS|CA|BX|PL|"
-                      r"PK|DZ|FT|LB|GA|ML|L|M|KG|GAL)\b")
+_UOIS = {
+    # Las UOI de catalogo militar, que es donde aparecen de verdad.
+    "EA", "BG", "KT", "KTN", "RO", "LOT", "SET", "PR", "CS", "CA", "BX",
+    "PL", "PK", "DZ", "BO", "HD", "CON", "CYC", "NUC", "OQ", "PG", "BL",
+    # Embalaje y medida.
+    "BB", "BD", "BT", "CC", "CT", "DR", "GL", "PKG", "SC", "WT",
+    "DZN", "DRL", "L", "M", "FT", "IN", "YD", "MI", "KG", "LB", "G",
+    "LT", "ML", "GA", "OZ", "PT", "QT", "T",
+}
+
+# Palabras que USA la gente, traducidas a la sigla que usa el catalogo.
+#
+# El motivo: la columna UOI del PDF tiene que llevar la sigla, porque es lo
+# que el comprador busca para pedir el material. "250 BOX" con la unidad BOX en
+# la celda es un dato que no casa con nada; con BX si.
+#
+# No se hace lo contrario (meter BOX en _UOIS) porque entonces la celda
+# mostraria una sigla que no existe en el catalogo y el comprador no encontraria
+# el material por ella.
+_SINONIMOS_UNIDAD = {
+    "BOX": "BX", "BOXES": "BX", "BAG": "BG", "BAGS": "BG",
+    "EACH": "EA", "EACHES": "EA", "KIT": "KT", "KITS": "KT",
+    "SETS": "SET", "PAIR": "PR", "PAIRS": "PR",
+    "LOTS": "LOT", "ROLL": "RO", "ROLLS": "RO",
+    "KILOGRAM": "KG", "KILOGRAMS": "KG", "POUND": "LB", "POUNDS": "LB",
+    "LITER": "L", "LITERS": "L", "LITRE": "L", "LITRES": "L",
+    "GALLON": "GL", "GALLONS": "GL", "METER": "M", "METERS": "M",
+    "METRE": "M", "METRES": "M", "FOOT": "FT", "FEET": "FT",
+    "INCH": "IN", "INCHES": "IN", "YARD": "YD", "YARDS": "YD",
+    "OUNCE": "OZ", "OUNCES": "OZ", "CONTAINER": "CON", "CONTAINERS": "CON",
+    "BARREL": "HD", "BARRELS": "HD", "CAN": "CA", "CANS": "CA",
+    "CASE": "CS", "CASES": "CS", "CARTON": "CT", "CARTONS": "CT",
+    "PACKAGE": "PK", "PACKAGES": "PK", "BOTTLE": "BT", "BOTTLES": "BT",
+    "DRUM": "DR", "DRUMS": "DR", "CYLINDER": "HD", "CYLINDERS": "HD",
+    "BUNDLE": "BD", "BUNDLES": "BD", "SHEET": "SH", "SHEETS": "SH",
+}
+
+# "100 EA", "100 BG", "50 kg", "12 ea", "250 BOX".
+#
+# re.I anadido. Antes era sensible a mayusculas, asi que "100 ea" y "100 kg"
+# en minusculas no se leian y la celda caia al "EA" por defecto, que es un
+# dato fiable que en realidad esta mal. Con \b las colisiones son
+# improbables: "20 MILITARY" no casa, porque detras de M viene I, que es
+# caracter de palabra, y \b no cierra ahi.
+#
+# El grupo de unidades es el mismo conjunto que _UOIS, en el mismo orden: si
+# una unidad esta en _UOIS pero no en el patron, se reconoce como UOI suelta y
+# no como cantidad. Se construye a partir del conjunto para que no puedan
+# separarse.
+# El patron acepta las siglas de _UOIS y las palabras de _SINONIMOS_UNIDAD, y
+# luego se canoniza el resultado. Las mas largas van primero para que "BOXES"
+# no se lea como "BOX" + "ES".
+_TODAS_UNIDADES = sorted(set(_UOIS) | set(_SINONIMOS_UNIDAD),
+                         key=len, reverse=True)
+_RE_CANT = re.compile(
+    r"\b(\d{1,7}(?:,\d{3})*)\s*("
+    + "|".join(re.escape(u) for u in _TODAS_UNIDADES) + r")\b", re.I)
+
+# "Quantity: 100", "QTY 100", "Estimated quantity 2,000".
+#
+# Sin unidad detras. Antes el patron la exigia, asi que una linea que solo
+# dijera la cantidad se quedaba sin cantidad y caia al fallback de 1. Un "1"
+# en una hoja de cotizacion es un error de mil unidades, y no se ve: parece
+# un dato.
+_RE_CANT_SOLA = re.compile(
+    r"\b(?:QUANTITY|QTY|ESTIMATED\s+QUANTITY|ESTIMATED\s+QTY"
+    r"|QUANTITIES|AMOUNT\s+OF|QUANTITY\s+REQUIRED)\b"
+    r"\s*(?:REQUIRED\s*)?(?::|=|IS\s+)?\s*([\d,]{1,10})\b", re.I)
+
+
+def _cantidad_de_linea(linea: str) -> tuple[float, str]:
+    """
+    Cantidad y unidad de UN CLIN, leyendo solo su linea. (0.0, "") si no hay.
+
+    Primero se busca la cantidad CON unidad, y solo si no la hay se busca la
+    cantidad sola. El orden importa: "Quantity: 100 EA" casa en los dos
+    patrones, y con el orden invertido el segundo patron devolveria 100 sin
+    unidad, que es peor que no devolver nada.
+    """
+    m = _RE_CANT.search(linea)
+    if m:
+        try:
+            cant = float(m.group(1).replace(",", ""))
+        except ValueError:
+            cant = 0.0
+        uni = m.group(2).upper()
+        # Una palabra escrita ("BOX") se canoniza a la sigla ("BX"), porque la
+        # columna UOI tiene que llevar la sigla: es lo que el comprador usa
+        # para pedir el material, y "BOX" no le sirve para nada.
+        uni = _SINONIMOS_UNIDAD.get(uni, uni)
+        # Una unidad suelta fuera de catalogo no vale: "5 Q" puede ser un
+        # codigo de la pagina. Si no esta en _UOIS, la cantidad se acepta pero
+        # la unidad se deja vacia, que es la informacion honesta.
+        if uni in _UOIS:
+            return cant, uni
+        return cant, ""
+    m = _RE_CANT_SOLA.search(linea)
+    if m:
+        try:
+            return float(m.group(1).replace(",", "")), ""
+        except ValueError:
+            return 0.0, ""
+    return 0.0, ""
+
+
+# --- Las enmiendas de SAM.gov -----------------------------------------------
+#
+# "AMD 0001 Narrative..." es la narrativa ADMINISTRATIVA de una enmienda: para
+# que se ha emitido, que anexos se cambian, a quien hay que responder. No es
+# especificacion tecnica, y ocupa mas pagina que la especificacion.
+#
+# El dano medido: la descripcion se cortaba a los 400 caracteres sin mirar que
+# habia, y la narrativa de una enmienda va al principio. Los 400 primeros
+# caracteres del BOM podian ser los cuatro parrafos de "esta enmienda se emite
+# para...", y el material quedaba fuera. La celda se saturaba y la linea que lee
+# el comprador quedaba en nada.
+#
+# Se separa en dos cosas, que es como lo pide el encargo: la cabecera (una
+# frase con modelo, producto y plano) va en la linea principal, y la narrativa
+# administrativa se queda fuera.
+_RE_AMD = re.compile(r"\bAMD\s*0*\d{1,4}\b", re.I)
+
+# Lineas que son tramitacion, no especificacion.
+_RE_ADMIN = re.compile(
+    r"\b(this\s+amendment|the\s+purpose\s+of\s+this|is\s+being\s+issued"
+    r"|are\s+being\s+issued|issued\s+(in\s+response|to\s+clarify|to\s+answer"
+    r"|to\s+extend|to\s+incorporate)|the\s+purpose\s+of\s+this"
+    r"|interested\s+parties|point\s+of\s+contact|questions\s+should\s+be"
+    r"|no\s+response\s+is\s+required|acknowledge\s+receipt"
+    r"|changes?\s+are\s+highlighted|see\s+attached|end\s+of\s+amendment"
+    r"|attachments?\s+are\s+included|additional\s+time)\b", re.I)
+
+
+def _sin_enmiendas(texto: str) -> tuple[str, int]:
+    """
+    Quita la narrativa de enmiendas. Devuelve (texto_limpio, numero_enmiendas).
+
+    El texto ANTES del primer "AMD 0001" es la base de la licitacion, y es lo
+    que se conserva: es la especificacion tecnica. Lo que va detras son las
+    enmiendas.
+
+    Si el aviso entero es una enmienda (no hay base delante), no se devuelve
+    vacio, porque el usuario se quedaria sin documento: se quitan las cabeceras
+    "AMD 0001" y se deja el texto que haya.
+
+    El numero se devuelve para poder DECIR cuantas enmiendas tenia el aviso.
+    No se silencia que falta informacion: si se quitan tres enmiendas y no se
+    dice nada, el usuario cree que tiene el documento completo.
+    """
+    t = str(texto or "")
+    if not t.strip():
+        return "", 0
+    marcas = list(_RE_AMD.finditer(t))
+    if not marcas:
+        return t, 0
+    n = len(marcas)
+    base = t[:marcas[0].start()].strip()
+    # El aviso entero es una enmienda. Se quitan las cabeceras y se deja el
+    # resto, porque perder el documento entero seria peor que dejar narrativa.
+    if len(base) < 40:
+        base = _RE_AMD.sub("", t)
+        base = " ".join(base.split())
+    return base.strip(), n
+
+
+def _sin_tramitacion(texto: str, max_lineas: int = 6) -> str:
+    """
+    Deja solo las frases que describen el material, quitando la tramitacion.
+
+    Filtra por FRASES completas, no por palabras sueltas. La alternativa, tirar
+    cualquier linea que contenga "amendment", se llevaba por delante media
+    especificacion tecnica: medio averaged es medio bueno.
+    """
+    out, saltos = [], 0
+    for linea in str(texto or "").splitlines():
+        s = linea.strip()
+        if not s:
+            continue
+        if _RE_ADMIN.search(s):
+            continue
+        out.append(s)
+        saltos += 1
+        if saltos >= max_lineas:
+            break
+    return "\n".join(out)
+
+
+def _ref_plano(texto: str) -> str:
+    """
+    El numero de plano de la especificacion, si lo hay. "" si no.
+
+    Se exige que el identificador contenga AL MENOS UN DIGITO, y se comprueba
+    despues en Python y no en la regex. Sin esa exigencia, "Planning" se
+    lee como plano "anning", y basta con que el aviso mencione "plan de
+    entrega" para que la cabecera del producto termine con un numero inventado.
+    Un plano mal identificado es peor que ningun plano: el distribuidor
+    busca ese numero, no encuentra nada, y devuelve la hoja vacia.
+    """
+    m = re.search(
+        r"\b(?:DRAWING|DWG|PLANO|PLAN|FIGURE)\s*"
+        r"(?:NUMBER|NUMERO|NUM|NO\.?|#)?\s*[:#]?\s*"
+        r"([A-Z0-9][A-Z0-9./_-]{2,30})", str(texto or ""), re.I)
+    if not m:
+        return ""
+    ref = m.group(1).rstrip(".,;:")
+    return ref if any(c.isdigit() for c in ref) else ""
+
+
+def _cabecera_producto(titulo: str, modelo: str, plano: str) -> str:
+    """
+    LA LINEA PRINCIPAL de la cella: modelo + producto + plano, en una frase.
+
+    Es lo unico que el comprador lee antes de decidir seguir. Por eso tiene que
+    caber en una o dos lineas y no pueda ser un parrafo.
+
+    El prefijo numerico de SAM.gov ("53--PARTS KIT,SEAL...") se quita: el 53
+    es el codigo de clase, ya sale en otra columna del aviso, y aqui solo
+    ocupa sitio y confunde a un lector que no lo espera.
+
+    El plano se pone COMO PIE, separado por guion, no intercalado: si se metiera
+    en medio del nombre, "PARTS KIT, Per Drawing MS-3305, SEAL REPLACEMENT"
+    parece el nombre del producto y no una referencia.
+    """
+    t = " ".join(str(titulo or "").split())
+    t = re.sub(r"^\d{2,4}\s*-{1,2}\s*", "", t).strip(" -,")
+    # SAM.gov escribe los titulos sin espacio tras la coma
+    # ("PARTS KIT,SEAL REPLACEMENT,MECHANICAL"). Se lo pone porque el
+    # distributor lee esto y "KIT,SEAL" se le junta. No se hace nada mas: el
+    # texto del titulo se respeta, solo se le da aire.
+    t = re.sub(r",(?=\S)", ", ", t)
+    if not t:
+        t = "Item as described in the attached specification"
+    partes = []
+    m = str(modelo or "").strip()
+    if m and m.lower() not in t.lower():
+        partes.append(m)
+    partes.append(t)
+    ref = str(plano or "").strip()
+    if ref and ref.lower() not in t.lower():
+        partes.append("Per Drawing %s" % ref)
+    return " - ".join(partes)
 
 
 def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
@@ -685,14 +926,12 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
         if m:
             parte = "-".join(m.groups())
 
-    cant = 0.0
-    unidad = "EA"
-    m = _RE_CANT.search(texto)
-    if m:
-        cant = float(m.group(1))
-        if m.group(2).upper() in _UOIS:
-            unidad = m.group(2).upper()
-    else:
+    # La cantidad global se lee del texto entero y se usa SOLO como respaldo
+    # para los CLIN cuya linea no traiga la suya. Antes salia de un unico
+    # _RE_CANT sobre todo el texto, que con "100 BG" no encontra nada porque BG
+    # no estaba en la lista, y caia al 1.
+    cant, unidad = _cantidad_de_linea(texto)
+    if not unidad:
         m = _RE_UOI.search(texto)
         if m and m.group(1).upper() in _UOIS:
             unidad = m.group(1).upper()
@@ -700,6 +939,13 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
     pn = _RE_PARTNO.search(texto)
     if pn and not parte:
         parte = pn.group(1)
+
+    # La narrativa de las enmiendas se aparta ANTES de buscar nada. No solo
+    # porque no sirve para cotizar: es que va al principio del texto, asi que
+    # cualquier busqueda global (cantidad, NSN, parte) leia primero el papel.
+    texto, n_enmiendas = _sin_enmiendas(texto)
+    cuerpo = _sin_tramitacion(texto)
+    plano = _ref_plano(texto)
 
     # Un item por CLIN, y CADA UNO CON SUS PROPIOS DATOS.
     #
@@ -720,16 +966,14 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
 
     def _datos_de(linea: str) -> dict:
         """Cantidad, unidad y parte de UN CLIN, leyendo solo su linea."""
-        cant, uni = 0.0, ""
-        mc = _RE_CANT.search(linea)
-        if mc:
-            cant = float(mc.group(1))
-            if mc.group(2).upper() in _UOIS:
-                uni = mc.group(2).upper()
+        cant, uni = _cantidad_de_linea(linea)
         if not uni:
             mu = _RE_UOI.search(linea)
-            if mu and mu.group(1).upper() in _UOIS:
-                uni = mu.group(1).upper()
+            if mu:
+                _u = mu.group(1).upper()
+                _u = _SINONIMOS_UNIDAD.get(_u, _u)
+                if _u in _UOIS:
+                    uni = _u
         nsn_linea = _RE_NSN.search(linea)
         if nsn_linea:
             parte_linea = nsn_linea.group(1)
@@ -752,11 +996,26 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
     titulo = (aviso.get("title") or "").strip()
     destino = lugar_de_entrega_aviso(aviso)
 
+    # La linea principal: modelo + producto + plano, en una frase.
+    #
+    # El modelo va delante porque es lo que el comprador tecrico busca primero
+    # para saber si lleva el material, y va de cabeza y no intercalado: si el
+    # "Per Drawing X" se metiera en medio del nombre, "PARTS KIT, Per Drawing
+    # MS-3305, SEAL REPLACEMENT" parece el nombre del producto y no una
+    # referencia.
+    modelo_linea = ""
+    mp = _RE_PARTNO.search(texto)
+    if mp:
+        modelo_linea = mp.group(1)
+    elif parte and "-" in parte:
+        # Un NSN no es un modelo, pero es lo unico que hay si no hay P/N.
+        modelo_linea = ""
+
     if not clines:
         # Sin CLIN: una sola linea con el producto. Es mejor un item que
         # describa lo que hay que cotizar que una tabla sin contenido.
-        desc = titulo or "Item as described in the attached specification"
-        spec = (texto[:600].strip() if texto else
+        desc = _cabecera_producto(titulo, modelo_linea, plano)
+        spec = (cuerpo[:600].strip() if cuerpo else
                 "No further description available from SAM.gov.")
         return [{
             "clin": "1",
@@ -764,8 +1023,9 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
             "descripcion": desc,
             "especificacion": spec,
             "cantidad": cant or 1,
-            "unidad": unidad,
+            "unidad": unidad or "EA",
             "precio": "",
+            "enmiendas": n_enmiendas,
         }]
 
     # Con CLIN: una linea por cada uno, con SUS datos.
@@ -778,15 +1038,20 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
         _cant = _d["cantidad"] or cant or 1
         _uni = _d["unidad"] or unidad or "EA"
         _parte = _d["parte"] or (parte if i == 1 else "")
-        desc = titulo if i == 1 else f"{titulo} (item {c})"
+        # La cabecera limpia se repite en cada linea: una hoja de cotizacion
+        # donde la linea 0003 no dice que material es, vuelve al distributor
+        # con la mitad de las preguntas hechas.
+        base_desc = _cabecera_producto(titulo, modelo_linea, plano)
+        desc = base_desc if i == 1 else f"{base_desc} (item {c})"
         salida.append({
             "clin": c,
             "parte": _parte,
             "descripcion": desc,
-            "especificacion": (texto[:400].strip() if i == 1 and texto else ""),
+            "especificacion": (cuerpo[:400].strip() if i == 1 and cuerpo else ""),
             "cantidad": _cant,
             "unidad": _uni,
             "precio": "",
+            "enmiendas": n_enmiendas,
         })
     return salida
 
@@ -1265,6 +1530,57 @@ def _ingles(texto: str, limite: int = 0) -> tuple[str, bool]:
     return t, False
 
 
+def _estimar_precio(descripcion: str, bom: list[dict]) -> dict:
+    """
+    Estima el precio unitario a partir del valor que DECLARA el aviso.
+
+    Devuelve {} si el aviso no declara valor, y en ese caso el documento deja el
+    precio en blanco. Se prefiere un hueco a un cero: un hueco se rellena, un
+    cero se discute.
+
+    De donde sale el dato: filters.valor_declarado(), la misma funcion que el
+    barrido usa para aplicar el tope ANTES de gastar una llamada de Gemini. Se
+    REUTILIZA en vez de reescribirla porque ya esta probada contra las trampas
+    de estos textos ("Estimated quantity 2,000 ; Not to Exceed 350,000", donde
+    la cantidad no es el contrato), y una copia divergiria en cuanto el texto
+    real traiga otra forma.
+
+    El unitario es el promedio sobre TODOS los CLIN, no el del primero. El valor
+    declarado es el del contrato entero; dividirlo solo por el primer CLIN
+    inflaria el precio de ese CLIN y dejaria los demas sin cubrir.
+    """
+    import filters
+
+    valor, _fragmento = filters.valor_declarado(descripcion or "")
+    if not valor or valor <= 0:
+        return {}
+
+    total = 0.0
+    for b in (bom or []):
+        try:
+            total += float(b.get("cantidad") or 0)
+        except (TypeError, ValueError):
+            continue
+    if total <= 0:
+        return {}
+
+    unitario = round(valor / total, 2)
+    # Si sale tan pequeno que redondear a centimos lo deja en cero, a cuatro.
+    # Un $0.00 seria exactamente el fallo que se esta arreglando.
+    if unitario <= 0:
+        unitario = round(valor / total, 4)
+    if unitario <= 0:
+        return {}
+
+    return {
+        "precio_unitario_costo": unitario,
+        "costo_total_usd": round(unitario * total, 2),
+        "precio_es_estimado": True,
+        "valor_declarado_usd": valor,
+        "cantidad_total_licitacion": total,
+    }
+
+
 def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
     """
     Traduce un aviso crudo de SAM.gov al formato de analisis que ya sabe leer
@@ -1295,6 +1611,8 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
 
     bom = _bom_desde_aviso(aviso, desc)
 
+    estimacion = _estimar_precio(desc, bom)
+
     # La cantidad y la unidad salen del BOM, que ya las ha buscado en el texto
     # con los patrones correctos.
     _bom0 = (bom or [{}])[0]
@@ -1323,10 +1641,27 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         "sin_descripcion": not bool(desc.strip()),
         # El BOM va ya montado: desde_analisis lo respeta tal cual.
         "bom_lineas": bom,
-        # Sin precios: este documento es una hoja de cotizacion, y el precio
-        # lo pone el distribuidor. Poner un 0 seria truthiness falsa.
-        "precio_unitario_costo": None,
-        "costo_total_usd": None,
+        # Cuantas enmiendas traia el aviso. La narrativa se aparta del
+        # documento, pero el numero se declara para que el usuario sepa que
+        # hay informacion que tiene que ir a mirar a SAM.gov.
+        "enmiendas": max([int(b.get("enmiendas") or 0) for b in (bom or [])]
+                         or [0]),
+        # El precio lo hereda Kyomoto del valor que declara el propio aviso.
+        #
+        # Antes iban a None, y la tabla ITEMS ORDERED multiplicaba None por la
+        # cantidad: $0.00 en UNIT PRICE, en AMOUNT y en el TOTAL. Un $0.00 en un
+        # documento que va a un distribuidor no es un dato pendiente, es un
+        # dato FALSO: el lector ve que el gobierno compra eso por nada.
+        #
+        # filters.valor_declarado() es la MISMA funcion que el barrido usa para
+        # descartar por el tope antes de gastar una llamada de Gemini ("Not to
+        # Exceed USD 85,000", "NTE 350,000"), con sus propias protecciones. Si
+        # el aviso declara su valor, valor / cantidad es una estimacion
+        # defendible y sale del aviso, no de una invencion.
+        #
+        # Si el aviso NO declara valor, no se inventa: precio None y el
+        # documento lo dice. Un hueco se rellena; un cero no se discute.
+        **estimacion,
     }
 
 
@@ -1390,6 +1725,57 @@ def _notas_ingles(analisis: dict, pendientes: int = 0) -> str:
     """
     texto = ("Document issued by L.A.M.B. Logistics LLC. This is not an "
              "official document of the U.S. Government or any agency.")
+
+    # Que el precio es un ESTIMADO, y de donde sale.
+    #
+    # Sin esto, un $85,000.00 en la columna UNIT PRICE se lee como un precio
+    # cotizado, cuando lo unico que hay es que el aviso declara "Not to Exceed
+    # USD 85,000" y se ha dividido entre la cantidad. El numero sale del propio
+    # aviso, asi que no es inventado, pero es una estimacion y el documento
+    # tiene que decirlo. Un estimativo que se presenta como cotizacion es como
+    # nace una reclamacion: el proveedor cotiza sobre ese numero y luego resulta
+    # que era el techo del contrato, no el precio.
+    #
+    # Y al reves tambien: si NO hay valor declarado, el precio se deja en
+    # blanco y se dice que falta. Un $0.00 seria el fallo que se esta
+    # arreglando.
+    if analisis.get("precio_es_estimado"):
+        texto += (
+            "\n\nPRICE BASIS: the unit prices and amounts shown above are "
+            "ESTIMATES derived from the value declared on the SAM.gov notice "
+            "(USD %s) divided by the total quantity (%s). They are not quotes "
+            "and not binding. The unit price column of the Bill of Materials is "
+            "left blank on purpose: that is the price the supplier is asked to "
+            "quote."
+            % (_usd(analisis.get("valor_declarado_usd")),
+               _fmt(_num(analisis.get("cantidad_total_licitacion"))))
+        )
+    elif not _num(analisis.get("precio_unitario_costo")) \
+            and not _num(analisis.get("costo_total_usd")):
+        # OJO: "is None" aqui no funcionaba. _num(None) devuelve 0.0, no None,
+        # porque su trabajo es devolver un float que se pueda multiplicar. La
+        # comprobacion era False siempre y el aviso sin valor caia al $0.00
+        # justo en el caso para el que existia.
+        texto += (
+            "\n\nPRICE BASIS: this notice does not state a contract value, so "
+            "no unit price or amount is shown. The blank is deliberate and "
+            "must not be read as zero: the supplier will quote it."
+        )
+
+    # Cuantas enmiendas tenia el aviso, y que su narrativa no va en el documento.
+    # Se dice en numero, no se calla: si el aviso tenia tres enmiendas y aqui
+    # no sale ninguna, el usuario tiene que saber que hay informacion que no
+    # esta, o creera que tiene el documento completo.
+    _amd = int(_num(analisis.get("enmiendas")) or 0)
+    if _amd:
+        texto += (
+            "\n\nAMENDMENTS: this solicitation carries %d amendment(s). Their "
+            "administrative narrative (AMD numbering, attachments, point of "
+            "contact) is not reproduced here because it is not a technical "
+            "specification. Review the amendments on SAM.gov before issuing "
+            "this document." % _amd
+        )
+
     if pendientes:
         texto += (
             "\n\nNOTE: %d field(s) marked [%s] contain source text that was "
@@ -1418,6 +1804,15 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # Sin precio unitario se usa el total partido por la cantidad, para
         # que el importe de la linea no salga en cero.
         precio = _num(analisis.get("costo_total_usd")) / cant if cant else 0.0
+    # Si al final no hay ningun numero, se dice explicitamente que el precio
+    # se desconoce. La tabla lo usa para dejar UNIT PRICE, AMOUNT y el TOTAL en
+    # blanco en vez de imprimir $0.00, que es lo que salia antes.
+    #
+    # Un $0.00 en un documento que va a un distribuidor no es un dato
+    # pendiente: es un dato FALSO. El lector ve que el gobierno compra esto por
+    # nada, y el unico modo de arreglarlo es que alguien pregunte. Un hueco se
+    # rellena con el precio del distributor; un cero se discute.
+    precio_desconocido = precio <= 0
 
     # Descripcion y especificacion vienen de Gemini, en castellano, y no se
     # pueden reescribir porque cambian en cada analisis. Se traducen con la
@@ -1438,15 +1833,9 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     # aparece suelto en algunos analisis.
     lugar, _p3 = _ingles(analisis.get("lugar_entrega") or "")
 
-    lineas.append({
-        "sku": (analisis.get("solicitation") or "").strip(),
-        "descripcion": desc or "Physical item per the SAM.gov specification",
-        "especificacion": spec,
-        "cantidad": cant,
-        "unidad": unidad,
-        "precio_unitario": precio,
-        "plazo": "",
-    })
+    # La linea de la orden se anade DESPUES de conocer el BOM, porque con varios
+    # CLIN tiene que haber una linea por CLIN. Ver mas abajo, donde se construye
+    # "lineas".
 
     # El texto que este modulo genera va en ingles de origen, no traducido.
     # No es un detalle de estilo: estas lineas y las condiciones de pago de
@@ -1479,6 +1868,52 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     # "bom_lineas" es la via para que quien llama pase un BOM ya construido.
     _bom = list(analisis.get("bom_lineas") or []) or _bom_desde_analisis(analisis)
 
+    # --- Una linea de la orden por CLIN ---
+    #
+    # Antes habia UNA sola linea, con la cantidad del PRIMER CLIN. Con tres CLIN
+    # de 50, 10 y 4 unidades, la orden de compra mostraba 50 EA y un AMOUNT
+    # calculado sobre 50, mientras el BOM de al lado listaba los tres: las
+    # cifras del documento no cuadraban entre si, y el comprador no sabe cual
+    # de las dos es la buena.
+    #
+    # Con un solo CLIN, que es el caso normal, sale exactamente igual que antes.
+    # El precio unitario es el mismo para todos: es el promedio sobre el valor
+    # declarado del aviso entero, y por eso se aplica a cada linea en vez de
+    # inventar un reparto que el aviso no dice.
+    lineas = []
+    # pendientes=0 ANTES de cualquier "pendientes +=". Antes se inicializaba
+    # despues de construir las lineas, y como las lineas ya suman los suyos,
+    # la primera vez que habia varios CLIN salia NameError y el PDF entero no
+    # se generaba. Se inicializa aqui y abajo ya solo se acumula.
+    pendientes = 0
+    _sku = (analisis.get("solicitation") or "").strip()
+    if len(_bom) > 1:
+        for _b in _bom:
+            _desc_b = str(_b.get("descripcion") or "").strip()
+            _desc_b, _pb = _ingles(_desc_b, _ACORTAR["descripcion"])
+            _spec_b = str(_b.get("especificacion") or "").strip()
+            _spec_b, _ps = _ingles(_spec_b, _ACORTAR["especificacion"])
+            lineas.append({
+                "sku": _sku,
+                "descripcion": _desc_b or desc,
+                "especificacion": _spec_b,
+                "cantidad": _num(_b.get("cantidad")) or cant,
+                "unidad": _b.get("unidad") or unidad,
+                "precio_unitario": precio,
+                "plazo": "",
+            })
+            pendientes += int(_pb) + int(_ps)
+    else:
+        lineas.append({
+            "sku": _sku,
+            "descripcion": desc or "Physical item per the SAM.gov specification",
+            "especificacion": spec,
+            "cantidad": cant,
+            "unidad": unidad,
+            "precio_unitario": precio,
+            "plazo": "",
+        })
+
     # Cuantos campos del documento llevan texto sin traducir.
     #
     # Se cuentan DESPUES de traducir, sobre el texto final, que es el que se
@@ -1487,7 +1922,7 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     #
     # El lugar de entrega se mira aparte porque va en las instrucciones, que se
     # generan despues de esta linea y por tanto no estan en _bom.
-    pendientes = sum(1 for x in (_p1, _p2, _p3) if x)
+    pendientes += sum(1 for x in (_p1, _p2, _p3) if x)
     for _b in _bom:
         for _campo in ("descripcion", "especificacion"):
             if MARCA_PENDIENTE in str(_b.get(_campo) or ""):
@@ -1513,6 +1948,8 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         "proveedor_email": prov.get("email", ""),
         "proveedor_dir": prov.get("direccion", ""),
         "lineas": lineas,
+        # Sin numero no se imprime $0.00: la tabla deja las celdas en blanco.
+        "precio_desconocido": precio_desconocido,
         "instrucciones": "\n".join(inst),
         # Condiciones en ingles, por lo mismo que las instrucciones: van al
         # proveedor. El factoring se declara porque es lo que hace posible la

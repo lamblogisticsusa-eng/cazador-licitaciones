@@ -6,6 +6,9 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 3.4.0 = contacto de la empresa al dia, parser de QTY/UOI fiable,
+#          precio estimado desde el valor declarado del aviso (nada de $0.00)
+#          y descripciones sin la narrativa de las enmiendas
 # 3.3.0 = el rango de fechas de /pdf cabe siempre en el limite de la API,
 #          y el HTTP 400 deja de confundirse con la cuota
 # 3.2.0 = todo el texto del PDF en ingles tecnico de adquisiciones
@@ -39,7 +42,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "3.3.0"
+KYOMOTO_VERSION = "3.4.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
