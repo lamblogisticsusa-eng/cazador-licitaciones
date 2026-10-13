@@ -399,7 +399,9 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
                 "QTY", "UNIT", "UNIT PRICE", "AMOUNT"]
     filas = [[Paragraph(h, e["celda_b"]) for h in cabecera]]
     total = 0.0
-    _sin_precio = bool(datos.get("precio_desconocido"))
+    # El documento no lleva precios: los pone el distribuidor. Ver la nota en
+    # desde_analisis(), que explica por que el estimado propio NO se imprime.
+    _sin_precio = not datos.get("mostrar_precios", True)
     for i, ln in enumerate(datos.get("lineas") or [], start=1):
         cant = _num(ln.get("cantidad"))
         precio = _num(ln.get("precio_unitario"))
@@ -415,8 +417,8 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         filas.append([
             Paragraph(str(i), e["celda_b"]),
             Paragraph(desc, e["celda"]),
-            Paragraph(_fmt(cant), e["celda"]),
-            Paragraph(ln.get("unidad") or "EA", e["celda"]),
+            Paragraph(_fmt(cant) if cant else HUECO, e["celda"]),
+            Paragraph(ln.get("unidad") or HUECO, e["celda"]),
             # Celda en blanco en vez de $0.00 cuando el aviso no declara valor.
             # Ver la nota de "precio_desconocido" en desde_analisis().
             Paragraph("" if _sin_precio else _usd(precio), e["celda"]),
@@ -488,8 +490,9 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
                 Paragraph(str(b.get("clin") or ""), e["celda_b"]),
                 Paragraph(b.get("parte") or "__________", e["celda"]),
                 Paragraph(_d, e["celda"]),
-                Paragraph(_fmt(_num(b.get("cantidad"))), e["celda"]),
-                Paragraph(b.get("unidad") or "EA", e["celda"]),
+                Paragraph(_fmt(_num(b.get("cantidad")))
+                          if _num(b.get("cantidad")) else HUECO, e["celda"]),
+                Paragraph(b.get("unidad") or HUECO, e["celda"]),
                 Paragraph(b.get("precio") or "", e["celda_b"]),
             ])
         # Los anchos estan calculados para que NINGUNA cabecera se parta en
@@ -611,6 +614,15 @@ def _fecha_pdf(bruto) -> str:
     return f"{salida} {zona}".strip()
 
 
+# Lo que sale en un dato que NO SE HA PODIDO LEER.
+#
+# Es un hueco DELIBERADO y visible, no un 1 y no un 0. Un "1" en la columna QTY
+# de una hoja de cotizacion es un error de cien unidades que no se ve, porque
+# parece un dato; un 0 es peor, porque ademas es un precio falso. El hueco se
+# ve, se rellena, y es lo unico honesto cuando el aviso no dice la cantidad.
+HUECO = "___"
+
+
 def _num(v) -> float:
     try:
         return float(v or 0)
@@ -697,6 +709,8 @@ _SINONIMOS_UNIDAD = {
     "PACKAGE": "PK", "PACKAGES": "PK", "BOTTLE": "BT", "BOTTLES": "BT",
     "DRUM": "DR", "DRUMS": "DR", "CYLINDER": "HD", "CYLINDERS": "HD",
     "BUNDLE": "BD", "BUNDLES": "BD", "SHEET": "SH", "SHEETS": "SH",
+    # "Quantity: 100 Units" es 100 each en cualquier catalogo federal.
+    "UNITS": "EA", "UNIT": "EA",
 }
 
 # "100 EA", "100 BG", "50 kg", "12 ea", "250 BOX".
@@ -714,7 +728,31 @@ _SINONIMOS_UNIDAD = {
 # El patron acepta las siglas de _UOIS y las palabras de _SINONIMOS_UNIDAD, y
 # luego se canoniza el resultado. Las mas largas van primero para que "BOXES"
 # no se lea como "BOX" + "ES".
-_TODAS_UNIDADES = sorted(set(_UOIS) | set(_SINONIMOS_UNIDAD),
+# UOI DE EMPAQUE, que son las unicas que pueden ser la cantidad que se PIDE.
+#
+# Las de medida quedan fuera a proposito. En una ficha de SAM.gov la prosa
+# tecnica trae dimensiones todo el rato ("FOR ROTOR OF 6 INCH PUMP"), y como la
+# descripcion llega en un bloque unico, el primer "numero + sigla" que aparece
+# es el de la dimension, no el de la cantidad.
+#
+# Medido con la ficha real de W519TC27QA012:
+#
+#     _cantidad_de_linea(BLOB) = (6.0, 'IN')
+#
+# Se leia una cantidad de 6 pulgadas donde el aviso pedia 100 unidades. "QTY 6
+# IN" no es una cantidad pedible en una cotizacion federal; "QTY 6 EA" si. Por
+# eso el patron de numero pegado a sigla solo acepta unidades de empaque.
+_UOI_ISSUE = {
+    "EA", "BG", "KT", "KTN", "SET", "PR", "CA", "CS", "BX", "PK", "PL", "DZ",
+    "BO", "HD", "CON", "CYC", "NUC", "OQ", "PG", "BL", "LOT", "RO", "BB",
+    "BD", "BT", "CC", "CT", "DR", "PKG", "SC", "WT", "DZN", "DRL", "QA", "RL",
+}
+_SINONIMOS_ISSUE = {k: v for k, v in _SINONIMOS_UNIDAD.items()
+                    if v in _UOI_ISSUE}
+
+# Solo unidades de EMPAQUE. Ver _UOI_ISSUE: con la ficha en un bloque unico,
+# "6 INCH PUMP" se leia como la cantidad.
+_TODAS_UNIDADES = sorted(set(_UOI_ISSUE) | set(_SINONIMOS_ISSUE),
                          key=len, reverse=True)
 _RE_CANT = re.compile(
     r"\b(\d{1,7}(?:,\d{3})*)\s*("
@@ -732,42 +770,74 @@ _RE_CANT_SOLA = re.compile(
     r"\s*(?:REQUIRED\s*)?(?::|=|IS\s+)?\s*([\d,]{1,10})\b", re.I)
 
 
+# "Quantity: 100", "Qty 100 BG", "QUANTITY REQUIRED 12 EA".
+#
+# Es el patron que mas manda, y va el primero. Una cantidad ETIQUETADA no se
+# puede confundir con una dimension de la prosa tecnica.
+_RE_CANT_ETIQUETA = re.compile(
+    r"\b(?:QUANTITY|QTY|ESTIMATED\s+QUANTITY|ESTIMATED\s+QTY)\b"
+    r"\s*(?:REQUIRED\s*)?(?:IS\s+)?(?::|=)?\s*([\d,]{1,10})"
+    r"\s*(?:([A-Za-z]{1,8})\b)?", re.I)
+
+
+def _a_float(bruto) -> float:
+    """'1,200' -> 1200.0, y 0.0 si no hay numero usable."""
+    try:
+        return float(str(bruto or "").replace(",", ""))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _cantidad_de_linea(linea: str) -> tuple[float, str]:
     """
-    Cantidad y unidad de UN CLIN, leyendo solo su linea. (0.0, "") si no hay.
+    Cantidad y unidad de UN CLIN. (0.0, "") si no hay.
 
-    Primero se busca la cantidad CON unidad, y solo si no la hay se busca la
-    cantidad sola. El orden importa: "Quantity: 100 EA" casa en los dos
-    patrones, y con el orden invertido el segundo patron devolveria 100 sin
-    unidad, que es peor que no devolver nada.
+    EL ORDEN IMPORTA, Y ESTA MEDIDO
+
+Con la descripcion en un bloque unico, buscar "numero pegado a sigla" por todo
+el texto devolvia lo primero que encontraba, y eso era "6 INCH PUMP": seis
+pulgadas, la dimension de un rotor. Se leia 6 IN donde el aviso pedia 100.
+
+Asi que se busca en este orden:
+
+    1. cantidad CON ETIQUETA   "Quantity: 100", "Qty 100 BG"
+    2. cantidad con etiqueta y sin unidad
+    3. numero pegado a una UOI DE EMPAQUE, nunca de medida
+
+El paso 1 va primero porque una cantidad etiquetada no se confunde con nada.
+El paso 3 va el ultimo porque es el que se confunde.
     """
-    m = _RE_CANT.search(linea)
+    texto = str(linea or "")
+    if not texto.strip():
+        return 0.0, ""
+
+    m = _RE_CANT_ETIQUETA.search(texto)
     if m:
-        try:
-            cant = float(m.group(1).replace(",", ""))
-        except ValueError:
-            cant = 0.0
-        uni = m.group(2).upper()
-        # Una palabra escrita ("BOX") se canoniza a la sigla ("BX"), porque la
-        # columna UOI tiene que llevar la sigla: es lo que el comprador usa
-        # para pedir el material, y "BOX" no le sirve para nada.
-        uni = _SINONIMOS_UNIDAD.get(uni, uni)
-        # Una unidad suelta fuera de catalogo no vale: "5 Q" puede ser un
-        # codigo de la pagina. Si no esta en _UOIS, la cantidad se acepta pero
-        # la unidad se deja vacia, que es la informacion honesta.
-        if uni in _UOIS:
+        cant = _a_float(m.group(1))
+        if cant:
+            uni = ""
+            if m.group(2):
+                u = _SINONIMOS_UNIDAD.get(m.group(2).upper(), m.group(2).upper())
+                if u in _UOIS:
+                    uni = u
             return cant, uni
-        return cant, ""
-    m = _RE_CANT_SOLA.search(linea)
+
+    m = _RE_CANT_SOLA.search(texto)
     if m:
-        try:
-            return float(m.group(1).replace(",", "")), ""
-        except ValueError:
-            return 0.0, ""
+        cant = _a_float(m.group(1))
+        if cant:
+            return cant, ""
+
+    m = _RE_CANT.search(texto)
+    if m:
+        cant = _a_float(m.group(1))
+        if cant:
+            uni = _SINONIMOS_UNIDAD.get(m.group(2).upper(), m.group(2).upper())
+            return cant, (uni if uni in _UOI_ISSUE else "")
     return 0.0, ""
 
 
-# --- Las enmiendas de SAM.gov -----------------------------------------------
+# Las enmiendas de SAM.gov -----------------------------------------------
 #
 # "AMD 0001 Narrative..." es la narrativa ADMINISTRATIVA de una enmienda: para
 # que se ha emitido, que anexos se cambian, a quien hay que responder. No es
@@ -784,6 +854,11 @@ def _cantidad_de_linea(linea: str) -> tuple[float, str]:
 # administrativa se queda fuera.
 _RE_AMD = re.compile(r"\bAMD\s*0*\d{1,4}\b", re.I)
 
+# "Narrative..." es la etiqueta que sigue al numero de enmienda. No es texto, es
+# una cabecera, y con el texto de al lado pegado forma un bloque que no dice
+# nada. Se quita con ^ y re.M para que solo affect a la linea que empieza asi.
+_RE_ETIQUETA_AMD = re.compile(r"^\s*(?:Narrative|Narratives)\b[.:]?\s*", re.I | re.M)
+
 # Lineas que son tramitacion, no especificacion.
 _RE_ADMIN = re.compile(
     r"\b(this\s+amendment|the\s+purpose\s+of\s+this|is\s+being\s+issued"
@@ -792,121 +867,100 @@ _RE_ADMIN = re.compile(
     r"|interested\s+parties|point\s+of\s+contact|questions\s+should\s+be"
     r"|no\s+response\s+is\s+required|acknowledge\s+receipt"
     r"|changes?\s+are\s+highlighted|see\s+attached|end\s+of\s+amendment"
-    r"|attachments?\s+are\s+included|additional\s+time)\b", re.I)
-
-
-# "Narrative..." es la etiqueta que sigue al numero de enmienda. No es texto, es
-# una cabecera, y con el texto de al lado pegado forma un bloque que no dice
-# nada. Se quita con ^ y re.M para que solo affects a la linea que empieza asi.
-_RE_ETIQUETA_AMD = re.compile(r"^\s*(?:Narrative|Narratives)\b[.:]?\s*", re.I | re.M)
+    r"|attachments?\s+are\s+included|additional\s+time|provides?\s+additional"
+    r"|questions?\s+(should|must|may)\b|direct(?:ed)?\s+to\b)\b", re.I)
 
 
 def _sin_enmiendas(texto: str) -> tuple[str, int]:
     """
-    Quita el TRAMITE de las enmiendas. Devuelve (texto_limpio, numero_enmiendas).
+    Quita las CABECERAS de enmienda. Devuelve (texto_limpio, numero_enmiendas).
 
-    NO se quitan las enmiendas enteras. Una enmienda puede traer el cambio
-    tecnico que hay que cotizar, que es justo para lo que se emite; lo que se
-    quita es la parte administrativa (para que se emite, anexos, punto de
-    contacto, "acknowledge receipt"), que es la que se cuela en la celda.
+    NO se quita el tramite aqui: solo las etiquetas ("AMD 0001",
+    "Narrative..."). El tramite lo quita despues _sin_tramitacion(), que va por
+    FRASES y por eso funciona tambien con un bloque unico.
 
-    EL FALLO QUE ESTA ARREGLA, MEDIDO
+    EL FALLO QUE ARREGLA, MEDIDO
 
-La version anterior hacia dos cosas malas, y la segunda era la grave:
+Esta funcion dividia por LINEAS y descartaba las que casaban con el patron de
+tramite. Con la descripcion en un bloque unico, la unica linea era toda la
+ficha, contenia "amendment", y se descartaba ENTERA. Entonces el respaldo
+devolvia el texto crudo:
 
-      base = t[:marcas[0].start()]        # 1. lo de antes del primer AMD
-      if len(base) < 40:
-          base = _RE_AMD.sub("", t)
-          base = " ".join(base.split())    # 2. aqui se rompia todo
+    if not salida:
+        return t.strip(), n        <- aqui se deshacia toda la limpieza
 
-El texto empieza por "AMD 0001", no hay base delante, y se caia al respaldo. Y
-el respaldo unia TODOS los saltos de linea con un espacio, con lo que el
-documento entero pasaba a ser UNA sola linea.
+Y el texto crudo es justo lo que lleva la enmienda a la celda: el respaldo que
+existia para no devolver nada era lo que contaminaba el documento. Medido con
+la ficha real de W519TC27QA012:
 
-Encima, esa unica linea contenia la palabra "amendment", asi que el filtro por
-lineas que venia despues la rechazaba entera y devolvia cero lineas. El
-documento se generaba SIN especificacion tecnica, en silencio.
+    'AMD 0001 Narrative... Line Item Number 0001: NSN ...'
 
-Medido:
-
-    enmiendas detectadas: 1
-    CUERPO (0 lineas):
-    bom[0].especificacion = ''
-
-Por eso aqui no se une NADA con " ".join(): se conservan los saltos de linea, y
-es el filtro por linea el que decide que se queda.
-
-    limpio = []
-    for b in bloques:
-        ...
-        limpio.append(s)
-
-El numero se devuelve para poder DECIR cuantas enmiendas tenia el aviso. No se
-silencia que falta informacion: si se quitan tres enmiendas y no se dice nada,
-el usuario cree que tiene el documento completo.
+Sin respaldo. Si tras quitar las cabeceras no queda nada, se devuelve "".
     """
     t = str(texto or "")
     if not t.strip():
         return "", 0
     marcas = list(_RE_AMD.finditer(t))
-    n = len(marcas)
     if not marcas:
-        bloques = [t]
-    else:
-        # Se trocea por cada marcador: lo que va antes del primero, y luego un
-        # bloque por enmienda. Ningun bloque se tira entero.
-        cortes = [m.start() for m in marcas] + [len(t)]
-        inicio, bloques = 0, []
-        for c in cortes:
-            bloques.append(t[inicio:c])
-            inicio = c
-
-    salida = []
-    for b in bloques:
+        return t, 0
+    cortes = [m.start() for m in marcas] + [len(t)]
+    inicio, piezas = 0, []
+    for c in cortes:
+        b = t[inicio:c]
         b = _RE_AMD.sub(" ", b)
         b = _RE_ETIQUETA_AMD.sub("", b)
-        for linea in b.splitlines():
-            s = linea.strip()
-            if not s or _RE_ADMIN.search(s):
-                continue
-            if len(re.sub(r"[^0-9A-Za-z]", "", s)) < 3:
-                continue
-            salida.append(s)
-
-    if not salida:
-        # Todo era tramite. Se devuelve el texto entero para que el documento
-        # tenga algo, y el numero de enmiendas avisa de que hay que ir a
-        # SAM.gov. Perder el documento entero seria peor que dejar narrativa.
-        return t.strip(), n
-    return "\n".join(salida), n
+        b = b.strip(" .;\n")
+        if b:
+            piezas.append(b)
+        inicio = c
+    return ("\n".join(piezas), len(marcas))
 
 
-def _sin_tramitacion(texto: str, max_lineas: int = 6) -> str:
+_RE_CORTE = re.compile(r"(?<=[.;])\s+|\n+")
+
+
+def _sin_tramitacion(texto: str, max_frases: int = 10) -> str:
     """
     Deja solo las frases que describen el material, quitando la tramitacion.
 
-    Filtra por FRASES completas, no por palabras sueltas. La alternativa, tirar
-    cualquier linea que contenga "amendment", se llevaba por delante media
-    especificacion tecnica: medio averaged es medio bueno.
+    POR QUE TROCEA EN FRASES Y NO EN LINEAS
+
+La descripcion de SAM.gov (noticedesc) llega como UN SOLO BLOQUE, sin saltos de
+linea. Con un filtro por lineas, la unica linea del aviso empezaba por "This
+amendment is being issued to...", el patron de tramite casaba, y se
+descartaba EL AVISO ENTERO:
+
+    _sin_tramitacion -> 0 lineas
+    bom[0].especificacion = ''
+
+Y como el respaldo de desde_aviso() ante una especificacion vacia era el texto
+crudo, la enmienda acababa en la celda del material.
+
+Con troceo por oracion funciona igual en los dos casos, y ahora se prueban los
+dos. La version multilinea pasaba las pruebas y la de bloque unico no, que es
+justo la que produce la API.
+
+Filtra por FRASES completas, no por palabras sueltas. La alternativa, tirar
+cualquier linea que contenga "amendment", se llevaba por delante media
+especificacion tecnica: medio averaged es medio bueno.
     """
-    out, saltos = [], 0
-    for linea in str(texto or "").splitlines():
-        s = linea.strip()
+    out = []
+    for trozo in _RE_CORTE.split(str(texto or "")):
+        s = (trozo or "").strip()
         if not s:
             continue
         if _RE_ADMIN.search(s):
             continue
-        # Una linea de especificacion tiene que tener ALGO de substance. La
+        # Una frase de especificacion tiene que tener ALGO de substance. La
         # etiqueta "Narrative..." de una enmienda deja un "..." suelto al
-        # quitarle el "AMD 0001" de delante, y un "..." en la celda de la
-        # linea de cobro es basura visible.
+        # quitarle el "AMD 0001" de delante, y un "..." en la celda de la linea
+        # de cobro es basura visible.
         if len(re.sub(r"[^0-9A-Za-z]", "", s)) < 3:
             continue
         out.append(s)
-        saltos += 1
-        if saltos >= max_lineas:
+        if len(out) >= max_frases:
             break
-    return "\n".join(out)
+    return " ".join(out)
 
 
 def _ref_plano(texto: str) -> str:
@@ -1082,8 +1136,11 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
             "parte": parte or "",
             "descripcion": desc,
             "especificacion": spec,
-            "cantidad": cant or 1,
-            "unidad": unidad or "EA",
+            # Sin cantidad inventada. Antes caia a 1, y un "1" en la columna
+            # QTY de una hoja de cotizacion es un error de cien unidades que
+            # NO SE VE, porque parece un dato.
+            "cantidad": cant or 0.0,
+            "unidad": unidad or "",
             "precio": "",
             "enmiendas": n_enmiendas,
             "modelo": modelo_linea,
@@ -1096,8 +1153,8 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
         # Si en su linea no habia nada, se cae al valor global del texto, y si
         # tampoco, a 1 EA. Se marca con vacio el dato que no se sabe, para que
         # el comprador lo rellene en vez de fiarse de una cifra inventada.
-        _cant = _d["cantidad"] or cant or 1
-        _uni = _d["unidad"] or unidad or "EA"
+        _cant = _d["cantidad"] or cant or 0.0
+        _uni = _d["unidad"] or unidad or ""
         _parte = _d["parte"] or (parte if i == 1 else "")
         # La cabecera limpia se repite en cada linea: una hoja de cotizacion
         # donde la linea 0003 no dice que material es, vuelve al distributor
@@ -1671,6 +1728,8 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
             # seria peor que enviarlo corto.
             desc = ""
 
+    # El texto ya sin tramite, por si el BOM no deja especificacion.
+    limpio_desc = _sin_tramitacion(_sin_enmiendas(desc or "")[0])
     bom = _bom_desde_aviso(aviso, desc)
 
     estimacion = _estimar_precio(desc, bom)
@@ -1681,7 +1740,7 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
     cantidad = _num(_bom0.get("cantidad")) or 1
     unidad = (_bom0.get("unidad") or "EA")
 
-    return {
+    _ret = {
         "notice_id": aviso.get("noticeId", ""),
         "solicitation": (aviso.get("solicitationNumber")
                          or aviso.get("noticeId") or ""),
@@ -1721,9 +1780,19 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
                               or str(_bom0.get("parte") or "")),
         "unidad_medida": unidad,
         "cantidad_total": cantidad,
+        # SIN RESPALDO CRUDO. Antes, cuando la limpieza dejaba la
+        # especificacion vacia, caia a desc[:800], que es el texto del aviso
+        # INCLUIDA la narrativa de las enmiendas. Ese respaldo era
+        # precisamente lo que metia "AMD 0001 Narrative..." en la celda del
+        # material cuando la descripcion llegaba en un solo bloque.
+        #
+        # Si no hay especificacion limpia, no hay especificacion. Se deja el
+        # hueco y lo rellena el distribuidor. Meter el texto crudo es peor que
+        # un hueco: un hueco se nota, el papel administrativo se lee como si
+        # fuera la ficha del rodamiento.
         "especificacion_tecnica_clave": (
             str(_bom0.get("especificacion") or "").strip()
-            or (desc[:800].strip() if desc else "")),
+            or _sin_tramitacion(limpio_desc or "")),
         "sin_descripcion": not bool(desc.strip()),
         # El BOM va ya montado: desde_analisis lo respeta tal cual.
         "bom_lineas": bom,
@@ -1747,8 +1816,13 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         #
         # Si el aviso NO declara valor, no se inventa: precio None y el
         # documento lo dice. Un hueco se rellena; un cero no se discute.
-        **estimacion,
     }
+    # El estimado NO va al documento: se queda en el analisis para que el
+    # mensaje de Telegram lo enseñe, que es donde si sirve. El usuario necesita
+    # saber a que atencion comercial va la cosa antes de hablar con tres
+    # proveedores. En el papel del distribuidor, no.
+    _ret["estimacion_interna"] = estimacion
+    return _ret
 
 
 def _instrucciones_ingles(analisis: dict) -> str:
@@ -1812,46 +1886,23 @@ def _notas_ingles(analisis: dict, pendientes: int = 0) -> str:
     texto = ("Document issued by L.A.M.B. Logistics LLC. This is not an "
              "official document of the U.S. Government or any agency.")
 
-    # Que el precio es un ESTIMADO, y de donde sale.
+    # Por que el precio va en blanco.
     #
-    # Sin esto, un $85,000.00 en la columna UNIT PRICE se lee como un precio
-    # cotizado, cuando lo unico que hay es que el aviso declara "Not to Exceed
-    # USD 85,000" y se ha dividido entre la cantidad. El numero sale del propio
-    # aviso, asi que no es inventado, pero es una estimacion y el documento
-    # tiene que decirlo. Un estimativo que se presenta como cotizacion es como
-    # nace una reclamacion: el proveedor cotiza sobre ese numero y luego resulta
-    # que era el techo del contrato, no el precio.
+    # Se evaluo imprimir aqui el estimado propio (valor declarado del aviso
+    # partido por la cantidad) y se descarto: el proveedor lo leeria como un
+    # precio cotizado y cotizaria sobre NUESTRO numero en vez de sobre el
+    # material. Le dirian "su precio", y el contrato entero se construiria
+    # sobre una cifra que nunca fue suya.
     #
-    # Y al reves tambien: si NO hay valor declarado, el precio se deja en
-    # blanco y se dice que falta. Un $0.00 seria el fallo que se esta
-    # arreglando.
-    if analisis.get("precio_es_estimado"):
-        texto += (
-            "\n\nPRICE BASIS: the unit prices and amounts shown above are "
-            "ESTIMATES derived from the value declared on the SAM.gov notice "
-            "(USD %s) divided by the total quantity (%s). They are not quotes "
-            "and not binding. The unit price column of the Bill of Materials is "
-            "left blank on purpose: that is the price the supplier is asked to "
-            "quote."
-            % (_usd(analisis.get("valor_declarado_usd")),
-               _fmt(_num(analisis.get("cantidad_total_licitacion"))))
-        )
-    elif not _num(analisis.get("precio_unitario_costo")) \
-            and not _num(analisis.get("costo_total_usd")):
-        # OJO: "is None" aqui no funcionaba. _num(None) devuelve 0.0, no None,
-        # porque su trabajo es devolver un float que se pueda multiplicar. La
-        # comprobacion era False siempre y el aviso sin valor caia al $0.00
-        # justo en el caso para el que existia.
-        texto += (
-            "\n\nPRICE BASIS: this notice does not state a contract value, so "
-            "no unit price or amount is shown. The blank is deliberate and "
-            "must not be read as zero: the supplier will quote it."
-        )
+    # Y en ningun caso $0.00. Un cero es un precio FALSO, no un hueco, y un
+    # hueco se rellena.
+    texto += (
+        "\n\nPRICE: the Unit Price and Amount columns are left blank on "
+        "purpose. This is a request for quotation: the supplier enters its own "
+        "price. No figure is printed there, because a printed number would be "
+        "read as a quoted price and the supplier would quote around it."
+    )
 
-    # Cuantas enmiendas tenia el aviso, y que su narrativa no va en el documento.
-    # Se dice en numero, no se calla: si el aviso tenia tres enmiendas y aqui
-    # no sale ninguna, el usuario tiene que saber que hay informacion que no
-    # esta, o creera que tiene el documento completo.
     _amd = int(_num(analisis.get("enmiendas")) or 0)
     if _amd:
         texto += (
@@ -1885,20 +1936,22 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     lineas = []
     cant = _num(analisis.get("cantidad_total")) or 1
     unidad = analisis.get("unidad_medida") or "EA"
-    precio = _num(analisis.get("precio_unitario_costo"))
-    if not precio:
-        # Sin precio unitario se usa el total partido por la cantidad, para
-        # que el importe de la linea no salga en cero.
-        precio = _num(analisis.get("costo_total_usd")) / cant if cant else 0.0
-    # Si al final no hay ningun numero, se dice explicitamente que el precio
-    # se desconoce. La tabla lo usa para dejar UNIT PRICE, AMOUNT y el TOTAL en
-    # blanco en vez de imprimir $0.00, que es lo que salia antes.
+    # SIN PRECIO, Y SIN ESTIMADO INTERNO.
     #
-    # Un $0.00 en un documento que va a un distribuidor no es un dato
-    # pendiente: es un dato FALSO. El lector ve que el gobierno compra esto por
-    # nada, y el unico modo de arreglarlo es que alguien pregunte. Un hueco se
-    # rellena con el precio del distributor; un cero se discute.
-    precio_desconocido = precio <= 0
+    # Este documento es una hoja de cotizacion: la rellena el DISTRIBUIDOR.
+    # UNIT PRICE y AMOUNT salen EN BLANCO a proposito.
+    #
+    # Se evaluo poner aqui el estimado propio (valor declarado del aviso /
+    # cantidad) y se descarto. El proveedor lo leeria como un precio cotizado y
+    # cotizaria sobre NUESTRO numero en vez de sobre el material: le dirian
+    # "su precio", y el contrato entero se construiria sobre una cifra que nunca
+    # fue suya. El estimado es util para decidir si el negocio tiene sentido,
+    # que es una pregunta interna, y para eso se queda en el mensaje de
+    # Telegram.
+    #
+    # Y en ningun caso $0.00: un cero es un precio FALSO, no un hueco.
+    precio = 0.0
+    mostrar_precios = False
 
     # Descripcion y especificacion vienen de Gemini, en castellano, y no se
     # pueden reescribir porque cambian en cada analisis. Se traducen con la
@@ -1918,10 +1971,6 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     # El lugar de entrega tambien lo escribo yo en las instrucciones, pero
     # aparece suelto en algunos analisis.
     lugar, _p3 = _ingles(analisis.get("lugar_entrega") or "")
-
-    # La linea de la orden se anade DESPUES de conocer el BOM, porque con varios
-    # CLIN tiene que haber una linea por CLIN. Ver mas abajo, donde se construye
-    # "lineas".
 
     # El texto que este modulo genera va en ingles de origen, no traducido.
     # No es un detalle de estilo: estas lineas y las condiciones de pago de
@@ -2035,7 +2084,7 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         "proveedor_dir": prov.get("direccion", ""),
         "lineas": lineas,
         # Sin numero no se imprime $0.00: la tabla deja las celdas en blanco.
-        "precio_desconocido": precio_desconocido,
+        "mostrar_precios": mostrar_precios,
         "instrucciones": "\n".join(inst),
         # Condiciones en ingles, por lo mismo que las instrucciones: van al
         # proveedor. El factoring se declara porque es lo que hace posible la

@@ -271,8 +271,14 @@ if _txt:
         ("Tabla de articulos", "ITEMS ORDERED"),
         ("Cantidad", "45"),
         ("Unidad", "KIT"),
-        ("Precio unitario", "$380.00"),
-        ("Importe total", "$17,100.00"),
+        # El precio NO se imprime: es una hoja de cotizacion y lo pone el
+        # distribuidor. Las CABECERAS si tienen que estar, para que se vea
+        # donde escribe. Cambio en 3.5.0: antes se imprimia el estimado
+        # propio y el proveedor cotizaba sobre NUESTRO numero en vez de
+        # sobre el material.
+        ("Cabecera de precio unitario", "UNIT PRICE"),
+        ("Cabecera de importe", "AMOUNT"),
+        ("Cabecera de total", "TOTAL (USD)"),
         ("Instrucciones de despacho", "SHIPPING INSTRUCTIONS"),
         ("Condiciones", "TERMS AND CONDITIONS"),
         ("Firma", "Bastian Cordero"),
@@ -312,6 +318,14 @@ if _txt:
     check("  La columna ITEM lleva el numero de linea",
           _tras_item >= 0 and "1" in _lineas_txt[_tras_item:_tras_item + 9],
           f"-> {_lineas_txt[_tras_item:_tras_item + 9]}")
+
+    # POR NEGATIVA: no hay ningun precio nuestro en el papel. Ni $0.00, que es
+    # un precio FALSO, ni el estimado propio, que se leeria como cotizacion.
+    for _prohibido in ("$0.00", "$380.00", "$17,100.00"):
+        check("POR NEGATIVA no sale %-11s" % _prohibido, _prohibido not in _txt,
+              "-> hay un precio en el documento")
+    check("  Y el pie explica que lo pone el proveedor",
+          "request for quotation" in _txt.lower())
 
     print()
     print("  Documento privado, no oficial:")

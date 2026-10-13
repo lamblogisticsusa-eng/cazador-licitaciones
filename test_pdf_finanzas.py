@@ -217,15 +217,18 @@ print("  cantidad total               : %s %s" % (an["cantidad_total"],
 print("  precio unitario estimado    : USD %s"
       % an.get("precio_unitario_costo"))
 print("  total estimado               : USD %s" % an.get("costo_total_usd"))
-check("Hay precio unitario estimado", (an.get("precio_unitario_costo") or 0) > 0,
+# El documento NO lleva precio. El estimado se calcula aparte, pero no se
+# imprime: ver la comprobacion del PDF de mas abajo.
+check("El aviso declara su valor, y eso se recoge",
+      abs((an.get("estimacion_interna") or {}).get("valor_declarado_usd", 0)
+          - 85000) < 1,
+      "-> %r" % (an.get("estimacion_interna") or {}))
+check("Y el estimado sale de ahi: 85.000 / 100 = 850",
+      abs(an["estimacion_interna"]["precio_unitario_costo"] - 850.0) < 0.01,
+      "-> %r" % an["estimacion_interna"]["precio_unitario_costo"])
+check("Pero NO se lleva al documento",
+      not an.get("precio_unitario_costo"),
       "-> %r" % an.get("precio_unitario_costo"))
-check("Y sale del valor declarado por el aviso",
-      abs(an.get("valor_declarado_usd", 0) - 85000) < 1)
-check("85.000 / 100 = 850", abs(an["precio_unitario_costo"] - 850.0) < 0.01,
-      "-> %r" % an["precio_unitario_costo"])
-check("El total cuadra con cantidad x precio",
-      abs(an["costo_total_usd"] - 100 * an["precio_unitario_costo"]) < 0.01)
-check("Y se marca que es un estimado", an.get("precio_es_estimado") is True)
 
 print()
 print("  Y en el PDF:")
@@ -238,38 +241,37 @@ except ImportError:
 if PdfReader:
     txt = " ".join("\n".join(p.extract_text() or "" for p in
                              PdfReader(io.BytesIO(pdf)).pages).split())
-    for lo, si in (("lamblogisticsusa@gmail.com", True),
-                   ("+1 (702) 516-6086", True),
-                   ("850.00", True),
-                   ("85,000.00", True),
-                   ("100", True), ("BG", True),
-                   ("ESTIMATES derived from", True),
-                   ("not quotes and not binding", True)):
-        check("  El PDF trae: %-34s" % lo[:34], (lo in txt) == si)
-    check("  Y NO sale $0.00 en ninguna parte", "$0.00" not in txt,
-          "-> aparece $0.00 en el PDF")
+    for lo in ("lamblogisticsusa@gmail.com", "+1 (702) 516-6086",
+               "100", "BG", "UNIT PRICE", "AMOUNT"):
+        check("  El PDF trae: %-34s" % lo[:34], lo in txt)
+    # Y lo que NO debe traer. El estimado propio NO se imprime: el
+    # proveedor lo leeria como un precio cotizado y cotizaria sobre nuestro
+    # numero en vez de sobre el material.
+    for lo in ("850.00", "85,000.00", "$0.00", "ESTIMATES derived from",
+               "not quotes and not binding"):
+        check("  El PDF NO trae: %-26s" % lo[:26], lo not in txt,
+              "-> %r aparece en el PDF" % lo)
+    check("  Y explica que el precio lo pone el proveedor",
+          "request for quotation" in txt
+          and "supplier enters its own" in txt)
 
 print()
 print("=" * 76)
 print("5) CUANDO EL AVISO NO DECLARA VALOR: BLANCO, NO CERO")
 print("=" * 76)
 an_sin = _con_desc(DESCRIPCION_SIN_VALOR)
-print("  precio unitario: %r" % an_sin.get("precio_unitario_costo"))
-check("No se inventa un precio", not an_sin.get("precio_unitario_costo"),
-      "-> %r" % an_sin.get("precio_unitario_costo"))
-check("Ni se marca como estimado", not an_sin.get("precio_es_estimado"))
+print("  estimado interno: %r" % an_sin.get("estimacion_interna"))
+check("Sin valor declarado no hay ni estimado", not an_sin.get("estimacion_interna"),
+      "-> %r" % an_sin.get("estimacion_interna"))
 datos_sin = pdfg.desde_analisis(an_sin)
 pdf_sin = pdfg.generar_po(datos_sin)
 check("Y el PDF se genera igualmente", len(pdf_sin) > 50000)
 if PdfReader:
     txt_sin = " ".join("\n".join(p.extract_text() or "" for p in
                                  PdfReader(io.BytesIO(pdf_sin)).pages).split())
-    check("Y NO pone $0.00", "$0.00" not in txt_sin,
-          "-> $0.00 esta en el PDF")
-    check("Y explica que el hueco es deliberado",
-          "does not state a contract value" in txt_sin)
-    check("Y avisa de que no debe leerse como cero",
-          "must not be read as zero" in txt_sin)
+    check("Y NO pone ningun precio", "$0.00" not in txt_sin
+          and "85,000" not in txt_sin, "-> hay un precio en el PDF")
+    check("Y el hueco se explica igual", "request for quotation" in txt_sin)
 
 print()
 print("=" * 76)
@@ -352,6 +354,88 @@ for texto, esperado in (
         ("", "")):
     got = pdfg._ref_plano(texto)
     check("  %-30r -> %r" % (texto[:30], got), got == esperado)
+
+print()
+print("=" * 76)
+print("8) LA FORMA QUE PRODUCE LA API: UN SOLO BLOQUE")
+print("=" * 76)
+# ESTA SECCION ES LA QUE HABRIA EVITADO EL FALLO.
+#
+# El aviso de arriba es MULTILINEA, y con lineas el filtro puede descartar la de
+# la enmienda y conservar la del material. La API NO devuelve multilinea:
+# noticedesc llega como un bloque unico, sin saltos de linea. Con un bloque
+# unico, un filtro por lineas descarta el AVISO ENTERO, la especificacion sale
+# vacia, y el respaldo de desde_aviso mete el texto crudo. Que es exactamente
+# lo que aparecia en el PDF.
+#
+# Se prueban las DOS formas con el mismo contenido, porque la diferencia entre
+# ellas es justo lo que no se estaba probando.
+BLOB = ("AMD 0001 Narrative... This amendment is being issued to incorporate the "
+        "solicitation number and to provide additional time for proposals. Interested "
+        "parties shall acknowledge receipt in writing. Questions should be directed to "
+        "the point of contact. Line Item Number 0001: NSN 5330-01-586-4931, Cage 12345, "
+        "Part Number M7A1-100, Quantity: 100 Units. MECHANICAL SEAL KIT, EPDM 70 SHORE A "
+        "PER ASTM D2000, FOR ROTOR OF 6 INCH PUMP, PER DRAWING 1110700278. Salient "
+        "characteristics: durometer 70 shore A, black. This contract includes the "
+        "estimated quantity of 100 each, and the estimated value of this acquisition is "
+        "Not to Exceed USD 85,000.00.")
+
+for etiqueta, texto in (("multilinea", DESCRIPCION), ("BLOQUE UNICO", BLOB)):
+    print()
+    print("  %s:" % etiqueta)
+    _a = _con_desc(texto)
+    _bom = _a["bom_lineas"][0]
+    print("    cantidad=%-8s unidad=%-5s" % (_bom["cantidad"], _bom["unidad"]))
+    print("    desc     : %s" % _bom["descripcion"][:82])
+    print("    spec     : %s" % (_bom["especificacion"][:82].replace("\n", " ") or "(VACIA)"))
+
+    check("  %s: la cantidad es 100, no el 1 del fallback" % etiqueta,
+          _bom["cantidad"] == 100.0, "-> %r" % _bom["cantidad"])
+    check("  %s: la unidad no esta vacia" % etiqueta,
+          _bom["unidad"] in ("EA", "BG"), "-> %r" % _bom["unidad"])
+    check("  %s: la cabecera lleva modelo, producto y plano" % etiqueta,
+          _bom["descripcion"].startswith("M7A1-100")
+          and _bom["descripcion"].endswith("Per Drawing 1110700278"),
+          "-> %r" % _bom["descripcion"])
+    check("  %s: la especificacion NO esta vacia" % etiqueta,
+          len(_bom["especificacion"].strip()) > 80,
+          "-> %r" % _bom["especificacion"][:70])
+    for malo in ("AMD", "Narrative", "amendment", "acknowledge",
+                 "point of contact", "additional time"):
+        check("  %s: nada de '%s' en la celda" % (etiqueta, malo),
+              malo not in _bom["descripcion"]
+              and malo not in _bom["especificacion"])
+
+    _d = pdfg.desde_analisis(_a)
+    _b = pdfg.generar_po(_d)
+    check("  %s: el PDF se genera" % etiqueta, len(_b) > 50000)
+    if PdfReader:
+        _t = " ".join("\n".join(pg.extract_text() or ""
+                                for pg in PdfReader(io.BytesIO(_b)).pages).split())
+        _celda = _t[_t.index("ITEMS ORDERED"):_t.index("BILL OF MATERIALS")]
+        check("  %s: y la celda del PDF sale limpia" % etiqueta,
+              "AMD" not in _celda and "Narrative" not in _celda
+              and "acknowledge" not in _celda.lower(),
+              "-> la enmienda ha vuelto a la celda")
+        check("  %s: y lleva QTY 100" % etiqueta, "100" in _celda)
+        # Ni $0.00 ni NUESTRO estimado. El valor que declara el aviso
+        # ("Not to Exceed USD 85,000.00") si puede salir, y DEBE: va dentro de
+        # la especificacion que el propio gobierno publico, y le dice al
+        # distribuidor el tamano de la compra, que le interesa. Lo que no puede
+        # salir es un precio nuestro, que se leeria como cotizacion.
+        check("  %s: ni $0.00 ni nuestro estimado" % etiqueta,
+              "$0.00" not in _t and "850.00" not in _t,
+              "-> hay un precio nuestro en el PDF")
+
+print()
+print("  Y la diferencia entre las dos formas, que es lo que se ROMPIA:")
+_cuerpo_bloque = pdfg._sin_tramitacion(pdfg._sin_enmiendas(BLOB)[0])
+check("El filtro saca contenido de un bloque unico",
+      len(_cuerpo_bloque) > 100,
+      "-> %r: el filtro por lineas se come el aviso entero" % _cuerpo_bloque[:60])
+check("Y no saca ninguna Oracion de tramite",
+      not any(x in _cuerpo_bloque for x in
+              ("amendment", "acknowledge", "point of contact")))
 
 print()
 print("=" * 76)

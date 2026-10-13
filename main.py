@@ -814,9 +814,35 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Todo el texto del documento va en ingles tecnico: descripciones, "
             "referencias a planos, requisitos de entrega y condiciones. La "
             "seccion <i>BILL OF MATERIALS</i> lleva CLIN, NSN, cantidad y "
-            "unidad: es la que se manda al distribuidor." + _aviso_pend,
+            "unidad: es la que se manda al distribuidor, y su columna de "
+            "precio va EN BLANCO a proposito: la rellena el proveedor."
+            + _aviso_pend,
             parse_mode=ParseMode.HTML,
         )
+        # El estimado del aviso se enseña AQUI y no en el PDF.
+        #
+        # Es una cifra interna: sirve para decidir si el negocio tiene sentido
+        # antes de llamar a tres proveedores. En el papel del distribuidor no
+        # puede estar, porque lo leeria como un precio cotizado y cotizaria
+        # sobre NUESTRO numero en lugar de sobre el material: luego le
+        # dirian "su precio" y el contrato entero se construiria sobre una
+        # cifra que nunca fue suya.
+        _est = (analisis.get("estimacion_interna") or {})
+        if _est.get("valor_declarado_usd"):
+            try:
+                await update.message.reply_text(
+                    f"Referencia interna, NO va en el PDF: el aviso declara "
+                    f"<b>USD {_est['valor_declarado_usd']:,.0f}</b> para "
+                    f"{_est.get('cantidad_total_licitacion', 0):,.0f} unidades, "
+                    f"unos <b>USD {_est['precio_unitario_costo']:,.2f}</b> por "
+                    f"unidad. Sirve para ver si el margen tiene sentido; el "
+                    f"precio lo pone el distribuidor.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                # Un mensaje informativo que no llega no puede tumbar el
+                # comando, que es lo que si importa: el PDF ya esta generado.
+                pass
         await update.message.reply_document(
             document=_io.BytesIO(pdf_bytes),
             filename=nombre,
