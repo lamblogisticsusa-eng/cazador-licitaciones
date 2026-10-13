@@ -2056,7 +2056,12 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
                             "la descripcion", e)
 
             # PASO 2, la IA. Solo lee: texto entra, JSON sale.
-            semantica = _cb.extraer(corpus, str(aviso.get("title") or "")) or {}
+            # El numero de contrato viaja hasta la llamada para que los logs
+            # digan QUE licitacion esta cayendo, y no solo que algo fallo. Sin
+            # esto, un 503 en el barrido es indistinguible de otro.
+            semantica = _cb.extraer(
+                corpus, str(aviso.get("title") or ""),
+                str(aviso.get("solicitationNumber") or "")) or {}
 
             # RESPALDO. Sin corpus no hay estructura que leer en los adjuntos,
             # y la Capa B se sale sin llamar a Gemini. Ahi se usa la lectura

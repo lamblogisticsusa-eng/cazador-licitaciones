@@ -255,7 +255,7 @@ def capa_c(corpus: str) -> dict:
 
 
 # ------------------------------------------------------------------ CAPA B
-def extraer(corpus: str, titulo: str = "") -> dict:
+def extraer(corpus: str, titulo: str = "", contrato: str = "") -> dict:
     """
     Capa B. El extractor estructurado.
 
@@ -285,59 +285,61 @@ def extraer(corpus: str, titulo: str = "") -> dict:
         aviso = "TITLE: %s\n\n%s" % (titulo, texto)
     prompt = PROMPT.format(aviso=aviso)
 
-    for modelo in [config.GEMINI_MODEL] + [
-            m for m in config.GEMINI_MODELES_ALTERNATIVOS
-            if m and m != config.GEMINI_MODEL][:3]:
+    # La llamada sale por gemini_conn, que es el unico sitio que sabe
+    # reintentar, con que espera, con que timeout, y a quien se cae cuando ya
+    # no hay mas. Aqui ya no hay politica de reintentos, solo lectura.
+    #
+    # La MISMA config se pasa al modelo de respaldo: response_mime_type
+    # incluido. Un respaldo que devuelve texto libre en vez de JSON dejaria el
+    # documento sin los numeros de parte, que es justo lo que no puede pasar.
+    try:
+        import gemini_conn
+        crudo, modelo_usado = gemini_conn.llamar(
+            prompt, contrato,
+            cadena=[config.GEMINI_MODEL] + [
+                m for m in config.GEMINI_MODELES_ALTERNATIVOS
+                if m and m != config.GEMINI_MODEL],
+            respaldo=config.GEMINI_MODELO_RESPALDO,
+            temperature=0.0,
+            response_mime_type="application/json",
+            max_output_tokens=900,
+        )
+    except Exception as e:
+        # Aqui se llega con los tres intentos gastados, la cadena agotada y el
+        # respaldo sin cuota. La Capa C no depende de nadie: sale del corpus
+        # con expresiones regulares, y para eso el PDF salga con la cantidad
+        # que el aviso dice y no con un hueco.
+        log.warning("%s [WARNING] Capa B no ejecutada debido a fallo de API "
+                    "(%s: %s)", gemini_conn._marca(), contrato, str(e)[:110])
         try:
-            cliente = genai.Client(api_key=config.GEMINI_API_KEY)
-            respuesta = cliente.models.generate_content(
-                model=modelo,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    response_mime_type="application/json",
-                    max_output_tokens=900,
-                ),
-            )
-            crudo = str(getattr(respuesta, "text", "") or "")
-            limpio = re.sub(r"^```(?:json)?|```$", "", crudo.strip(),
-                            flags=re.MULTILINE).strip()
-            a = limpio.find("{")
-            b = limpio.rfind("}")
-            if a == -1 or b <= a:
-                log.info("capa_b: %s no devolvio JSON utilizable", modelo)
-                continue
-            salida = validar(json.loads(limpio[a:b + 1]))
-            if salida["_capa"]:
-                log.info("capa_b: %s -> override=%s qty=%s uoi=%s",
-                         modelo, salida["override_required"],
-                         salida["target_qty"], salida["target_uoi"] or "-")
-                try:
-                    import quota
-                    quota.gastar(1)
-                except Exception:
-                    pass
-                return salida
-        except Exception as e:
-            texto_err = str(e)
-            if any(s in texto_err for s in _FALLA_API):
-                # Quota, red o clave. Aqui es donde cae el encargo: log con el
-                # texto pedido y a la Capa C, para que el documento no salga
-                # vacio de cantidad.
-                log.warning("[WARNING] Capa B no ejecutada debido a fallo "
-                            "de API (%s: %s)", modelo, texto_err[:120])
-                try:
-                    import quota
-                    quota.gastar_fallo()
-                except Exception:
-                    pass
-                return capa_c(texto)
-            log.warning("capa_b: %s fallo: %s", modelo, texto_err[:150])
-            continue
+            import quota
+            quota.gastar_fallo()
+        except Exception:
+            pass
+        return capa_c(texto)
 
-    # Se agoto la cola sin respuesta buena. No es un fallo de API, es que el
-    # modelo no sirvio. La Capa C tambien sirve aqui: el corpus esta a mano y
-    # no depende de nadie.
-    log.warning("[WARNING] Capa B no devolvio nada utilizable; se aplica la "
-                "Capa C sobre el corpus")
-    return capa_c(texto)
+    limpio = re.sub(r"^```(?:json)?|```$", "", crudo.strip(),
+                    flags=re.MULTILINE).strip()
+    a = limpio.find("{")
+    b = limpio.rfind("}")
+    if a == -1 or b <= a:
+        log.warning("[WARNING] Capa B no devolvio nada utilizable; se aplica "
+                    "la Capa C sobre el corpus")
+        return capa_c(texto)
+    try:
+        salida = validar(json.loads(limpio[a:b + 1]))
+    except ValueError as e:
+        log.warning("[WARNING] Capa B devolvio JSON ilegible (%s); se aplica "
+                    "la Capa C", e)
+        return capa_c(texto)
+
+    if salida["_capa"]:
+        log.info("capa_b: [%s] respondio [%s] -> override=%s qty=%s uoi=%s",
+                 contrato, modelo_usado, salida["override_required"],
+                 salida["target_qty"], salida["target_uoi"] or "-")
+        try:
+            import quota
+            quota.gastar(1)
+        except Exception:
+            pass
+    return salida

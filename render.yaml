@@ -28,6 +28,12 @@ services:
       # mientras 3.8, 3.6, flash-latest y 3.5-flash-lite respondian bien.
       - key: GEMINI_MODELES_ALTERNATIVOS
         value: "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-flash-latest,gemini-3.6-flash-lite,gemini-3.7-flash"
+      # Modelo de respaldo de gemini_conn cuando la serie 3.x agota sus tres
+      # intentos o salta un 429. NO es 1.5-flash: ese nombre no esta entre los
+      # que este repo ha medido que responden, y un respaldo que da 404 no
+      # cubre nada. Ver la nota larga en config.py.
+      - key: GEMINI_MODELO_RESPALDO
+        value: "gemini-flash-latest"
       - key: GEMINI_ESPERA_503
         value: "20"
       # Objetivo: 10 licitaciones VIABLES al dia. Se piden 20 analisis porque

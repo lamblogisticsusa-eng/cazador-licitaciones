@@ -372,38 +372,32 @@ def estructurar(aviso: dict, descripcion: str, respaldo: dict,
         if m and m != config.GEMINI_MODEL
     ]
     datos, modelo_usado = {}, ""
-    for modelo in cola[:4]:
+    # Por gemini_conn. Aqui antes vivia un bucle de modelos con su propia idea
+    # de cuando insistir: un 429 pasaba al siguiente, y cualquier otra cosa
+    # tambien, pero con un SOLO intento. Lo que no habia en ningun sitio del
+    # repo era el backoff con espera ni el timeout de red.
+    #
+    # Un 429 no se reintenta contra el MISMO modelo, porque la cuota es por
+    # modelo y por dia: repetirlo no puede funcionar nunca, solo gasta tiempo.
+    # Se cambia de modelo. Un 503 si se reintenta, porque es transitorio y el
+    # mismo puede responder dentro de unos segundos.
+    try:
+        import gemini_conn
+        crudo, modelo_usado = gemini_conn.llamar(
+            prompt, str(aviso.get("solicitationNumber") or nid),
+            cadena=cola[:4], respaldo=config.GEMINI_MODELO_RESPALDO,
+            temperature=0.0,
+            response_mime_type="application/json",
+            max_output_tokens=1200,
+        )
+        datos = _leer_json(crudo)
+    except Exception as e:
+        log.warning("estructurar('%s'): la cadena de modelos no sirvio (%s)",
+                    nid, str(e)[:130])
         try:
-            cliente = genai.Client(api_key=config.GEMINI_API_KEY)
-            from google.genai import types
-            respuesta = cliente.models.generate_content(
-                model=modelo,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    response_mime_type="application/json",
-                    max_output_tokens=1200,
-                ),
-            )
-            crudo = getattr(respuesta, "text", "") or ""
-            datos = _leer_json(crudo)
-            modelo_usado = modelo
-            break
-        except Exception as e:
-            texto_err = str(e)
-            if "429" in texto_err or "RESOURCE_EXHAUSTED" in texto_err:
-                # El tope de cuota es POR MODELO. Se prueba el siguiente, que
-                # puede tener cuota todavia, en vez de rendirse.
-                log.warning("estructurar('%s'): 429 en %s, se prueba el "
-                            "siguiente", nid, modelo)
-                try:
-                    quota.gastar_fallo()
-                except Exception:
-                    pass
-                continue
-            log.warning("estructurar('%s'): %s fallo: %s", nid, modelo,
-                        texto_err[:150])
-            continue
+            quota.gastar_fallo()
+        except Exception:
+            pass
 
     if not datos:
         log.info("estructurar('%s'): el modelo no devolvio nada usable", nid)

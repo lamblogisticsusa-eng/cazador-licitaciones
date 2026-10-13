@@ -50,7 +50,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "4.0.0"
+KYOMOTO_VERSION = "4.1.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -129,6 +129,27 @@ GEMINI_MODELES_ALTERNATIVOS = os.getenv(
     "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-flash-latest,"
     "gemini-3.6-flash-lite,gemini-3.7-flash",
 ).replace(" ", "").split(",")
+
+# MODELO DE RESPALDO, para cuando la serie 3.x no da mas de si.
+#
+# gemini_conn.llamar() agota tres intentos con backoff 2/4/8 y, si el 503
+# persiste o salta un 429, cae aqui.
+#
+# NO es "gemini-1.5-flash", que fue lo que pidio el encargo. Ese nombre no esta
+# entre los modelos que este repo ha medido que responden, y la configuracion de
+# arriba deja escrito que hay nombres que NO EXISTEN para esta cuenta. Un
+# respaldo que da 404 es peor que no tener ninguno: el dia que hace falta no
+# esta, y ocupa el hueco del reintento que si habria funcionado.
+#
+# "gemini-flash-latest" es el alias estable y SI aparece en las mediciones de
+# arriba (00:20 del 28-sep, OK 8,3s). Es la eleccion conservadora: un alias
+# comercial no se retira.
+#
+# Si se quiere el 1.5 de todas formas, se pone aqui. Pero antes conviene
+#     python sondear_modelos.py
+# que es lo que hay que hacer con cualquier nombre de modelo nuevo.
+GEMINI_MODELO_RESPALDO = os.getenv(
+    "GEMINI_MODELO_RESPALDO", "gemini-flash-latest").strip()
 
 # --- Ventana de busqueda en SAM.gov ---
 # 10 dias: ademas de los avisos nuevos, entra todo lo que se publico durante

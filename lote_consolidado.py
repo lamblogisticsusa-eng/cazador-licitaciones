@@ -385,36 +385,27 @@ def resolver_lote(aviso: dict, descripcion: str,
         if m and m != config.GEMINI_MODEL
     ]
     salida, modelo_usado = {}, ""
-    for modelo in cola[:4]:
+    # Por gemini_conn: un solo sitio con la politica de reintentos, el
+    # backoff, el timeout y el salto al modelo de respaldo. Y la MISMA config
+    # para todos, response_mime_type incluido: un modelo de respaldo que
+    # devuelve texto libre deja el PDF sin numeros de parte.
+    try:
+        import gemini_conn
+        crudo, modelo_usado = gemini_conn.llamar(
+            prompt, str(aviso.get("solicitationNumber") or nid),
+            cadena=cola[:4], respaldo=config.GEMINI_MODELO_RESPALDO,
+            temperature=0.0,
+            response_mime_type="application/json",
+            max_output_tokens=1200,
+        )
+        salida = _validar(_leer_json(crudo))
+    except Exception as e:
+        log.warning("resolver_lote('%s'): la cadena de modelos no sirvio "
+                    "(%s)", nid, str(e)[:130])
         try:
-            cliente = genai.Client(api_key=config.GEMINI_API_KEY)
-            from google.genai import types
-            respuesta = cliente.models.generate_content(
-                model=modelo,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    response_mime_type="application/json",
-                    max_output_tokens=1200,
-                ),
-            )
-            salida = _validar(_leer_json(getattr(respuesta, "text", "") or ""))
-            if salida:
-                modelo_usado = modelo
-            break
-        except Exception as e:
-            texto_err = str(e)
-            if "429" in texto_err or "RESOURCE_EXHAUSTED" in texto_err:
-                log.warning("resolver_lote('%s'): 429 en %s, se prueba el "
-                            "siguiente", nid, modelo)
-                try:
-                    quota.gastar_fallo()
-                except Exception:
-                    pass
-                continue
-            log.warning("resolver_lote('%s'): %s fallo: %s", nid, modelo,
-                        texto_err[:150])
-            continue
+            quota.gastar_fallo()
+        except Exception:
+            pass
 
     if not salida:
         if usar_cache and clave:
