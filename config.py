@@ -6,6 +6,8 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 3.8.0 = extraccion en dos capas para lotes consolidados (1 LOT), solo
+#          para el informe interno de Telegram; el PDF no cambia
 # 3.7.0 = UEI y NCAGE de L.A.M.B. en el documento, y el patron de rango
 #          "2-20 foot Containers" -> 2 EA
 # 3.6.0 = parsing estructurado del aviso con IA antes del PDF, con cache
@@ -48,7 +50,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "3.7.0"
+KYOMOTO_VERSION = "3.8.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -204,6 +206,12 @@ DIAS_VIVOS = _int("DIAS_VIVOS", 3)
 # analizadas sobreviven, se piden mas de las que quieres recibir.
 PRESUPUESTO_GEMINI_DIARIO = _int("PRESUPUESTO_GEMINI_DIARIO", 20)
 # Suelo del auto-ajuste: nunca baja de 10, asi siempre hay 10 analisis.
+# Minutos que se respeta un fallo de la CAPA B (lote consolidado) antes de
+# reintentarlo. Mismo criterio que el parsing estructurado: un 429 de las tres
+# de la madrugada deja de aplicar a las cuatro, y una caida de red se recupera
+# sola.
+MINUTOS_REINTENTO_LOTE = 60
+
 PRESUPUESTO_MINIMO = _int("PRESUPUESTO_MINIMO", 10)
 # Cuantas por barrido. quota.por_barrido() reparte el presupuesto diario
 # entre los barridos: con 4 barridos y 16 de presupuesto, 4 por barrido.

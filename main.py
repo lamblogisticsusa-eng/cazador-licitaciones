@@ -819,6 +819,25 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             + _aviso_pend,
             parse_mode=ParseMode.HTML,
         )
+        # --- El desglose del lote consolidado ---
+        #
+        # Va aqui y NO en el PDF. Es informacion de compra interna: sirve para
+        # decidir si el negocio tiene sentido antes de llamar a tres
+        # proveedores. En el papel del distribuidor un parte de fabricante, una
+        # certificacion y un desglose de unidades son ruido, y el precio en
+        # blanco, que si importa porque lo rellena el proveedor, queda diluido
+        # entre lineas que no le sirven.
+        try:
+            _lote = (analisis.get("lote_consolidado") or {})
+            if _lote:
+                import lote_consolidado as _lc
+                _bloque = _lc.formatear_bloque(_lote)
+                if _bloque:
+                    await update.message.reply_text(_bloque,
+                                                    parse_mode=ParseMode.HTML)
+        except Exception:
+            # Informativo. El PDF ya esta generado y entregado.
+            pass
         # El estimado del aviso se enseña AQUI y no en el PDF.
         #
         # Es una cifra interna: sirve para decidir si el negocio tiene sentido

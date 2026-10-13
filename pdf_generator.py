@@ -719,6 +719,11 @@ _UOIS = {
     "BB", "BD", "BT", "CC", "CT", "DR", "GL", "PKG", "SC", "WT",
     "DZN", "DRL", "L", "M", "FT", "IN", "YD", "MI", "KG", "LB", "G",
     "LT", "ML", "GA", "OZ", "PT", "QT", "T",
+    # "LO" es como aparece "lot" en algunos catalogos. Va en _UOIS y no solo en
+    # _UOI_ISSUE porque la comprobacion que decide si una unidad es valida mira
+    # _UOIS: con "LO" solo en _UOI_ISSUE, "Qty: 1 LO" se quedaba sin unidad, que
+    # es lo mismo que quedarse sin cantidad.
+    "LO",
 }
 
 # Palabras que USA la gente, traducidas a la sigla que usa el catalogo.
@@ -748,6 +753,7 @@ _SINONIMOS_UNIDAD = {
     "BUNDLE": "BD", "BUNDLES": "BD", "SHEET": "SH", "SHEETS": "SH",
     # "Quantity: 100 Units" es 100 each en cualquier catalogo federal.
     "UNITS": "EA", "UNIT": "EA",
+    "LOTS": "LOT", "LOT ": "LOT",
 }
 
 # "100 EA", "100 BG", "50 kg", "12 ea", "250 BOX".
@@ -783,6 +789,10 @@ _UOI_ISSUE = {
     "EA", "BG", "KT", "KTN", "SET", "PR", "CA", "CS", "BX", "PK", "PL", "DZ",
     "BO", "HD", "CON", "CYC", "NUC", "OQ", "PG", "BL", "LOT", "RO", "BB",
     "BD", "BT", "CC", "CT", "DR", "PKG", "SC", "WT", "DZN", "DRL", "QA", "RL",
+    # "LO" es como aparece "lot" en algunos catalogos, y sin ella una linea
+    # "Qty: 1 LO" se quedaba SIN UNIDAD, que es lo mismo que sin cantidad: el
+    # hueco que el distributor tiene que rellenar a mano.
+    "LO",
 }
 _SINONIMOS_ISSUE = {k: v for k, v in _SINONIMOS_UNIDAD.items()
                     if v in _UOI_ISSUE}
@@ -1128,6 +1138,43 @@ def _cabecera_producto(titulo: str, modelo: str, plano: str) -> str:
     return " - ".join(partes)
 
 
+def _marcar_lote(item) -> None:
+    """
+    CAPA A: poner la bandera consolidated_lot en un item del BOM, o en todos.
+
+    Existe por una razon: la condicion ("cantidad == 1 y la unidad es EA, LO o
+    LOT") tiene que estar escrita UN SOLO sitio. Ponerla en los dos puntos donde
+    nace un item significa que las dos ramas pueden divergir sin que nada lo
+    note, y acabaria activandose en una y no en la otra.
+
+    Se escribe en el item y no se devuelve, porque el item ya se copia entero a
+    varias partes del documento; anadirlo al elemento es lo que lo hace viajar
+    sin tocar ninguna de ellas.
+
+    Acepta un item o una lista, y no por comodidad. Las dos ramas de
+    _bom_desde_aviso construyen distinto: una envuelve el item en una lista de
+    uno y la otra acumula. Acordarse de cual es cual en cada llamada es la forma
+    facil de que un dia se pase un item por alto y una rama deje de marcar,
+    que es el fallo que no se ve hasta que un lote no se desglosa.
+    """
+    try:
+        from lote_consolidado import es_lote_consolidado
+    except Exception:
+        # Si el modulo no estuviera, nada se marca, que es exactamente el
+        # comportamiento de antes. La bandera es una capa, no un requisito.
+        marca = lambda d: False
+    else:
+        marca = es_lote_consolidado
+
+    if isinstance(item, list):
+        for _uno in item:
+            if isinstance(_uno, dict):
+                _uno["consolidated_lot"] = marca(_uno)
+        return
+    if isinstance(item, dict):
+        item["consolidated_lot"] = marca(item)
+
+
 def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
     """
     Saca la lista de items (CLIN, NSN, cantidad, unidad) de un aviso de SAM.gov.
@@ -1250,23 +1297,20 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
     if not clines:
         # Sin CLIN: una sola linea con el producto. Es mejor un item que
         # describa lo que hay que cotizar que una tabla sin contenido.
-        desc = _cabecera_producto(titulo, modelo_linea, plano)
-        spec = (cuerpo[:600].strip() if cuerpo else
-                "No further description available from SAM.gov.")
-        return [{
+        salida = [{
             "clin": "1",
             "parte": parte or "",
-            "descripcion": desc,
-            "especificacion": spec,
-            # Sin cantidad inventada. Antes caia a 1, y un "1" en la columna
-            # QTY de una hoja de cotizacion es un error de cien unidades que
-            # NO SE VE, porque parece un dato.
+            "descripcion": _cabecera_producto(titulo, modelo_linea, plano),
+            "especificacion": (cuerpo[:600].strip() if cuerpo else
+                "No further description available from SAM.gov."),
             "cantidad": cant or 0.0,
             "unidad": unidad or "",
             "precio": "",
             "enmiendas": n_enmiendas,
             "modelo": modelo_linea,
         }]
+        _marcar_lote(salida)
+        return salida
 
     # Con CLIN: una linea por cada uno, con SUS datos.
     salida = []
@@ -1297,6 +1341,8 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
             "enmiendas": n_enmiendas,
             "modelo": modelo_linea,
         })
+    for _it in salida:
+        _marcar_lote(_it)
     return salida
 
 
@@ -1901,6 +1947,26 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
 
     estimacion = _estimar_precio(desc, bom)
 
+    # --- CAPA B: desglose del lote consolidado, SOLO si lo hay ---
+    #
+    # La condicion va ahi, y no mas arriba, por una razon: si consolidated_lot
+    # es False no se lee ni una variable de la capa, no se comprueba la cuota y
+    # no se toca la cache. Es lo que mantiene intacta la ruta feliz.
+    #
+    # Y va envuelta en try/except porque el PDF de una licitacion que NO es un
+    # lote se tiene que poder generar SIEMPRE. Esta capa no puede ser la
+    # razon de que un documento no salga.
+    lote = {}
+    try:
+        if any(it.get("consolidated_lot") for it in (bom or [])):
+            import lote_consolidado
+            lote = lote_consolidado.resolver_lote(aviso, desc) or {}
+            log.info("desde_aviso: lote consolidado en %s -> %s",
+                     aviso.get("noticeId"),
+                     "desglosado" if lote else "sin desglose")
+    except Exception as e:
+        log.warning("desde_aviso: la Capa B fallo (%s); el PDF sigue igual", e)
+
     # La cantidad y la unidad salen del BOM, que ya las ha buscado en el texto
     # con los patrones correctos.
     _bom0 = (bom or [{}])[0]
@@ -1973,6 +2039,9 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         # El JSON estructurado viaja en el analisis para que desde_analisis
         # pueda llevarlo hasta el documento. Ahi generar_po() lo usa tal cual.
         "estructurado": est or {},
+        # El desglose del lote consolidado, o {}. Lo lleva SOLO el mensaje de
+        # Telegram; el PDF no lo ve, por diseno.
+        "lote_consolidado": lote or {},
         # El precio lo hereda Kyomoto del valor que declara el propio aviso.
         #
         # Antes iban a None, y la tabla ITEMS ORDERED multiplicaba None por la
