@@ -795,36 +795,90 @@ _RE_ADMIN = re.compile(
     r"|attachments?\s+are\s+included|additional\s+time)\b", re.I)
 
 
+# "Narrative..." es la etiqueta que sigue al numero de enmienda. No es texto, es
+# una cabecera, y con el texto de al lado pegado forma un bloque que no dice
+# nada. Se quita con ^ y re.M para que solo affects a la linea que empieza asi.
+_RE_ETIQUETA_AMD = re.compile(r"^\s*(?:Narrative|Narratives)\b[.:]?\s*", re.I | re.M)
+
+
 def _sin_enmiendas(texto: str) -> tuple[str, int]:
     """
-    Quita la narrativa de enmiendas. Devuelve (texto_limpio, numero_enmiendas).
+    Quita el TRAMITE de las enmiendas. Devuelve (texto_limpio, numero_enmiendas).
 
-    El texto ANTES del primer "AMD 0001" es la base de la licitacion, y es lo
-    que se conserva: es la especificacion tecnica. Lo que va detras son las
-    enmiendas.
+    NO se quitan las enmiendas enteras. Una enmienda puede traer el cambio
+    tecnico que hay que cotizar, que es justo para lo que se emite; lo que se
+    quita es la parte administrativa (para que se emite, anexos, punto de
+    contacto, "acknowledge receipt"), que es la que se cuela en la celda.
 
-    Si el aviso entero es una enmienda (no hay base delante), no se devuelve
-    vacio, porque el usuario se quedaria sin documento: se quitan las cabeceras
-    "AMD 0001" y se deja el texto que haya.
+    EL FALLO QUE ESTA ARREGLA, MEDIDO
 
-    El numero se devuelve para poder DECIR cuantas enmiendas tenia el aviso.
-    No se silencia que falta informacion: si se quitan tres enmiendas y no se
-    dice nada, el usuario cree que tiene el documento completo.
+La version anterior hacia dos cosas malas, y la segunda era la grave:
+
+      base = t[:marcas[0].start()]        # 1. lo de antes del primer AMD
+      if len(base) < 40:
+          base = _RE_AMD.sub("", t)
+          base = " ".join(base.split())    # 2. aqui se rompia todo
+
+El texto empieza por "AMD 0001", no hay base delante, y se caia al respaldo. Y
+el respaldo unia TODOS los saltos de linea con un espacio, con lo que el
+documento entero pasaba a ser UNA sola linea.
+
+Encima, esa unica linea contenia la palabra "amendment", asi que el filtro por
+lineas que venia despues la rechazaba entera y devolvia cero lineas. El
+documento se generaba SIN especificacion tecnica, en silencio.
+
+Medido:
+
+    enmiendas detectadas: 1
+    CUERPO (0 lineas):
+    bom[0].especificacion = ''
+
+Por eso aqui no se une NADA con " ".join(): se conservan los saltos de linea, y
+es el filtro por linea el que decide que se queda.
+
+    limpio = []
+    for b in bloques:
+        ...
+        limpio.append(s)
+
+El numero se devuelve para poder DECIR cuantas enmiendas tenia el aviso. No se
+silencia que falta informacion: si se quitan tres enmiendas y no se dice nada,
+el usuario cree que tiene el documento completo.
     """
     t = str(texto or "")
     if not t.strip():
         return "", 0
     marcas = list(_RE_AMD.finditer(t))
-    if not marcas:
-        return t, 0
     n = len(marcas)
-    base = t[:marcas[0].start()].strip()
-    # El aviso entero es una enmienda. Se quitan las cabeceras y se deja el
-    # resto, porque perder el documento entero seria peor que dejar narrativa.
-    if len(base) < 40:
-        base = _RE_AMD.sub("", t)
-        base = " ".join(base.split())
-    return base.strip(), n
+    if not marcas:
+        bloques = [t]
+    else:
+        # Se trocea por cada marcador: lo que va antes del primero, y luego un
+        # bloque por enmienda. Ningun bloque se tira entero.
+        cortes = [m.start() for m in marcas] + [len(t)]
+        inicio, bloques = 0, []
+        for c in cortes:
+            bloques.append(t[inicio:c])
+            inicio = c
+
+    salida = []
+    for b in bloques:
+        b = _RE_AMD.sub(" ", b)
+        b = _RE_ETIQUETA_AMD.sub("", b)
+        for linea in b.splitlines():
+            s = linea.strip()
+            if not s or _RE_ADMIN.search(s):
+                continue
+            if len(re.sub(r"[^0-9A-Za-z]", "", s)) < 3:
+                continue
+            salida.append(s)
+
+    if not salida:
+        # Todo era tramite. Se devuelve el texto entero para que el documento
+        # tenga algo, y el numero de enmiendas avisa de que hay que ir a
+        # SAM.gov. Perder el documento entero seria peor que dejar narrativa.
+        return t.strip(), n
+    return "\n".join(salida), n
 
 
 def _sin_tramitacion(texto: str, max_lineas: int = 6) -> str:
@@ -841,6 +895,12 @@ def _sin_tramitacion(texto: str, max_lineas: int = 6) -> str:
         if not s:
             continue
         if _RE_ADMIN.search(s):
+            continue
+        # Una linea de especificacion tiene que tener ALGO de substance. La
+        # etiqueta "Narrative..." de una enmienda deja un "..." suelto al
+        # quitarle el "AMD 0001" de delante, y un "..." en la celda de la
+        # linea de cobro es basura visible.
+        if len(re.sub(r"[^0-9A-Za-z]", "", s)) < 3:
             continue
         out.append(s)
         saltos += 1
@@ -1026,6 +1086,7 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
             "unidad": unidad or "EA",
             "precio": "",
             "enmiendas": n_enmiendas,
+            "modelo": modelo_linea,
         }]
 
     # Con CLIN: una linea por cada uno, con SUS datos.
@@ -1052,6 +1113,7 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
             "unidad": _uni,
             "precio": "",
             "enmiendas": n_enmiendas,
+            "modelo": modelo_linea,
         })
     return salida
 
@@ -1633,11 +1695,35 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         "psc": aviso.get("classificationCode", ""),
         "ui_link": aviso.get("uiLink", ""),
         "lugar_entrega": lugar_de_entrega_aviso(aviso),
-        "producto": (aviso.get("title") or "").strip(),
-        "modelo_especifico": (_bom0.get("parte") or ""),
+        # El producto y la especificacion van LIMPIOS, no crudos.
+        #
+        # Antes ponian el titulo entero del aviso y los primeros 800
+        # caracteres de la descripcion, y en una licitacion enmendada la
+        # narrativa de "AMD 0001" va justo al principio. Medido: la tabla
+        # ITEMS ORDERED de la orden de compra salia con
+        #
+        #   53--PARTS KIT,SEAL REPLACEMENT,MECHANICAL (5330-01-586-4931)
+        #   AMD 0001 Narrative... This amendment is being issued to...
+        #
+        # o sea, el papel administrativo en la celda de la linea de cobro, y
+        # el material fuera. La limpieza estaba hecha, pero solo se aplicaba al
+        # BOM: la orden de compra seguia por su cuenta con lo crudo.
+        #
+        # Se usan los valores ya limpios del BOM, que es donde vive el trabajo.
+        # Asi las dos mitades del documento no pueden divergir.
+        "producto": (str(_bom0.get("descripcion") or "").strip()
+                     or (aviso.get("title") or "").strip()),
+        # El numero de parte real, no el NSN. El NSN es un codigo de catalogo
+        # y va en su propia columna del BOM; aqui lo que se quiere es lo que
+        # identifica al material, que es el P/N. Y como la cabecera limpia ya
+        # lo lleva, desde_analisis no lo anade otra vez entre parentesis.
+        "modelo_especifico": (str(_bom0.get("modelo") or "").strip()
+                              or str(_bom0.get("parte") or "")),
         "unidad_medida": unidad,
         "cantidad_total": cantidad,
-        "especificacion_tecnica_clave": (desc[:800].strip() if desc else ""),
+        "especificacion_tecnica_clave": (
+            str(_bom0.get("especificacion") or "").strip()
+            or (desc[:800].strip() if desc else "")),
         "sin_descripcion": not bool(desc.strip()),
         # El BOM va ya montado: desde_analisis lo respeta tal cual.
         "bom_lineas": bom,

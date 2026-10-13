@@ -193,6 +193,12 @@ for b in bom:
     print("  CLIN %-5s %-18s %8s %-4s" % (b["clin"], b["parte"][:18],
                                          b["cantidad"], b["unidad"]))
 check("El aviso tiene 1 CLIN y sale 1 linea", len(bom) == 1, "-> %d" % len(bom))
+# El codigo de clase ("53--") NO va en la linea de cobro, pero SI tiene que
+# seguir en la fila SAM.GOV TITLE de la cabecera, que es una referencia literal
+# al aviso: el distributor tiene que poder casar ese titulo con el de SAM.gov.
+# Por eso no se comprueba "53-- no aparece en el PDF", sino DONDE aparece.
+check("Y el codigo de clase no esta en la linea de cobro",
+      "53--" not in bom[0]["descripcion"], "-> %r" % bom[0]["descripcion"][:50])
 check("La cantidad es 100, no el 1 del fallback", bom[0]["cantidad"] == 100.0,
       "-> %r" % bom[0]["cantidad"])
 check("Y la unidad es BG, no el EA de por defecto", bom[0]["unidad"] == "BG",
@@ -273,10 +279,46 @@ cab = bom[0]["descripcion"]
 esp = bom[0]["especificacion"]
 print("  descripcion    : %r" % cab)
 print("  especificacion : %r" % esp[:150])
+# OJO, Y ESTO ES LO IMPORTANTE DE ESTA SECCION:
+#
+# Que la especificacion NO CONTENGA tramite se cumple trivialmente si la
+# especificacion esta VACIA. Una cadena vacia no contiene "AMD", ni "Narrative",
+# ni ninguna otra cosa, asi que todas las comprobaciones de este estilo pasan
+# aunque el documento se genere sin especificacion tecnica, que es exactamente
+# lo que pasaba: el respaldo de _sin_enmiendas unia el texto entero con
+# " ".join() y el filtro por linea lo rechazaba entero, dejando cero lineas.
+#
+# Por eso lo primero que se comprueba es que la especificacion CONSISTA EN
+# ALGO. Las comprobaciones de ausencia solo significan algo si antes se ha
+# comprobado que hay contenido.
+check("La especificacion NO esta vacia", bool(esp.strip()),
+      "-> %r: el filtro se ha comido la especificacion entera" % esp[:60])
+check("Y tiene longitud de una especificacion de verdad", len(esp) > 120,
+      "-> %d caracteres" % len(esp))
+check("Y conserva la especificacion tecnica del material",
+      "MECHANICAL SEAL KIT" in esp or "ASTM D2000" in esp
+      or "SALIENT" in esp.upper(),
+      "-> %r" % esp[:120])
+
 for malo in ("AMD", "Narrative", "amendment", "acknowledge", "highlighted",
              "Interested parties", "point of contact"):
     check("La cabecera no lleva '%s'" % malo, malo not in cab)
     check("La especificacion no lleva '%s'" % malo, malo not in esp)
+
+if PdfReader:
+    check("Y el PDF tampoco lleva la narrativa de la enmienda",
+          "AMD 0001" not in txt and "Narrative" not in txt
+          and "acknowledge" not in txt.lower())
+    # Y el codigo de clase sigue donde tiene que estar: en la referencia
+    # literal al titulo del aviso, no en la celda del material.
+    check("Y el titulo de SAM.gov se conserva literal en la cabecera",
+          "SAM.GOV TITLE 53--PARTS KIT" in txt,
+          "-> la referencia al aviso ha cambiado y no debe")
+    _celda = txt[txt.index("ITEMS ORDERED"):txt.index("SUPPLIER")
+                 if "SUPPLIER" in txt[txt.index("ITEMS ORDERED"):]
+                 else txt.index("BILL OF MATERIALS")]
+    check("Pero no en la celda del material", "53--" not in _celda,
+          "-> el codigo de clase se ha colado en la linea de cobro")
 check("Y el aviso tenia 1 enmienda y se cuenta",
       an.get("enmiendas") == 1, "-> %r" % an.get("enmiendas"))
 if PdfReader:
