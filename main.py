@@ -754,14 +754,37 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _origen = ("consultado ahora en SAM.gov" if de_sam
                    else "de los analisis de Kyomoto")
         _bom = datos.get("bom") or []
+
+        # Cuantos campos del documento llevan texto que la capa de traduccion
+        # no pudo convertir. Se cuenta sobre el PDF YA GENERADO, no sobre el
+        # analisis: lo que importa es lo que se imprime.
+        #
+        # Se avisa aqui y no solo dentro del PDF porque el mensaje sale ANTES
+        # de que el usuario descargue el fichero. Si solo lo dijera el
+        # documento, habria que abrirlo para enterarse, y para entonces el
+        # fichero ya esta en el movil y a un clic de mandarlo al proveedor.
+        _marca = pdfg.MARCA_PENDIENTE
+        _pend = sum(
+            1 for campo in ("lineas", "bom", "instrucciones", "condiciones")
+            for _v in (datos.get(campo) if isinstance(datos.get(campo), list)
+                       else [datos.get(campo)])
+            if _marca in str(_v or ""))
+        _aviso_pend = (
+            f"\n\n<i>Atencion:</i> {_pend} campo(s) llevan la marca "
+            f"[SEE NOTE]: son texto de Gemini que no se pudo traducir al "
+            f"ingles y se han dejado tal cual. El PDF lleva la nota al pie. "
+            f"Reviselos antes de mandar el documento al distribuidor."
+            if _pend else ""
+        )
         await estado.edit_text(
             f"<b>Listo: {telegram_notify._esc(nombre)}</b>\n\n"
             f"Solicitud: <code>{telegram_notify._esc(id_limpio)}</code> "
             f"({_origen})\n"
             f"Items para cotizar: <b>{len(_bom)}</b>\n\n"
-            "La seccion <i>BILL OF MATERIALS</i> va en ingles, con CLIN, NSN, "
-            "cantidad y unidad: es la que se manda al distribuidor. Compruebe "
-            "el proveedor antes de enviarla.",
+            "Todo el texto del documento va en ingles tecnico: descripciones, "
+            "referencias a planos, requisitos de entrega y condiciones. La "
+            "seccion <i>BILL OF MATERIALS</i> lleva CLIN, NSN, cantidad y "
+            "unidad: es la que se manda al distribuidor." + _aviso_pend,
             parse_mode=ParseMode.HTML,
         )
         await update.message.reply_document(

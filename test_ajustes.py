@@ -315,8 +315,16 @@ if _txt:
 
     print()
     print("  Documento privado, no oficial:")
+    # El descargo paso a ingles con el resto del texto del PDF (v3.2.0). La
+    # comprobacion es la misma de siempre: que el documento diga que no es
+    # oficial. El castellano pasa a ser una NEGATIVA: si aparece, es que queda
+    # texto sin traducir, que es justo lo que se queria evitar.
+    _txt_bajo = _txt.lower()
     check("  Dice que NO es documento oficial del gobierno",
-          "not a document" in _txt.lower() or "No es un documento oficial" in _txt)
+          "not an official document" in _txt_bajo
+          or "not a document" in _txt_bajo)
+    check("  Y el descargo ya no esta en castellano",
+          "no es un documento oficial" not in _txt_bajo)
     # Y que no lleve nada que lo parezca.
     for prohibido in ("UNITED STATES GOVERNMENT", "DEPARTMENT OF DEFENSE SEAL",
                       "GPO", "OFFICIAL USE ONLY", "SEAL"):

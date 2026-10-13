@@ -340,7 +340,13 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
 
     # --- Titulo ---
     f.append(Paragraph("PURCHASE ORDER", e["titulo"]))
-    f.append(Paragraph("Orden de compra emitida por L.A.M.B. Logistics LLC",
+    # En ingles como todo lo demas. Este iba en castellano y se quedaba fuera
+    # de la comprobacion del diccionario porque no lo genera desde_analisis:
+    # lo escribe generar_po() aqui mismo. Por eso las pruebas de la capa
+    # daban verde y el documento seguia teniendo castellano, que es
+    # exactamente lo que no se debe comprobar: el paso intermedio, no el
+    # documento que va al distribuidor.
+    f.append(Paragraph("Purchase order issued by L.A.M.B. Logistics LLC",
                        e["subtitulo"]))
     f.append(Spacer(1, 0.16 * inch))
 
@@ -816,11 +822,21 @@ def _bom_desde_analisis(analisis: dict) -> list[dict]:
     unidad = (analisis.get("unidad_medida") or "EA").upper()
     if unidad not in _UOIS:
         unidad = "EA"
+    # El texto viene de Gemini, en castellano, asi que pasa por la misma capa
+    # de traduccion que las lineas de la orden.
+    #
+    # El numero de modelo NO se traduce, y no es una excepcion por pereza: es
+    # un identificador. Traducirlo seria fabricar un numero de parte que no
+    # existe, y un distributoror que luego no encuentra el material contesta
+    # lo que sea. Por eso el detector de castellano salta los identificadores
+    # alfanumericos en vez de marcarlos como pendientes.
     desc = (analisis.get("producto") or "").strip()
     modelo = (analisis.get("modelo_especifico") or "").strip()
     if modelo and modelo.lower() not in desc.lower():
         desc = f"{desc} ({modelo})".strip()
     spec = (analisis.get("especificacion_tecnica_clave") or "").strip()
+    desc, _pd = _ingles(desc, _ACORTAR["descripcion"])
+    spec, _ps = _ingles(spec, _ACORTAR["especificacion"])
     return [{
         "clin": "1",
         "parte": modelo,
@@ -830,6 +846,423 @@ def _bom_desde_analisis(analisis: dict) -> list[dict]:
         "unidad": unidad,
         "precio": "",
     }]
+
+
+# --- Capa de traduccion al ingles tecnico -----------------------------------
+#
+# Se aplica SOLO al texto que produce Gemini, que es el unico que no controlo
+# yo. El texto que el propio modulo genera (instrucciones, condiciones, notas)
+# se escribe en ingles directamente: traducir una cadena que uno mismo acaba de
+# escribir es un rodeo que solo puede salir mal.
+
+_TRADUCCIONES = {
+    # --- Las cuatro que pidio el usuario, con y sin tilde ---
+    "Material de Rodamiento": "Bearing Material",
+    "material de rodamiento": "bearing material",
+    "Material de rodamientos": "Bearing Material",
+    "Requiere Certificado de Conformidad (CoC) a la entrega":
+        "Requires Certificate of Conformance (CoC) upon delivery",
+    "requiere certificado de conformidad (CoC) a la entrega":
+        "requires certificate of conformance (CoC) upon delivery",
+    "Certificado de Conformidad (CoC)":
+        "Certificate of Conformance (CoC)",
+    "certificado de conformidad (CoC)":
+        "certificate of conformance (CoC)",
+    "Certificado de Conformidad": "Certificate of Conformance",
+    "certificado de conformidad": "certificate of conformance",
+    "Certificado de calidad": "Certificate of conformance to specification",
+    # --- Planos,Normas y documentacion ---
+    "plano de inspeccion": "inspection drawing",
+    "Plano de inspeccion": "Inspection drawing",
+    "plano de diseno": "design drawing",
+    "planos de montaje": "assembly drawings",
+    "referencia de plano": "drawing reference",
+    "plano de referencia": "reference drawing",
+    # --- Calidad e inspeccion ---
+    "requisitos de calidad": "quality requirements",
+    "control de calidad": "quality control",
+    "nivel de calidad": "quality level",
+    "procedimiento de inspeccion": "inspection procedure",
+    "informe de inspeccion": "inspection report",
+    "primera inspeccion": "first article inspection",
+    "pruebas de aceptacion": "acceptance tests",
+    "inspeccion visual": "visual inspection",
+    "especificacion tecnica": "technical specification",
+    "Especificacion tecnica": "Technical specification",
+    # --- Materiales y acabado ---
+    "material original": "original manufacturer material",
+    "material nuevo": "brand new material",
+    "kit de repuestos": "spare parts kit",
+    "Kit de repuestos": "Spare Parts Kit",
+    "sello mecanico": "mechanical seal",
+    "junta mecanica": "mechanical gasket",
+    "acero inoxidable": "stainless steel",
+    "acero al carbono": "carbon steel",
+    "material de fundicion": "casting material",
+    "fundicion de precision": "precision casting",
+    "reacondicionado": "refurbished",
+    "reconstruido": "remanufactured",
+    "original de fabrica": "factory original",
+    "new or unused": "new or unused",
+    # --- Suministro y entrega ---
+    "plazo de entrega": "delivery lead time",
+    "Plazo de entrega": "Delivery lead time",
+    "entrega inmediata": "immediate delivery",
+    "entrega parcial": "partial shipment",
+    "embalaje apto para transporte": "packaging suitable for transportation",
+    "embalaje apta para transporte": "packaging suitable for transportation",
+    "conservar el producto": "preserve the material",
+    "condiciones de entrega": "delivery conditions",
+    # --- Administracion y comercial ---
+    "periodo de garantia": "warranty period",
+    "numero de serie": "serial number",
+    "numero de parte": "part number",
+    "Numero de parte": "Part Number",
+    "codigo de parte": "part number",
+    "codigo NSN": "NSN code",
+    "orden de compra": "purchase order",
+    "Orden de compra": "Purchase Order",
+    "nueva fabricacion": "new manufacture",
+    # --- Sustantivos: se pueden cambiar sueltos porque el ingles es el mismo
+    #     o casi, y traduciarlos nunca rompe la frase ---
+    "tolerancia": "tolerance",
+    "tolerancias": "tolerances",
+    "diametro": "diameter",
+    "diametral": "diametral",
+    "longitud": "length",
+    "espesor": "thickness",
+    "materiales": "materials",
+    "generico": "generic",
+    "defectuoso": "defective",
+    "corroido": "corroded",
+    "aprobado": "approved",
+    "aprobada": "approved",
+    "obligatorio": "mandatory",
+    "obligatoria": "mandatory",
+    "obligatorios": "mandatory",
+    "requerido": "required",
+    "requerida": "required",
+    "requeridos": "required",
+    "requeridas": "required",
+    "opcional": "optional",
+    # Palabras que son validas tal cual en los dos idiomas. Se ponen para que
+    # el detector de castellano NO las marque como pendientes: "new",
+    # "original", "lot", "revision" son ingles valido y no hay nada que hacer.
+    "original": "original",
+    "nuevo": "new",
+    "nueva": "new",
+    "lote": "lot",
+    "revision": "revision",
+    "inspeccion": "inspection",
+    "inspección": "inspection",
+    "calidad": "quality",
+    "entrega": "delivery",
+    "embalaje": "packaging",
+    "marcado": "marking",
+    "etiquetado": "marking",
+    "cantidad": "quantity",
+    "precio": "price",
+    "fabricante": "manufacturer",
+    "modelo": "model",
+    "transporte": "transportation",
+    "remision": "shipment",
+    "garantia": "warranty",
+}
+
+# Las frases con un hueco variable se evaluan ANTES que el diccionario, que va
+# palabra a palabra. "Segun plano MS-3305" tiene que convertirse entero en
+# "Per Drawing", no en "Per plano MS-3305".
+# --- PASADA 1: REFERENCIAS -----------------------------------------------------
+#
+# Primero de todo, y por un motivo concreto: son las unicas reglas que CAPTURAN
+# un identificador. "plano numero MS-3305" tiene que convertirse en "Drawing
+# MS-3305" antes de que ninguna otra pasada le toque el "plano" y se lleve el
+# codigo por delante.
+_REFERENCIAS_TRADUCCION = [
+    (re.compile(r"\bseg[uú]n\s+plano\s+n[uú]mero\s+"
+                r"([A-Z0-9][A-Z0-9./-]{2,24})", re.I),
+     r"Per Drawing \1"),
+    (re.compile(r"\bplano\s+n[uú]mero\s+([A-Z0-9][A-Z0-9./-]{2,24})", re.I),
+     r"Drawing \1"),
+    (re.compile(r"\bn[uú]mero\s+de\s+parte\s+([A-Z0-9][A-Z0-9./-]{2,24})",
+                re.I), r"Part Number \1"),
+    (re.compile(r"\bparte\s+n[uú]mero\s+([A-Z0-9][A-Z0-9./-]{2,24})", re.I),
+     r"Part Number \1"),
+]
+
+# --- PASADA 2: VERBO + SUSTANTIVO ---------------------------------------------
+#
+# Ahora, y antes que las frases. El verbo es lo que da sentido a la frase
+# entera: "plano de inspeccion" es "inspection drawing" SOLO si lo precede un
+# "complies with". Sin el verbo es un sustantivo suelto, y si se ejecutara
+# despues, "cumple plano de inspeccion" salia "Cumple Inspection Drawing",
+# con el verbo sin traducir.
+#
+# El "planos?" con interrogacion cubre "plano" y "planos", y el grupo
+# opcional cubre "cumple el plano", "cumple los planos", "cumple con el
+# plano" y el "cumple plano" a secas, que es como sale en los avisos.
+_VERBOS_TRADUCCION = [
+    # El verbo con el sustantivo delante de el. Estas van PRIMERO entre los
+    # verbos porque "plano de inspeccion" con un identificador detras tambien
+    # existe como sustantivo suelto (ver el final de la lista), y si esa
+    # ganara, el verbo se quedaria sin traducir.
+    (re.compile(r"\bcumple\s+(?:con\s+)?(?:los?\s+|las?\s+|el\s+)?"
+                r"planos?\s+de\s+inspecci[oó]n\b", re.I),
+     "Complies with Inspection Drawing"),
+    (re.compile(r"\bcumple\s+(?:con\s+)?(?:los?\s+|las?\s+|el\s+)?"
+                r"planos?\s+de\s+montaje\b", re.I),
+     "Complies with Assembly Drawing"),
+    (re.compile(r"\bcumple\s+(?:con\s+)?(?:los?\s+|las?\s+|el\s+)?"
+                r"planos?\s+de\s+montaje\b", re.I),
+     "Complies with Assembly Drawing"),
+    (re.compile(r"\bcumple\s+(?:con\s+)?(?:los?\s+|las?\s+|el\s+)?"
+                r"planos?\b(?!\s+n[uú]mero)", re.I),
+     "Complies with Drawing"),
+    (re.compile(r"\bcumple\s+(?:con\s+)?(?:los?\s+|las?\s+|el\s+)?"
+                r"especificaci[oó]n\b", re.I),
+     "Complies with Specification"),
+    (re.compile(r"\bde\s+acuerdo\s+con\s+(?:los?\s+|las?\s+|el\s+)?"
+                r"planos?\s+de\s+inspecci[oó]n\b", re.I),
+     "In Accordance with Inspection Drawing"),
+    (re.compile(r"\bde\s+acuerdo\s+con\s+(?:los?\s+|las?\s+|el\s+)?"
+                r"planos?\b", re.I),
+     "In Accordance with Drawing"),
+    (re.compile(r"\bde\s+acuerdo\s+con\s+(?:los?\s+|las?\s+|el\s+)?"
+                r"especificaci[oó]n\b", re.I),
+     "In Accordance with Specification"),
+    (re.compile(r"\bseg[uú]n\s+(?:los?\s+|las?\s+|el\s+)?"
+                r"planos?\b(?!\s+n[uú]mero)", re.I),
+     "Per Drawing"),
+    (re.compile(r"\bseg[uú]n\s+(?:los?\s+|las?\s+|el\s+)?normas?\b", re.I),
+     "Per Standard"),
+    (re.compile(r"\bseg[uú]n\s+(?:los?\s+|las?\s+|el\s+)?"
+                r"especificaci[oó]n\b", re.I),
+     "Per Specification"),
+    (re.compile(r"\bse\s+requiere\b", re.I), "is required"),
+    (re.compile(r"\bdebe\s+entregarse\b", re.I), "must be delivered"),
+    (re.compile(r"\bdebe\s+entregar\b", re.I), "must be delivered"),
+    (re.compile(r"\bdebe\s+incluir\b", re.I), "must include"),
+    (re.compile(r"\bdebe\s+ser\b", re.I), "must be"),
+    (re.compile(r"\bno\s+se\s+acepta\b", re.I), "is not accepted"),
+    (re.compile(r"\bno\s+acepta\b", re.I), "does not accept"),
+    (re.compile(r"\bde\s+acuerdo\s+con\b", re.I), "in accordance with"),
+    # Sustantivo con identificador y SIN verbo delante. Van las ultimas a
+    # proposito: si hay un verbo, las de arriba ya han actuado y aqui ya no
+    # queda nada quecolgado. "plano de inspeccion DLA" sin verbo se lee
+    # "Inspection Drawing DLA", que es correcto; con verbo, gana el verbo.
+    (re.compile(r"\bplanos?\s+de\s+inspecci[oó]n\s+"
+                r"([A-Z0-9][A-Z0-9./-]{2,24})", re.I),
+     r"Inspection Drawing \1"),
+    (re.compile(r"\bplanos?\s+de\s+montaje\s+"
+                r"([A-Z0-9][A-Z0-9./-]{2,24})", re.I),
+     r"Assembly Drawing \1"),
+]
+
+# --- PASADA 3 Y 4: EL DICCIONARIO, PARTIDO EN FRASES Y PALABRAS ---------------
+#
+# El diccionario se ordena una vez al cargar el modulo, no en cada llamada, y
+# se parte en dos porque una palabra suelta NUNCA debe ganar a una frase. Si
+# "entrega" se ejecutara antes que "a la entrega", esa palabra se traduciria
+# dentro de una frase en la que significa "upon" y saldia "a la delivery".
+_TRADUCCIONES_ORDENADAS = sorted(
+    _TRADUCCIONES.items(), key=lambda kv: -len(kv[0]))
+_FRASES_ORDENADAS = [(k, v) for k, v in _TRADUCCIONES_ORDENADAS if " " in k]
+_PALABRAS_ORDENADAS = [(k, v) for k, v in _TRADUCCIONES_ORDENADAS if " " not in k]
+
+# Marcadores de castellano. Son PALABRAS COMPLETAS con limites de palabra, no
+# letras acentuadas: un NSN puede traer una "o" acentuada por el ruido de la
+# API y marcaria el documento entero como pendiente.
+# Palabras de CASTELLANO LIBRE, no solo vocabulario tecnico.
+_FUNCIONES_ESPANOL = frozenset("""
+de la el los las del para por sobre entre hasta desde segun
+que una unos unas ser estar haber tener debe deben poden puede
+cuando donde porque aunque tambien entonces cada todo toda todos todas
+otro otra mismo misma este esta estos estas ese esa aquel aquella
+nuestro nuestra sus mediante unicamente solamente mas muy solo sola
+aun ya aqui alli ahi alla ademas ningun ninguna cualquiera alguien nada
+""".split())
+
+_PALABRAS_ESPANOL = frozenset("""
+segun plano planos clase diseno inspeccion certificado certificacion
+conformidad conforme calidad requisito requisitos obligatorio obligatoria
+obligatorio rodamiento rodamientos mecanico mecanica producto productos
+pieza piezas parte partes unidad unidades cantidad cantidades precio precios
+costo costos entrega entregas remision envio expedicion embalaje
+embalado transporte transportacion etiquetado marcado garantia facturacion
+revision lote serie clases fabricante modelo orden compra aceptacion saliente
+llegada salida
+""".split())
+
+
+def _queda_espanol(texto: str) -> list[str]:
+    """
+    Que palabras del castellano se han quedado sin traducir.
+
+    Devuelve LAS PALABRAS, no un si/no. La diferencia se nota cuando hay que
+    avisar: "queda texto sin traducir" obliga al usuario a buscarlo en el PDF,
+    y "queda 'embalaje' y 'transporte'" le dice exactamente donde mirar.
+
+    Los identificadores se saltan antes de mirar. Un NSN, un CAGE, un numero
+    de plano y un numero de parte son cadenas alfanumericas: se leen igual en
+    los dos idiomas, y marcarlos como pendientes haria que TODO documento
+    saliera marcado, que es lo mismo que no marcar nada.
+    """
+    if not texto:
+        return []
+    limpio = re.sub(r"\b\d{4}-\d{2}-\d{3}-\d{4}\b", " ", texto)
+    limpio = re.sub(r"\b[A-Z]{2,}[-/]?\d[A-Z0-9./-]{2,}\b", " ", limpio)
+    limpio = re.sub(r"\b\d{3,}\b", " ", limpio)
+
+    # El detector no puede vivir solo del vocabulario de adquisiciones: cuanto
+    # mas raro es el castellano, menos probable es que este en la lista, que es
+    # justo al reves de lo que hace falta. "Pantalones de gamuza para el
+    # almirante" no tiene ni una palabra tecnica y se saltaba sin marcar.
+    #
+    # Lo que si esta en TODA frase castellana son las palabras de funcion: las
+    # mas frecuentes del idioma, y casi ninguna existe en ingles. Se descartan
+    # a proposito las que si son ingles o casi: "no" (puede ser N/O, "not
+    # offered"), "con" (sustantivo raro), "tan" y "son".
+    #
+    # Se comparan en minuscula y sin acentos, que es como estan escritas.
+    encontradas = []
+    for palabra in re.findall(r"[A-Za-z]{2,}", limpio):
+        b = palabra.lower()
+        if b in _PALABRAS_ESPANOL and b not in encontradas:
+            encontradas.append(b)
+        elif b in _FUNCIONES_ESPANOL and b not in encontradas:
+            encontradas.append(b)
+    # Las vocales acentuadas y la enye, solo en palabras con minúscula: un
+    # nombre propio en mayúsculas no es castellano pendiente.
+    for palabra in re.findall(r"[A-Za-zÀ-ÿ]{3,}", limpio):
+        if re.search(r"[áéíóúñ]", palabra) and not palabra.isupper():
+            b = palabra.lower()
+            if b not in encontradas:
+                encontradas.append(b)
+    return encontradas
+
+
+# Longitud maxima de un texto en una celda de la tabla.
+#
+# El limite sale de la medida, no de gusto: la celda de especificacion mide
+# unas 3 pulgadas y el texto va a 7,5 pt, asi que 1200 caracteres salen a
+# unas veinte lineas, que caben de sobra en la pagina.
+#
+# Hay tope porque una fila de tabla mas alta que la pagina NO SE PUEDE PARTIR:
+# reportlab no sabe donde cortarla y lanza LayoutError, y el usuario se queda
+# sin documento. Medido con 3000 caracteres sin espacios:
+#
+#     LayoutError: Flowable <Table 3 rows x 6 cols(tallest row 802)>
+#
+# No es teorico. La especificacion tecnica la escribe Gemini y no hay tope en
+# su salida, y una descripcion pegada desde un PDF de SAM.gov con los saltos
+# de linea perdidos llega al mismo sitio.
+#
+# Recortar con marca visible es lo honesto. Dejar la fila mas alta que la
+# pagina deja al usuario sin nada; truncar en silencio es lo peor de los tres,
+# porque no se sabria que le falta texto. Y la marca lleva cuantos caracteres
+# se han quedado fuera, para que el usuario vaya al aviso a buscarlos en vez
+# de suponer que el documento los tenia.
+_ACORTAR = {"descripcion": 400, "especificacion": 1200}
+
+
+def _recortar(texto: str, limite: int) -> str:
+    """Recorta a `limite` caracteres dejando constancia de lo que falta."""
+    t = str(texto or "")
+    if limite <= 0 or len(t) <= limite:
+        return t
+    return "%s... [%d more characters - full text at https://sam.gov]" % (
+        t[:limite].rstrip(), len(t) - limite)
+
+
+def _a_ingles(texto: str) -> str:
+    """
+    Traduce castellano tecnico a ingles. Lo que no reconoce, lo deja.
+
+    No lanza nunca y nunca devuelve None: un texto vacio sigue siendo vacio, y
+    un texto que no se puede tocar mas se devuelve tal cual para que la
+    comprobacion de pendientes lo marque.
+    """
+    if not texto:
+        return ""
+    t = str(texto)
+    # Las cuatro pasadas van en este orden y el orden NO es arbitrario. Se ha
+    # medido: si se invierte cualquiera de las dos primeras, los propios
+    # patrones que pidio el usuario salen a medias.
+    for patron, destino in _REFERENCIAS_TRADUCCION:
+        t = patron.sub(destino, t)
+    for patron, destino in _VERBOS_TRADUCCION:
+        t = patron.sub(destino, t)
+    # El \b alrededor no es opcional: sin limites, "plan" se come "plane" y
+    # "coc" se come "cocina". En este codigo las colisiones por subcadena se
+    # repiten sin parar.
+    for origen, destino in _FRASES_ORDENADAS:
+        t = re.sub(r"\b%s\b" % re.escape(origen), destino, t, flags=re.I)
+    for origen, destino in _PALABRAS_ORDENADAS:
+        t = re.sub(r"\b%s\b" % re.escape(origen), destino, t, flags=re.I)
+    return t
+
+
+MARCA_PENDIENTE = "[SEE NOTE]"
+
+
+def _ingles(texto: str, limite: int = 0) -> tuple[str, bool]:
+    """
+    Traduce, y si no puede traducirlo ENTERO, no lo traduce a medias.
+
+    Devuelve (texto, pendiente).
+
+    TODO O NADA, Y POR QUE
+
+    Medido con un aviso real:
+
+        entra : "Este aviso es una solicitud de cotizacion. Se solicita
+                 material de rodamiento segun plano MS-3305. Cantidad: 50 KIT."
+        sale  : "Este aviso es una solicitud de cotizacion. Se solicita Bearing
+                 Material Per Drawing MS-3305. quantity: 50 KIT. [SEE NOTE]"
+
+    Eso es lo PEOR de las tres opciones, y merece explicarse:
+
+    - Traducirlo todo con un modelo de lenguaje seria lo ideal, pero aqui no
+      se puede llamar a uno sin gastar la cuota de produccion.
+    - No traducir nada seria honesto.
+    - Traducirlo a medias parece correcto y no lo es. "Se solicita Bearing
+      Material" esta en las dos lenguas a la vez, se lee bien de un vistazo, y
+      manda a un distribuidor un texto que no es ninguno de los dos idiomas.
+      Un tecnico que lo lea nota que "cantidad" quedo como "quantity" en
+      minúscula en medio de una frase que ya no es castellana, y tiene que
+      parar a preguntarse que pasa. Peor que no traducir, porque el effort de
+      revisarlo es mayor y no se da cuenta de que falta informacion.
+
+    Asi que: si despues de traducir queda UNA palabra de castellano, se
+    devuelve el ORIGINAL entero con la marca, no la traduccion a medias. El
+    usuario ve lo que dijo Gemini y decide. Lo que nunca se hace es inventar
+    el equivalente en ingles.
+
+    Lo que si se traduce entero, se traduce:
+
+        "Material de Rodamiento M7A1"                -> "Bearing Material M7A1"
+        "Segun Plano MS-3305. Requiere CoC a la      -> "Per Drawing MS-3305.
+         entrega. Cumple plano de inspeccion DLA."      Requires CoC upon
+                                                         delivery. Complies
+                                                         with Inspection
+                                                         Drawing DLA."
+
+    `limite` recorta si el texto es mas largo, para que una celda no reviente
+    la maquetacion. 0 significa que no se recorta. El recorte se aplica al
+    original cuando se devuelve sin traducir, y a la traduccion cuando si.
+    """
+    t = _a_ingles(texto)
+    if not t.strip():
+        return "", False
+    if _queda_espanol(t):
+        # Se devuelve el ORIGINAL, no la traduccion parcial.
+        original = str(texto or "")
+        if limite:
+            original = _recortar(original, limite)
+        return "%s %s" % (original, MARCA_PENDIENTE), True
+    if limite:
+        t = _recortar(t, limite)
+    return t, False
 
 
 def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
@@ -940,6 +1373,33 @@ def _instrucciones_ingles(analisis: dict) -> str:
     return "\n".join("- " + x for x in lineas)
 
 
+def _notas_ingles(analisis: dict, pendientes: int = 0) -> str:
+    """
+    El pie del documento, en ingles, mas el aviso si algo quedo sin traducir.
+
+    La primera parte es la que estaba antes, en castellano. Se traduce porque
+    el objetivo es que no quede frase en castellano en el PDF, y porque este
+    texto LLE al proveedor: la aclaracion de que el documento no es oficial
+    tiene que entenderla la contraparte, no solo el usuario.
+
+    La segunda parte es nueva y sale SOLO si de verdad hay algo pendiente. Un
+    documento que va a un distribuidor no puede llevar texto en otro idioma sin
+    avisarlo, y el aviso va en el PDF y en el mensaje de Telegram, para que el
+    usuario lo sepa antes de mandar el fichero y no cuando el proveedor ya le
+    ha preguntado que significa una linea.
+    """
+    texto = ("Document issued by L.A.M.B. Logistics LLC. This is not an "
+             "official document of the U.S. Government or any agency.")
+    if pendientes:
+        texto += (
+            "\n\nNOTE: %d field(s) marked [%s] contain source text that was "
+            "not machine-translated. Verify the wording before issuing this "
+            "document to the supplier."
+            % (pendientes, MARCA_PENDIENTE.strip("[]"))
+        )
+    return texto
+
+
 def desde_analisis(analisis: dict, proveedor: dict | None = None,
                      db_path: str | None = None) -> dict:
     """
@@ -959,15 +1419,28 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # que el importe de la linea no salga en cero.
         precio = _num(analisis.get("costo_total_usd")) / cant if cant else 0.0
 
+    # Descripcion y especificacion vienen de Gemini, en castellano, y no se
+    # pueden reescribir porque cambian en cada analisis. Se traducen con la
+    # capa de arriba y lo que no se traduzca se marca, para que el usuario no
+    # mande al distribuidor creyendo que esta todo en ingles.
+    #
+    # El orden importa: primero se compone el modelo con la descripcion y
+    # despues se traduce el bloque entero. Al reves, el modelo solo, que
+    # casi siempre es un codigo, se traduciria sin necesidad.
     desc = (analisis.get("producto") or "").strip()
     modelo = (analisis.get("modelo_especifico") or "").strip()
     if modelo and modelo.lower() not in desc.lower():
         desc = f"{desc} ({modelo})".strip()
     spec = (analisis.get("especificacion_tecnica_clave") or "").strip()
+    desc, _p1 = _ingles(desc, _ACORTAR["descripcion"])
+    spec, _p2 = _ingles(spec, _ACORTAR["especificacion"])
+    # El lugar de entrega tambien lo escribo yo en las instrucciones, pero
+    # aparece suelto en algunos analisis.
+    lugar, _p3 = _ingles(analisis.get("lugar_entrega") or "")
 
     lineas.append({
         "sku": (analisis.get("solicitation") or "").strip(),
-        "descripcion": desc or "Producto fisico segun especificacion de SAM.gov",
+        "descripcion": desc or "Physical item per the SAM.gov specification",
         "especificacion": spec,
         "cantidad": cant,
         "unidad": unidad,
@@ -975,19 +1448,26 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         "plazo": "",
     })
 
+    # El texto que este modulo genera va en ingles de origen, no traducido.
+    # No es un detalle de estilo: estas lineas y las condiciones de pago de
+    # abajo van dirigidas al DISTRIBUIDOR, y el documento se manda a uno de
+    # Albuquerque. Un proveedor que lee "Pago a 30 dias contra factura" en un
+    # papel redactado en ingles no sabe aplicar las condiciones de pago, y esa
+    # es exactamente la linea que no puede quedar sin entender.
     inst = [
-        f"Entrega en: {analisis.get('lugar_entrega') or 'instalacion indicada por el gobierno'}",
-        "Embalaje apta para transporte: el proveedor debe embalar para "
-        "conservar el producto en condiciones de entrega.",
-        "Documentos a incluir con el envio: packing list y certificado de "
-        "conformidad.",
+        f"Delivery to: {analisis.get('lugar_entrega') or 'the installation designated by the Government'}",
+        "Packaging suitable for transportation: the supplier shall pack the "
+        "material so that it is preserved in the condition required for "
+        "delivery.",
+        "Documents to be included with the shipment: packing list and "
+        "certificate of conformance (CoC).",
     ]
     if analisis.get("limite"):
-        inst.append("El material debe entregarse antes del "
+        inst.append("The material must be delivered on or before "
                     f"{_fecha_pdf(analisis.get('limite'))}.")
     if proveedor:
-        inst.append(" remitir la factura a la direccion de la cabecera, "
-                    "indicando el numero de Purchase Order.")
+        inst.append(" Remit the invoice to the address shown on the "
+                    "letterhead, quoting the Purchase Order number.")
 
     # --- Seccion de cotizacion en ingles ---
     #
@@ -998,6 +1478,22 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     #
     # "bom_lineas" es la via para que quien llama pase un BOM ya construido.
     _bom = list(analisis.get("bom_lineas") or []) or _bom_desde_analisis(analisis)
+
+    # Cuantos campos del documento llevan texto sin traducir.
+    #
+    # Se cuentan DESPUES de traducir, sobre el texto final, que es el que se
+    # imprime. Contarlos antes mediria el castellano de partida, que ya no
+    # existe, y el numero no significaria nada.
+    #
+    # El lugar de entrega se mira aparte porque va en las instrucciones, que se
+    # generan despues de esta linea y por tanto no estan en _bom.
+    pendientes = sum(1 for x in (_p1, _p2, _p3) if x)
+    for _b in _bom:
+        for _campo in ("descripcion", "especificacion"):
+            if MARCA_PENDIENTE in str(_b.get(_campo) or ""):
+                pendientes += 1
+    if MARCA_PENDIENTE in str(inst):
+        pendientes += 1
 
     return {
         # El numero se genera aqui y no dentro de generar_po() para que el
@@ -1018,16 +1514,17 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         "proveedor_dir": prov.get("direccion", ""),
         "lineas": lineas,
         "instrucciones": "\n".join(inst),
+        # Condiciones en ingles, por lo mismo que las instrucciones: van al
+        # proveedor. El factoring se declara porque es lo que hace posible la
+        # operacion, y porque el proveedor necesita saber a donde remitir la
+        # factura para que el pago le llegue.
         "condiciones": (
-            "Pago a 30 dias contra factura. L.A.M.B. Logistics LLC usa "
-            "factoring dentro de EE.UU.; indiquese el despacho a la direccion "
-            "de la cabecera para la factorizacion.\n"
-            f"El material debe corresponder exactamente a la especificacion "
-            f"de SAM.gov referencia "
+            "Payment 30 days net from invoice. L.A.M.B. Logistics LLC factors "
+            "receivables within the United States; remit the invoice to the "
+            "address shown on the letterhead for factoring.\n"
+            f"The material shall strictly conform to the SAM.gov "
+            f"specification referenced "
             f"{analisis.get('solicitation') or 'N/A'}."
         ),
-        "notas": (
-            "Documento emitido por L.A.M.B. Logistics LLC. No es un documento "
-            "oficial del gobierno de EE.UU. ni de ninguna agencia."
-        ),
+        "notas": _notas_ingles(analisis, pendientes),
     }

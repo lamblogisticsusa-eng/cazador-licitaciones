@@ -6,6 +6,7 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 3.2.0 = todo el texto del PDF en ingles tecnico de adquisiciones
 # 3.1.0 = /pdf responde siempre: busca en SAM.gov por solnum y noticeid
 # cuando no esta en la base, con la hoja de Bill of Materials en ingles
 # para cotizar con el distribuidor, y sin el bug de reply_text sin await.
@@ -36,7 +37,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "3.1.0"
+KYOMOTO_VERSION = "3.2.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
