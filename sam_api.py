@@ -30,6 +30,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 from urllib.parse import urlencode
@@ -315,6 +316,193 @@ def obtener_descripcion(notice_id: str, opp: dict | None = None) -> str:
     except SamError as e:
         log.warning("No se pudo bajar la descripcion de %s: %s", notice_id, e)
         return ""
+
+
+def limpiar_solicitud(bruto) -> str:
+    """
+    Deja el numero de solicitud limpio y comparable.
+
+    Lo que llega del usuario tiene por dentro cosas que no se ven: espacios
+    que no son espacios, saltos de linea pegados, comillas, guiones que el
+    usuario escribe por costumbre y que SAM.gov no quiere, y distinta
+    capitalizacion.
+
+    Se quitan los caracteres invisibles de verdad (los que tienen la categoria
+    Cf de Unicode, como el espacio duro U+00A0 o el guion sin fuente U+2010),
+    se pasan a mayusculas y se dejan unicamente letras, digitos y guiones.
+
+    Los guiones SE CONSERVAN. El usuario escribe "W9127-N26-QA-145" con la
+    misma intencion que "W9127N26QA145", y quitarselos aqui solo haria que
+    unas entradas funcionaran y otras no segun como las escriba. La comparacion
+    real con la API ignora los guiones, y eso se hace en otro sitio.
+    """
+    texto = str(bruto or "")
+    # Los Cf son invisibles: espacio duro, guion corto, zero width joiner,
+    # BOM. Se van aunque no se vean.
+    limpio = "".join(c for c in texto if unicodedata.category(c) != "Cf")
+    limpio = limpio.replace("\u00a0", " ").replace("\u200b", "")
+    limpio = limpio.strip().upper()
+    return "".join(c for c in limpio if c.isalnum() or c == "-")
+
+
+def buscar_por_solicitud(solnum: str, dias: int = 365,
+                         estado: dict | None = None) -> dict | None:
+    """
+    Busca una licitacion por su numero en SAM.gov. None si no la encuentra.
+
+    dias=365 porque la ventana por defecto de la spec es de un ano, y una
+    licitacion de hace ocho meses con el plazo ainda abierto es justo el caso
+    que el usuario quiere cotizar. Con la ventana de 10 dias del escaneo
+    diario no apareceria nunca.
+
+    NUNCA LANZA. Si la clave no esta, si la API da error, o si simplemente no
+    esta, se devuelve None. Un fallo de red aqui no puede tumbar el comando
+    /pdf, que es lo que hacia que el bot se quedara callado.
+
+    `estado` es opcional y solo para el llamante que sepa distinguir. Si se
+    pasa un diccionario, se rellena con:
+
+        {"fallo": True,  "motivo": "..."}   -> no se pudo PREGUNTAR
+        {"fallo": False, "motivo": "..."}   -> se pregunto y no hay nada
+
+    Sin ese diccionario, los dos casos se ven iguales, que es como antes: el
+    usuario recibe "no la encuentro" cuando en realidad la API no respondió, y
+    seSINENTA de un numero que sí funciona.
+    """
+    def _nota(fallo: bool, motivo: str):
+        if estado is not None:
+            estado["fallo"] = fallo
+            estado["motivo"] = motivo
+    if not config.SAM_API_KEY:
+        log.error("buscar_por_solicitud: no hay SAM_API_KEY")
+        _nota(True, "SAM_API_KEY no esta configurada")
+        return None
+
+    # Para la API se manda SIN guiones ni espacios: el numero canonico de
+    # SAM.gov no los lleva. Se comparan asi en ambos sentidos.
+    consulta = "".join(c for c in str(solnum or "") if c.isalnum())
+    if len(consulta) < 4:
+        log.warning("buscar_por_solicitud: numero demasiado corto: %r", solnum)
+        _nota(False, "el numero es demasiado corto para una solicitud")
+        return None
+
+    hoy = datetime.now(timezone.utc)
+    params = {
+        "api_key": config.SAM_API_KEY,
+        "postedFrom": _fecha(hoy - timedelta(days=dias)),
+        "postedTo": _fecha(hoy),
+        "offset": 0,
+        "limit": 20,
+        "solnum": consulta,
+    }
+    try:
+        r = _get(params, reintentos=2)
+    except SamError as e:
+        log.error("buscar_por_solicitud('%s') fallo: %s", solnum, e)
+        _nota(True, str(e)[:200])
+        return None
+
+    if r.status_code != 200:
+        log.error("buscar_por_solicitud('%s'): HTTP %s", solnum, r.status_code)
+        _nota(True, f"HTTP {r.status_code}")
+        return None
+    try:
+        datos = r.json()
+    except ValueError as e:
+        log.error("buscar_por_solicitud('%s'): respuesta no JSON: %s", solnum, e)
+        _nota(True, "la API devolvio algo que no es JSON")
+        return None
+
+    for opp in (datos.get("opportunitiesData") or []):
+        # Comparacion laxa: se quitan guiones y espacios de los dos lados, y
+        # se pasa a mayusculas. Asi el usuario puede escribirlo como le salga.
+        api = "".join(c for c in str(opp.get("solicitationNumber") or "").upper()
+                      if c.isalnum())
+        if api and api == consulta:
+            log.info("Encontrada %s (%s)", api, opp.get("noticeId"))
+            _nota(False, "")
+            return opp
+        # La API a veces devuelve el numero con otro formato de bloque. Si solo
+        # hay un resultado y su numero contiene al que se pidio, se acepta:
+        # es casi con seguridad el mismo, y descartarlo deja al usuario sin
+        # respuesta cuando el numero es correcto.
+        if api and (api.startswith(consulta) or consulta.startswith(api)):
+            log.info("Encontrada %s por coincidencia parcial con %s",
+                     api, consulta)
+            _nota(False, "")
+            return opp
+
+    total = datos.get("totalRecords") or 0
+    log.info("buscar_por_solicitud('%s'): sin resultados (totalRecords=%s)",
+             solnum, total)
+    _nota(False, "SAM.gov responde que no existe una solicitud asi")
+    return None
+
+
+def buscar_notice(notice_id: str, estado: dict | None = None) -> dict | None:
+    """
+    Busca un aviso por su noticeId. None si no aparece.
+
+    Es el hermano de buscar_por_solicitud() y va por el otro lado: hay
+    oportunidades donde el usuario tiene el noticeId (sale en la URL de
+    SAM.gov) y no el solicitationNumber. Con una sola de las dos busquedas,
+    /pdf seguia fallando en silencio con la mitad de los casos.
+
+    Nunca lanza: si la API falla, se registra y se devuelve None.
+
+    `estado` funciona igual que en buscar_por_solicitud(): es lo que permite
+    distinguir "no existe" de "no pude preguntar". Sin el, los dos se ven
+    iguales.
+    """
+    def _nota(fallo: bool, motivo: str):
+        if estado is not None:
+            estado["fallo"] = fallo
+            estado["motivo"] = motivo
+
+    if not config.SAM_API_KEY:
+        log.error("buscar_notice: no hay SAM_API_KEY")
+        _nota(True, "SAM_API_KEY no esta configurada")
+        return None
+    nid = str(notice_id or "").strip()
+    if len(nid) < 6:
+        log.warning("buscar_notice: identificador demasiado corto: %r", notice_id)
+        _nota(False, "demasiado corto para ser un noticeId")
+        return None
+
+    hoy = datetime.now(timezone.utc)
+    params = {
+        "api_key": config.SAM_API_KEY,
+        "postedFrom": _fecha(hoy - timedelta(days=365)),
+        "postedTo": _fecha(hoy),
+        "offset": 0,
+        "limit": 5,
+        "noticeid": nid,
+    }
+    try:
+        r = _get(params, reintentos=2)
+    except SamError as e:
+        log.error("buscar_notice('%s') fallo: %s", nid, e)
+        _nota(True, str(e)[:200])
+        return None
+    if r.status_code != 200:
+        log.error("buscar_notice('%s'): HTTP %s", nid, r.status_code)
+        _nota(True, f"HTTP {r.status_code}")
+        return None
+    try:
+        datos = r.json()
+    except ValueError as e:
+        log.error("buscar_notice('%s'): respuesta no JSON: %s", nid, e)
+        _nota(True, "la API devolvio algo que no es JSON")
+        return None
+
+    for opp in (datos.get("opportunitiesData") or []):
+        if str(opp.get("noticeId") or "").strip().upper() == nid.upper():
+            log.info("Encontrado noticeId %s", nid)
+            _nota(False, "")
+            return opp
+    log.info("buscar_notice('%s'): sin resultados", nid)
+    _nota(False, "SAM.gov responde que no existe un aviso asi")
+    return None
 
 
 def throttle(respuesta: requests.Response) -> None:

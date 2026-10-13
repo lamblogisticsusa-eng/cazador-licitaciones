@@ -582,101 +582,212 @@ def _argtexto(update: Update) -> str:
 
 async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /pdf [ID] - genera el Purchase Order en PDF y lo manda al chat.
+    /pdf [ID] - genera la hoja de cotizacion en PDF y la manda al chat.
 
-    Sin ID lista los avisos analizados que hay disponibles. Con ID genera el
-    documento. Se puede añadir "| Nombre del distribuidor" para dejar el
-    proveedor puesto.
+    Sin ID lista los avisos analizados que hay. Con ID genera el documento.
+    Se puede anadir "| Nombre del distribuidor" para dejar el proveedor
+    puesto.
+
+    Busca primero en lo que Kyomoto ya analizo y, si no esta, PREGUNTA A
+    SAM.gov por el numero de solicitud. Antes solo miraba en la base local, y
+    por eso una solicitud que el bot no habia analizado no existia para este
+    comando: ese era el silencio.
     """
     import io as _io
 
     import pdf_generator as pdfg
+    import sam_api
     import store
 
-    args = _argtexto(update)
     chat_id = str(update.effective_chat.id)
+    args = _argtexto(update)
 
-    def _falta(texto):
-        update.message.reply_text(texto, parse_mode=ParseMode.HTML)
+    async def _falla(texto):
+        # await OBLIGATORIO. Sin el, update.message.reply_text() devuelve una
+        # corrutina que nunca llega a ejecutarse y el mensaje NO SE ENVIA: el
+        # bot se queda mudo, sin error y sin rastro en el log.
+        #
+        # Esto estaba asi en el codigo original de /pdf, y es exactamente el
+        # "no responde" del que se quejaba el usuario: los tres mensajes de
+        # este helper (sin argumentos, numero que no se entiende, y lista de
+        # disponibles) nunca llegaron a Telegram. El sintoma que lo delata es
+        # un aviso de Python al final de la ejecucion:
+        #
+        #     RuntimeWarning: coroutine 'reply_text' was never awaited
+        #
+        # que en un bot se pierde entre el ruido del log, y se lee como un
+        # problema de codigo sin importancia en vez de como un mensaje que no
+        # se envio nunca.
+        await update.message.reply_text(texto, parse_mode=ParseMode.HTML)
 
-    # --- Sin argumentos: que hay disponible ---
-    if not args:
-        vistos = store.analisis_recientes(limite=10)
-        if not vistos:
-            _falta(
-                "📄 <b>Aun no hay ningun aviso analizado</b>\n\n"
-                "El Purchase Order se genera a partir del analisis de una "
-                "oportunidad. Todavia no hay ninguno guardado.\n\n"
-                "En cuanto Kyomoto te mande la primera ficha, el numero de "
-                "solicitud de esa ficha es el que va aqui:\n"
-                "<code>/pdf W9127N26QA145</code>\n\n"
-                "Ojo: se genera a las 2 h del primer barrido, no de "
-                "inmediato."
-            )
-            return
-        lineas = ["📄 <b>Purchase Orders que puedo generar</b>\n"]
-        for a in vistos:
-            titulo = (a.get("title") or "")[:56]
-            sol = a.get("solicitation") or a.get("notice_id") or "?"
-            lineas.append(f"• <code>{telegram_notify._esc(sol)}</code> — {telegram_notify._esc(titulo)}")
-        lineas.append("")
-        lineas.append("Escribe <code>/pdf NUMERO</code> para generar el de ese.")
-        _falta("\n".join(lineas))
-        return
-
-    # --- Con argumentos: proveedor opcional tras "|" ---
+    # --- El argumento: primero el ID, luego el proveedor tras "|" ---
+    #
+    # Se separa por el pipe ANTES de limpiar, porque el nombre del proveedor
+    # lleva espacios y puede llevar un pipe dentro. Limpiar el bloque entero
+    # antes de partirlo dejaria el nombre reduced a un cafe.
     if "|" in args:
         id_buscado, proveedor_nombre = args.split("|", 1)
-        id_buscado = id_buscado.strip()
-        proveedor_nombre = proveedor_nombre.strip()
     else:
-        id_buscado, proveedor_nombre = args.strip(), ""
+        id_buscado, proveedor_nombre = args, ""
+    proveedor_nombre = proveedor_nombre.strip()
 
-    analisis = store.buscar_por_solicitud(id_buscado)
-    if not analisis:
-        vistos = store.analisis_recientes(limite=6)
-        extra = ""
-        if vistos:
-            extra = "\n\n<b>Disponibles ahora:</b>\n" + "\n".join(
-                f"• <code>{telegram_notify._esc(a.get('solicitation') or '?')}</code>"
-                for a in vistos
+    # --- Sin argumentos: que hay disponible ---
+    if not id_buscado.strip():
+        vistos = store.analisis_recientes(limite=10)
+        if not vistos:
+            await _falla(
+                "<b>Kyomoto todavia no tiene ningun aviso analizado</b>\n\n"
+                "El documento se arma a partir de una oportunidad. Puedes "
+                "usar el numero de solicitud de cualquier licitacion de "
+                "SAM.gov, aunque Kyomoto no la haya analizado antes:\n"
+                "<code>/pdf W9127N26QA145</code>\n\n"
+                "Ojo: si el aviso ya esta cerrado, el documento sale igualmente "
+                "como hoja de cotizacion, pero no se podra ofertar."
             )
-        _falta(
-            f"🤍 No encuentro ningun aviso con la solicitud "
-            f"<code>{telegram_notify._esc(id_buscado)}</code>.{extra}"
+            return
+        lineas = ["<b>Hojas de cotizacion que puedo generar ahora</b>\n"]
+        for a in vistos:
+            titulo = str(a.get("title") or "")[:56]
+            sol = a.get("solicitation") or a.get("notice_id") or "?"
+            lineas.append(
+                f"- <code>{telegram_notify._esc(sol)}</code>"
+                f" - {telegram_notify._esc(titulo)}"
+            )
+        lineas.append("")
+        lineas.append("Escribe <code>/pdf NUMERO</code> para generar esa.")
+        lineas.append("Y cualquiera de SAM.gov: <code>/pdf W9127N26QA145</code>")
+        await _falla("\n".join(lineas))
+        return
+
+    # --- Limpiar el identificador ANTES de responder, para que el mensaje
+    #     confirme el codigo ya entendido y no el que el usuario escribio ---
+    id_limpio = sam_api.limpiar_solicitud(id_buscado)
+    if not id_limpio:
+        await _falla(
+            "<b>No entendi el numero de solicitud</b>\n\n"
+            "Ejemplos validos:\n"
+            "<code>/pdf W9127N26QA145</code>\n"
+            "<code>/pdf w9127n26qa145 | Nombre del distribuidor</code>"
         )
         return
 
-    estado = update.message.reply_text("📄 Generando el Purchase Order...")
+    estado = await update.message.reply_text(
+        f"\u23f3 Consultando licitacion <code>"
+        f"{telegram_notify._esc(id_limpio)}</code> y preparando ficha "
+        f"tecnica para distribuidor..."
+    )
     try:
-        datos = pdfg.desde_analisis(
-            analisis, {"nombre": proveedor_nombre} if proveedor_nombre else None
-        )
+        await update.message.get_bot().send_chat_action(chat_id, "upload_document")
+    except Exception:
+        # Indicador decorativo: si falla, el comando sigue igual.
+        pass
+
+    try:
+        # --- 1) Lo que Kyomoto ya sabe ---
+        analisis = store.buscar_por_solicitud(id_limpio)
+
+        # --- 2) Si no, a preguntarselo a SAM.gov ---
+        #
+        # La API acepta solnum (numero de solicitud) y noticeid. Se prueban
+        # los dos porque hay avisos donde el usuario tiene uno y no el otro.
+        de_sam = False
+        fallo_api = ""
+        if not analisis:
+            # `estado` es lo que permite no mentirle al usuario: sin el, un
+            # 429 de SAM.gov y una solicitud inexistente se ven IGUALES, y
+            # el mensaje "no la encuentro" le haria dudar de un numero que sí
+            # funciona. Con el, se puede decir "no pude preguntar", que es lo
+            # que paso de verdad, y la distincion manda.
+            _est = {}
+            aviso = sam_api.buscar_por_solicitud(id_limpio, estado=_est)
+            if aviso is None:
+                _est2 = {}
+                aviso = sam_api.buscar_notice(id_limpio, estado=_est2)
+                if _est2.get("fallo"):
+                    fallo_api = _est2.get("motivo") or fallo_api
+            if aviso is None and _est.get("fallo"):
+                fallo_api = _est.get("motivo") or fallo_api
+            if aviso:
+                de_sam = True
+                analisis = pdfg.desde_aviso(aviso)
+                if proveedor_nombre:
+                    analisis["proveedor_nombre"] = proveedor_nombre
+
+        if not analisis and fallo_api:
+            # No es que no exista: es que no se pudo preguntar. Decirlo es la
+            # diferencia entre que el usuario lo intente otra vez en diez
+            # minutos y que lo de por bueno.
+            await estado.edit_text(
+                f"<b>No pude consultar SAM.gov</b>\n\n"
+                f"Solicitud: <code>{telegram_notify._esc(id_limpio)}</code>\n"
+                f"Motivo: <code>{telegram_notify._esc(str(fallo_api)[:120])}</code>"
+                "\n\nEl numero puede estar bien: es la API de SAM.gov la que "
+                "no ha podido responder, casi siempre por cuota del plan "
+                "gratuito. Intentelo otra vez en unos minutos.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        if not analisis:
+            await estado.edit_text(
+                f"<b>No encuentro la licitacion "
+                f"<code>{telegram_notify._esc(id_limpio)}</code></b>\n\n"
+                "Compruebe que el numero sea correcto. Si esta bien escrito, "
+                "puede que:\n"
+                "- el aviso se archivara (SAM.gov no guarda los cerrados en "
+                "la busqueda publica),\n"
+                "- la API de SAM.gov este sin cuota ahora mismo,\n"
+                "- el numero tenga guiones que no corresponden.\n\n"
+                "Podeis mandarme el enlace de SAM.gov y lo intento con el.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        # --- 3) Generar ---
+        _prov = {"nombre": proveedor_nombre} if proveedor_nombre else None
+        if not proveedor_nombre and analisis.get("proveedor_nombre"):
+            _prov = {"nombre": analisis["proveedor_nombre"]}
+        datos = pdfg.desde_analisis(analisis, _prov)
         pdf_bytes = pdfg.generar_po(datos)
-        nombre = pdfg.nombre_archivo(datos.get("numero_po") or id_buscado)
+        nombre = pdfg.nombre_archivo(datos.get("numero_po") or id_limpio)
+
+        _origen = ("consultado ahora en SAM.gov" if de_sam
+                   else "de los analisis de Kyomoto")
+        _bom = datos.get("bom") or []
         await estado.edit_text(
-            f"✅ Listo: <code>{telegram_notify._esc(nombre)}</code>\n\n"
-            f"Comprueba el proveedor antes de mandarlo: el que escribe en el "
-            f"documento es el que va a recibirlo.",
+            f"<b>Listo: {telegram_notify._esc(nombre)}</b>\n\n"
+            f"Solicitud: <code>{telegram_notify._esc(id_limpio)}</code> "
+            f"({_origen})\n"
+            f"Items para cotizar: <b>{len(_bom)}</b>\n\n"
+            "La seccion <i>BILL OF MATERIALS</i> va en ingles, con CLIN, NSN, "
+            "cantidad y unidad: es la que se manda al distribuidor. Compruebe "
+            "el proveedor antes de enviarla.",
             parse_mode=ParseMode.HTML,
         )
         await update.message.reply_document(
             document=_io.BytesIO(pdf_bytes),
             filename=nombre,
             caption=(
-                f"📄 <b>Purchase Order</b>\n"
-                f"SAM.gov: <code>{telegram_notify._esc(id_buscado)}</code>\n"
-                f"Si falta el proveedor: <code>/pdf {telegram_notify._esc(id_buscado)} "
-                f"| Nombre del distribuidor</code>"
+                f"<b>Purchase Order + Bill of Materials</b>\n"
+                f"SAM.gov: <code>{telegram_notify._esc(id_limpio)}</code>\n"
+                "Para anadir el proveedor: "
+                f"<code>/pdf {telegram_notify._esc(id_limpio)} | Nombre del "
+                "distribuidor</code>"
             ),
             parse_mode=ParseMode.HTML,
         )
-    except Exception as exc:
-        log.exception("No se pudo generar el PDF")
+
+    except Exception:
+        # El traceback COMPLETO al log de Render: si esto falla, el log es lo
+        # unico que dice por que.
+        log.exception("/pdf fallo con la solicitud %s", id_limpio)
         await estado.edit_text(
-            f"❌ No pude generar el PDF: "
-            f"<code>{telegram_notify._esc(str(exc)[:200])}</code>\n\n"
-            "Dilo y lo miro.",
+            f"<b>No se pudo procesar la solicitud "
+            f"<code>{telegram_notify._esc(id_limpio)}</code></b>\n\n"
+            "Puede ser que la API de SAM.gov este sin cuota, que el aviso no "
+            "se pueda leer, o que falle la generacion del PDF. El error "
+            "completo esta en los logs de Render.\n\n"
+            "Pruebe otra vez en unos minutos, o mandeme el enlace de SAM.gov.",
             parse_mode=ParseMode.HTML,
         )
 

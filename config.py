@@ -6,6 +6,9 @@ import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
 # corriendo en Render. Sube la version cuando cambies algo importante.
+# 3.1.0 = /pdf responde siempre: busca en SAM.gov por solnum y noticeid
+# cuando no esta en la base, con la hoja de Bill of Materials en ingles
+# para cotizar con el distribuidor, y sin el bug de reply_text sin await.
 # 3.0.0 = indice PSC comercial Tier-1 con filtrado nativo ccode (recorrido
 # codigo a codigo con rotacion), descargas limitadas a 5 simultaneas,
 # backoff 2/4/8 con timeout de lectura reintentable, y un solo aviso por
@@ -33,7 +36,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "3.0.0"
+KYOMOTO_VERSION = "3.1.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
