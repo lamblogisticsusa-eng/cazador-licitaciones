@@ -355,14 +355,26 @@ for lo, motivo in (
     print("    %-46s %s" % (lo[:46], "ESTA BIEN" if lo in txt else "FALTA (mal)"))
     check("  El PDF SI lleva %s" % motivo[:46], lo in txt)
 print()
-print("  Y lo que sigue sin poder salir: el dictamen, no los datos.")
+# REVERSION, y es la segunda vez que se hace por este motivo. En 3.8.0 el
+# nombre comercial resuelto no podia salir del PDF por ser sintesis del modelo.
+# Desde la v4.3 el encargo lo pide al reves, y con razon: la pagina 2 tiene un
+# "Product Identity" para que el distribuidor sepa QUE esta buscando en su
+# almacen. Un "1 LOT" sin nombre de producto no se cotiza.
+#
+# Lo que sigue sin poder salir es el DICTAMEN: la conclusion y el aviso de que
+# es interno. Eso es de L.A.M.B., y del proveedor no.
 for lo, motivo in (
         ("DETALLE FINO", "el encabezado del bloque analitico"),
-        ("Solo para uso interno", "el aviso de que es interno"),
-        ("S-1 Insert Bearings and Von Duprin Exit Devices",
-         "el nombre comercial resuelto, que no esta en el aviso")):
+        ("Solo para uso interno", "el aviso de que es interno")):
     print("    %-46s %s" % (lo[:46], "FALTA BIEN" if lo not in txt else "ESTA (mal)"))
     check("  El PDF NO lleva %s" % motivo[:46], lo not in txt)
+print()
+print("  Y el nombre comercial ahora sale a proposito, como identidad de producto:")
+print("    %-46s %s" % ("Product Identity",
+                       "ESTA BIEN" if "PRODUCT IDENTITY" in txt.upper()
+                       else "FALTA (mal)"))
+check("  Y sale como PRODUCT IDENTITY",
+      "PRODUCT IDENTITY" in txt.upper())
 print()
 print("  Y el precio sigue en blanco, que es lo que protege la negociacion:")
 check("  Ni una cifra de dinero", "$" not in txt and "$0.00" not in txt)

@@ -70,6 +70,7 @@ from reportlab.platypus import (
     Spacer,
     Table,
     TableStyle,
+    PageBreak,
 )
 
 import config
@@ -243,6 +244,22 @@ def _estilos() -> dict:
                                 leading=11, textColor=colors.black)
     e["celda_b"] = ParagraphStyle("celda_b", fontName="Helvetica-Bold",
                                   fontSize=8.5, leading=11, textColor=colors.black)
+    e["bp_tit"] = ParagraphStyle("bp_tit", fontName="Helvetica-Bold",
+                                 fontSize=9.5, leading=12, textColor=AZUL)
+    e["bp_lbl"] = ParagraphStyle("bp_lbl", fontName="Helvetica-Bold",
+                                 fontSize=8, leading=10.5,
+                                 textColor=colors.HexColor("#1B3B6F"))
+    e["bp_val"] = ParagraphStyle("bp_val", fontName="Helvetica",
+                                 fontSize=9, leading=12, textColor=colors.black)
+    # El MPN en Courier. Es un codigo de inventario y el distribuidor lo
+    # teclea para buscarlo en su almacen; en una fuente de palo seco el "0"
+    # y la "O" se confunden, y un parte equivocado es cotizar el material
+    # equivocado.
+    e["bp_mpn"] = ParagraphStyle("bp_mpn", fontName="Courier-Bold",
+                                 fontSize=9.5, leading=12, textColor=AZUL)
+    e["bp_fuerte"] = ParagraphStyle("bp_fuerte", fontName="Helvetica-Bold",
+                                    fontSize=8.5, leading=11.5,
+                                    textColor=colors.HexColor("#1B3B6F"))
     e["nota"] = ParagraphStyle("nota", fontName="Helvetica-Oblique",
                                fontSize=8, leading=10.5, textColor=GRIS)
     e["firma_nombre"] = ParagraphStyle("firma_nombre",
@@ -636,32 +653,275 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             e["nota"]))
         f.append(Spacer(1, 0.12 * inch))
 
-        _entrega = datos.get("bom_entrega") or ""
-        if _entrega:
-            f.append(KeepTogether([
-                Paragraph("DELIVERY DESTINATION &amp; PACKAGING", e["h2"]),
-                _caja(e, _entrega),
-                Spacer(1, 0.14 * inch),
-            ]))
+        # PAGINA 2, REDISEÑADA.
+        #
+        # Antes eran tres cajas de texto plano: destino, instrucciones y
+        # condiciones. El contenido estaba; la FORMA no. Un bloque corrido
+        # donde todo pesaba lo mismo, y una direccion que salia segun como
+        # venia el aviso, a veces como repr de un diccionario.
+        #
+        # Ahora son dos contenedores con borde: el primero es lo que hay que
+        # buscar en el almacen, el segundo como mandarlo. Nada de lo que se
+        # decia ha desaparecido: el CoC, el packing list y las condiciones de
+        # pago siguen en el papel, dentro del bloque que les toca.
+        # Los dos contenedores van juntos a la pagina 2. Sin esto, el primero
+        # caia al final de la 1 y el segundo en la 2: dos recuadros partidos,
+        # que es justo lo contrario de "dos contenedores independientes".
+        # KeepTogether los mueve enteros si no caben, y el PageBreak los
+        # arranca en la 2 sin depender de donde haya quedado la tabla del BOM.
+        _cat = _blueprint_catalogo(e, datos)
+        _log = _blueprint_logistica(e, datos)
+        if _cat is not None or _log is not None:
+            f.append(PageBreak())
+            _bloques = []
+            if _cat is not None:
+                _bloques.append(_cat)
+                _bloques.append(Spacer(1, 0.16 * inch))
+            if _log is not None:
+                _bloques.append(_log)
+            f.append(KeepTogether(_bloques))
 
-    if datos.get("instrucciones"):
-        f.append(KeepTogether([
-            Paragraph("SHIPPING INSTRUCTIONS", e["h2"]),
-            _caja(e, datos["instrucciones"]),
-            Spacer(1, 0.14 * inch),
-        ]))
-    if datos.get("condiciones"):
-        f.append(KeepTogether([
-            Paragraph("TERMS AND CONDITIONS", e["h2"]),
-            _caja(e, datos["condiciones"]),
-            Spacer(1, 0.14 * inch),
-        ]))
-    if datos.get("notas"):
-        f.append(Paragraph(datos["notas"], e["nota"]))
-        f.append(Spacer(1, 0.10 * inch))
+        if datos.get("notas"):
+            f.append(Spacer(1, 0.14 * inch))
+            f.append(Paragraph(datos["notas"], e["nota"]))
 
     doc.build(f)
     return buffer.getvalue()
+
+
+# =====================================================================
+# LOS DOS CONTENEDORES DE LA PAGINA 2
+# =====================================================================
+# Sustituyen a las tres cajas de texto plano que habia antes. El contenido no
+# era lo que estaba mal: la FORMA. Un bloque corrido donde todo pesaba igual, y
+# una direccion de entrega que salia segun como venia el aviso, a veces como
+# repr de un diccionario.
+#
+# Aqui va en dos contenedores con borde, cada uno con sus campos en negrita y
+# el valor al lado. Un distribuidor lee la etiqueta y baja a la linea.
+
+_RE_NOMBRES = re.compile(
+    r"""(\{[^{}]*\}|\[[^\[\]]*\]|\bNone\b|\bTrue\b|\bFalse\b)""")
+_RE_QUOTES = re.compile("[\"'`]")
+
+
+def _dir_limpio(bruto) -> str:
+    """
+    Una direccion postal americana legible, o "".
+
+    NUNCA inventa. El aviso trae ciudad y estado, y con eso se compone la
+    linea; si no hay, "".
+
+    POR QUE NO SE IMPRIME UN ZIP
+    El pipeline NO tiene ningun ZIP. lugar_de_entrega_aviso() compone ciudad y
+    estado de placeOfPerformance, y ahi se acaba. Poner un ZIP seria
+    inventarlo, y un ZIP inventado en una orden federal manda el material a
+    otro sitio: eso no es un error de formato, es material perdido.
+
+    Se limpia igualmente porque el lugar llega de varios sitios y algunos
+    traen la forma cruda del dato. Un "Ship-To: {'city': 'X'}" en un documento
+    comercial dice al transportista que ese papel lo genero una maquina.
+    """
+    if not bruto:
+        return ""
+    texto = str(bruto).strip()
+    if "{" in texto and "}" in texto:
+        try:
+            d = eval(texto, {"__builtins__": {}}, {})  # noqa: S307
+            if isinstance(d, dict):
+                partes = []
+                for clave in ("city", "state", "country", "countryCode",
+                              "street", "address", "zip", "postalCode"):
+                    v = d.get(clave)
+                    if v and str(v).strip():
+                        partes.append(str(v).strip())
+                texto = " / ".join(partes)
+        except Exception:
+            texto = _RE_NOMBRES.sub("", texto)
+    texto = _RE_NOMBRES.sub("", texto)
+    texto = _RE_QUOTES.sub("", texto)
+    # La BARRA se convierte en coma, porque "Albuquerque / New Mexico /
+    # UNITED STATES" es como lo trae placeOfPerformance y una direccion
+    # postal se escribe con comas. La coma EXISTENTE se respeta: el aviso
+    # tambien la trae ("Philadelphia, Pennsylvania, UNITED STATES") y
+    # tocarla aqui rompia una direccion que ya era correcta.
+    texto = re.sub(r"\s+/\s*", ", ", texto)
+    texto = re.sub(r",\s*,+", ",", texto)
+    texto = re.sub(r"\s{2,}", " ", texto).strip(" ,;:-")
+    return texto.strip()
+
+
+def _esc_html(bruto) -> str:
+    return (str(bruto or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _valor_corto(bruto, tope=180) -> str:
+    """Un valor de una linea, sin html, para una celda de la tabla."""
+    if not bruto:
+        return ""
+    limpio = re.sub(r"<[^>]+>", "", str(bruto))
+    return _esc_html(" ".join(limpio.split()))[:tope]
+
+
+def _fila(e, etiqueta, valor, estilo_val="bp_val"):
+    """
+    UNA fila del contenedor, ya envuelta en lista porque Table() espera una
+    lista por fila y no los objetos sueltos.
+    """
+    if valor is None:
+        return []
+    texto = "" if valor == "" else str(valor)
+    if not texto.strip():
+        return []
+    return [[Paragraph(("<b>%s</b>" % etiqueta).upper() if etiqueta else "",
+                       e["bp_lbl"]),
+             Paragraph(texto, e[estilo_val])]]
+
+
+def _contenedor(e, titulo, filas):
+    """El marco: titulo arriba con fondo, borde azul, y los campos debajo."""
+    if not filas:
+        return None
+    ancho = LETTER[0] - config.PDF_MARGEN_IZQUIERDO - config.PDF_MARGEN_DERECHO
+    ancho_et = ancho * 0.33
+    cuerpo = Table(filas, colWidths=[ancho_et, ancho - ancho_et],
+                   hAlign="LEFT",
+                   style=TableStyle([
+                       ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                       ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                       ("RIGHTPADDING", (0, 1), (1, -1), 6),
+                       ("TOPPADDING", (0, 0), (-1, -1), 3),
+                       ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                   ]))
+    cabecera = Table([[Paragraph(titulo, e["bp_tit"])]], colWidths=[ancho],
+                     style=TableStyle([
+                         ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                     ]))
+    return Table([[cabecera], [cuerpo]], colWidths=[ancho], hAlign="LEFT",
+                 style=TableStyle([
+                     ("BOX", (0, 0), (-1, -1), 0.7, AZUL),
+                     ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#EEF2F8")),
+                     ("LINEBELOW", (0, 0), (0, 0), 0.5,
+                      colors.HexColor("#C9D4E4")),
+                     ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                     ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                     ("TOPPADDING", (0, 0), (0, 0), 8),
+                     ("BOTTOMPADDING", (0, 0), (0, 0), 7),
+                     ("TOPPADDING", (0, 1), (0, 1), 7),
+                     ("BOTTOMPADDING", (0, 1), (0, 1), 8),
+                 ]))
+
+
+def _blueprint_catalogo(e, datos):
+    """
+    CONTENEDOR 1. Que tiene que buscar el distribuidor en su almacen.
+
+    Cada campo se OMITE si no se sabe. Una fila con "N/A" en un papel que va a
+    un proveedor dice "este dato no existe", y lo que hace el proveedor con eso
+    es devolver la hoja sin cotizar.
+    """
+    det = dict(datos.get("lote_detalle") or {})
+    ctx = dict(datos.get("contexto_semantico") or {})
+    # El contexto manda sobre el detalle: es el que pasa por la verificacion
+    # contra el corpus.
+    marca = ctx.get("manufacturer_brand") or det.get("manufacturer_brand_name")
+    parte = ctx.get("part_number") or det.get("manufacturer_part_number")
+    producto = (ctx.get("product_specification_summary")
+                or det.get("resolved_product_name"))
+    specs = (ctx.get("dimensions_or_specs")
+             or det.get("dimensions_or_specs") or "")
+    linea = (datos.get("lineas") or [{}])[0] or {}
+
+    filas = []
+    filas += _fila(e, "Manufacturer / Brand:", _valor_corto(marca, 90))
+    if parte:
+        filas.append([Paragraph("<b>MANUFACTURER PART NUMBER (MPN):</b>",
+                                e["bp_lbl"]),
+                      Paragraph(_esc_html(str(parte)), e["bp_mpn"])])
+    filas += _fila(e, "Product Identity:", _valor_corto(producto))
+    filas += _fila(e, "Dimensions &amp; Specifications:", _valor_corto(specs))
+    cantidad = _num(linea.get("cantidad"))
+    unidad = str(linea.get("unidad") or "").strip()
+    if cantidad:
+        filas.append([Paragraph("<b>TOTAL UNITS REQUIRED:</b>", e["bp_lbl"]),
+                      Paragraph("<b>%s</b>" % (f"{cantidad:,.0f}"
+                                              + ((" " + unidad) if unidad else "")),
+                                e["bp_val"])])
+        # La aclaracion que evita la pregunta que siempre llega: "esto son 100
+        # piezas o 100 lotes?". No es un adorno, es la duda que hace perder un
+        # ciclo entero de correos.
+        filas += _fila(e, "", "Consolidated for shipment as %s %s within a "
+                                "single %s awarded under this solicitation."
+                       % (f"{cantidad:,.0f}", unidad or "EA",
+                          linea.get("unidad_original") or "LOT"))
+    # Se reutiliza _ref_plano(), que ya existia y es mas estricto que uno nuevo:
+    # exige al menos un DIGITO, para que "Planning" no se lea como plano
+    # "anning".
+    plano = ""
+    for candidato in (specs, producto, datos.get("titulo_sam")):
+        plano = _ref_plano(candidato)
+        if plano:
+            break
+    if plano:
+        filas += _fila(e, "Technical Standard:",
+                       "Must comply with the referenced drawing %s." % plano)
+    return _contenedor(e, "INDUSTRIAL SUPPLY BLUEPRINT", filas)
+
+
+def _blueprint_logistica(e, datos):
+    """
+    CONTENEDOR 2. Como hay que despacharlo y que papeles tienen que ir dentro.
+    """
+    filas = []
+    destino = _dir_limpio(datos.get("lugar_entrega"))
+    filas += _fila(e, "Delivery Destination (Ship-To Address):",
+                   destino or "As designated by the solicitation on the "
+                              "cover page.")
+    fecha = datos.get("fecha_limite")
+    if fecha:
+        filas += _fila(e, "Delivery Window:",
+                       "On or before %s." % _fecha_pdf(fecha))
+    filas += _fila(e, "Packaging:",
+                   "Packaging suitable for transportation: the supplier shall "
+                   "pack the material so that it is preserved in the "
+                   "condition required for delivery. Each shipping box must "
+                   "be individually labelled and palletised.")
+    filas += _fila(e, "Shipping Term (FOB):",
+                   "FOB Destination. Freight and all shipping charges must be "
+                   "fully included in your final price quote.")
+    filas += _fila(e, "Blind Drop-Shipping Directive:",
+                   "<b>Strictly Required.</b> Do not include internal "
+                   "wholesale pricing or distributor invoices inside the "
+                   "physical packaging. Shipping labels and packing slips must "
+                   "show L.A.M.B. Logistics LLC as the Shipper of Record.",
+                   estilo_val="bp_fuerte")
+    filas += _fila(e, "Quality Assurance &amp; Traceability:",
+                   "A genuine Manufacturer Certificate of Conformance (CoC) "
+                   "identifying the part number and matching lot number MUST "
+                   "be physically included inside every shipping box. Orders "
+                   "delivered without a CoC will be automatically rejected at "
+                   "the vendor's expense.",
+                   estilo_val="bp_fuerte")
+    # El numero de solicitud va con el CLIN. Sin esto el transportista deja el
+    # palet en la puerta, porque no hay forma de saber a que direccion va.
+    sol = str(datos.get("referencia_sam") or "").strip()
+    filas += _fila(e, "Freight Marking:",
+                   "Every pallet or shipping label must clearly display "
+                   "Federal Solicitation Number: <b>%s</b> and <b>CLIN 1</b>. "
+                   "Each shipment must include a packing list."
+                   % _esc_html(sol if sol else "as shown on the cover page"))
+    # El pago se queda. Packaging y condiciones eran cajas sueltas y ahora son
+    # parte de este bloque, porque el factoring es una condicion de entrega:
+    # sin saber donde remitir la factura, la operacion no cierra.
+    cond = str(datos.get("condiciones") or "").strip()
+    if cond:
+        # No se antepone "Payment 30 days net from invoice": condiciones ya
+        # empieza con esa frase, y ponerla dos veces salia en el PDF repetida.
+        filas += _fila(e, "Invoice &amp; Remittance:",
+                       _esc_html(cond.split("\n")[0]))
+    return _contenedor(e, "LOGISTICS &amp; COMPLIANCE BLUEPRINT", filas)
 
 
 def _caja(e, texto):
@@ -2520,6 +2780,10 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # trae algo, asi que un analisis sin BOM da el documento de siempre.
         "bom": _bom,
         "bom_entrega": _instrucciones_ingles(analisis),
+        # El lugar va como campo propio para el bloque de logistica. Antes solo
+        # existia dentro del texto de instrucciones, ya compuesto, y de ahi no
+        # se podia sacar una direccion limpia sin desarmar una frase entera.
+        "lugar_entrega": _dir_limpio(lugar),
         "referencia_sam": (analisis.get("solicitation") or "").strip(),
         "titulo_sam": (analisis.get("title") or "").strip(),
         "fecha_limite": (analisis.get("limite") or "").strip(),

@@ -260,7 +260,7 @@ check("Ni 'cocina' se ha tocado", "COCINA" in pdfg._ingles("COCINA industrial")[
 # Y lo que NO debe marcar el detector: ingles normal de un aviso.
 INGLES_OK = [
     "Physical item per the SAM.gov specification",
-    "Delivery to: Albuquerque / New Mexico / UNITED STATES",
+    "Albuquerque, New Mexico, UNITED STATES",
     "Payment 30 days net from invoice",
     "MECHANICAL SEAL KIT, EPDM 70 SHORE A PER ASTM D2000",
     "Quotation valid for 30 days from the date of issue",
@@ -351,7 +351,7 @@ if PdfReader:
                "Per Drawing MS-3305",
                "Requires Certificate of Conformance (CoC) upon delivery",
                "Complies with Inspection Drawing DLA",
-               "Delivery to:", "Packaging suitable for transportation",
+               "DELIVERY DESTINATION", "Packaging suitable for transportation",
                "Payment 30 days net from invoice",
                "factors receivables within the United States",
                "Document issued by L.A.M.B. Logistics LLC",
@@ -376,7 +376,7 @@ if PdfReader:
     print("  Y la disposicion sigue igual que antes:")
     for cabecera in ("PURCHASE ORDER", "PURCHASE ORDER NO.", "DATE", "SAM.GOV REFERENCE",
                      "RESPONSE DUE", "SUPPLIER / VENDOR", "ITEMS ORDERED",
-                     "SHIPPING INSTRUCTIONS", "TERMS AND CONDITIONS",
+                     "INDUSTRIAL SUPPLY BLUEPRINT", "LOGISTICS", "COMPLIANCE BLUEPRINT",
                      "BILL OF MATERIALS"):
         check("  Sigue la cabecera: %s" % cabecera, cabecera in texto)
 
