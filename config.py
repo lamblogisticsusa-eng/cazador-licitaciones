@@ -50,7 +50,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "4.3.0"
+KYOMOTO_VERSION = "4.4.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:

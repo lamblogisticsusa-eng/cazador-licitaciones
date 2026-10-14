@@ -751,6 +751,202 @@ def _dir_limpio(bruto) -> str:
     return texto.strip()
 
 
+# La direccion de SAM.gov, en el orden en que se escribe una direccion postal.
+# El orden NO es el del diccionario: es nombre, calle, ciudad, estado, ZIP.
+_CLAVES_DIRECCION = (
+    ("nombre", ("name", "facilityName", "installationName", "baseName")),
+    ("calle", ("streetAddress", "street", "address", "addressLine1",
+               "address1")),
+    ("ciudad", ("city",)),
+    ("estado", ("state", "stateCode", "stateName")),
+    ("zip", ("zip", "zipCode", "postalCode")),
+    ("pais", ("country", "countryCode")),
+)
+
+
+# Palabras que delatan texto en espanol dentro de una celda del PDF. No es un
+# traductor: es una guarda. Si aparece una de estas en un campo que deberia
+# venir en ingles de SAM.gov, se avisa.
+_RE_ESPANOL = re.compile(
+    r"\b(de|del|la|el|los|las|un|una|y|o|para|con|sin|por|que|como|"
+    r"cantidad|descripci[oó]n|especificaci[oó]n|suministro|entrega|"
+    r"pedido|requisitos?|material|pliegos?|lote|unidades|env[ií]o|"
+    r"embalaje|garant[ií]a|cl[aá]usula|n[uú]mero)\b", re.I)
+
+
+def texto_en_espanol(bruto) -> bool:
+    """
+    True si el texto parece estar en espanol.
+
+    Aproximado a proposito: mira palabras que no existen en ingles y palabras
+    que en ingles existen con otro significado (como "para" o "no"). Con que
+    aparezcan DOS o mas ya es senal, porque un texto ingles sobre material
+    industrial puede traer "para" o "con" de paso.
+    """
+    limpio = " ".join(re.sub(r"<[^>]+>", " ", str(bruto or "")).split())
+    if not limpio:
+        return False
+    # Las abreviaturas de catalogo no cuentan: "CAGE", "NSN", "EA", "KIT".
+    return len(set(m.group(0).lower() for m in _RE_ESPANOL.finditer(limpio))) >= 2
+
+
+def _direccion_completa(aviso: dict) -> dict:
+    """
+    La direccion fisica del destino, campo por campo. {"nombre","calle",
+    "ciudad","estado","zip"}.
+
+    POR QUE HAY QUE BUSCAR EN VARIAS CLAVES
+    placeOfPerformance de SAM.gov usa "streetAddress", pero el mismo dato
+    aparece como "address" o "addressLine1" segun como lo publico la agencia.
+    Se prueban todas y se coge la primera que exista.
+
+    POR QUE NO SE INVENTA NADA
+    Si un campo no esta, no se pone. Una direccion a medias con un ZIP
+    inventado manda el material al sitio equivocado, y por eso aqui no hay
+    ningun valor por defecto.
+    """
+    aviso = aviso or {}
+    pop = aviso.get("placeOfPerformance") or {}
+    bloques = [pop]
+    # lastPerformanceRequirement es donde muchas agencias ponen la direccion
+    # entera en texto plano, y es la unica fuente cuando placeOfPerformance
+    # solo trae ciudad y estado.
+    for clave in ("lastPerformanceRequirement", "mainAddress",
+                  "deliveryAddress"):
+        v = aviso.get(clave)
+        if isinstance(v, dict):
+            bloques.append(v)
+        elif isinstance(v, str) and v.strip():
+            bloques.append(_direccion_desde_texto(v))
+    salida = {}
+    for destino, claves in _CLAVES_DIRECCION:
+        for bloque in bloques:
+            if not isinstance(bloque, dict):
+                continue
+            for c in claves:
+                v = bloque.get(c)
+                if v and str(v).strip():
+                    salida[destino] = _esc_html(str(v).strip())
+                    break
+            if destino in salida:
+                break
+    return salida
+
+
+_RE_ZIP = re.compile(r"^\d{5}(?:-\d{4})?$")
+_RE_NUMS = re.compile(r"\d")
+_RE_ESTADOS = re.compile(
+    r"^(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|"
+    r"MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|"
+    r"WV|WI|WY|DC)$", re.I)
+
+
+def _direccion_desde_texto(bruto: str) -> dict:
+    """
+    Saca calle, ciudad, estado y ZIP de un texto de direccion en prosa.
+
+    Se hace POR TROZOS y no con una sola expresion regular gigante. La razon es
+    que el texto de "lastPerformanceRequirement" es prosa: "Deliver to Fort
+    Riley, 1234 Normandy Dr, Fort Riley, Kansas 66433 USA". Un patron unico que
+    tries capturearlo todo se rompe con cada forma nueva de escribirlo, y lo
+    que sale de ahi es media direccion, que es peor que ninguna.
+
+    El truco es que el ZIP es la unica pieza con forma fija: cinco digitos. Se
+    busca ese trozo, y los tres anteriores son estado, ciudad y calle. Sencillo,
+    comprobable y no falla con las comas de mas.
+    """
+    troceado = re.split(r"[,\n;]+", str(bruto or ""))
+    trozos = [x.strip() for x in troceado if x.strip()]
+    # El ZIP casi nunca va solo: lo normal es "Illinois 61201" o
+    # "Fort Riley, Kansas 66433 USA". Se busca DENTRO del trozo, porque exigir
+    # que el trozo entero sea el codigo postal no encontraba nunca nada.
+    indice, zip_found = None, ""
+    for k, x in enumerate(trozos):
+        m = re.search(r"\b(\d{5}(?:-\d{4})?)\b", x)
+        if m:
+            indice, zip_found = k, m.group(1)
+            break
+    if indice is None or indice < 1:
+        return {}
+    salida = {"zip": _esc_html(zip_found)}
+    # El estado suele venir pegado al ZIP ("Kansas 66433"), y a veces es su
+    # propio trozo ("Illinois", "61201").
+    actual = trozos[indice]
+    estado = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", actual).strip(" ,.")
+    # El pais se cuela al final del estado cuando el ZIP iba en medio:
+    # "Kansas 66433 USA" -> estado "Kansas  USA". Se va al final.
+    estado = re.sub(
+        r"\s*,?\s*\b(?:u\.?s\.?a\.?|usa|united states(?: of america)?)\b",
+        "", estado, flags=re.I).strip(" ,.")
+    if not estado and indice >= 1:
+        estado = trozos[indice - 1]
+        indice = indice - 1
+    if not estado:
+        return {}
+    salida["estado"] = _esc_html(estado)
+    # La ciudad es el trozo anterior al del estado.
+    ciudad = ""
+    if indice >= 1:
+        ciudad = trozos[indice - 1]
+        ciudad = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", ciudad).strip(" ,.")
+    if not ciudad:
+        ciudad = re.sub(r"^\s*(?:deliver|ship|delivery|fob)\s+to:?\s*", "",
+                        actual, flags=re.I).strip(" ,.")
+        if ciudad.lower() in ("usa", "u.s.a.", "united states"):
+            return salida
+    salida["ciudad"] = _esc_html(ciudad)
+    # La calle es el trozo anterior si trae un numero de portal.
+    if indice >= 2:
+        calle = trozos[indice - 2]
+        # El prefijo de entrega se va: "Ship to: 1 Procurement Drive" es una
+        # calle con la palabra "Ship" pegada, y eso no es una direccion que se
+        # pueda entregar a nadie.
+        calle = re.sub(r"^\s*(?:deliver|delivery|ship|fob)\s+to:?\s*", "",
+                       calle, flags=re.I).strip(" ,.")
+        if _RE_NUMS.search(calle) and not _RE_ZIP.match(calle):
+            salida["calle"] = _esc_html(calle)
+    return salida
+
+
+def lineas_direccion(dir_: dict) -> list:
+    """
+    La direccion, lista y en orden: instalacion, calle, ciudad, estado, ZIP.
+
+    Se omiten las lineas vacias, y la ultima es siempre "ciudad, estado ZIP",
+    que es como se escribe una direccion en Estados Unidos y como la lee sin
+    ambigüedad un transportista.
+    """
+    if not dir_:
+        return []
+    lineas = []
+    if dir_.get("nombre"):
+        lineas.append(dir_["nombre"])
+    if dir_.get("calle"):
+        lineas.append(dir_["calle"])
+    cierre = ", ".join(x for x in (dir_.get("ciudad"),
+                                   (dir_.get("estado") or "").strip()) if x)
+    if dir_.get("zip"):
+        cierre = (cierre + " " + dir_["zip"]).strip()
+    if cierre:
+        # El pais cierra la direccion. Sin el, un transportista tiene dos
+        # "Illinois" en el pais y el documento se puede leer como ambiguo.
+        # "USA" y "US" seDevelop en el nombre largo, que es el que se imprime.
+        pais = (dir_.get("pais") or "").strip()
+        if pais.upper() in ("USA", "US", "UNITED STATES", "UNITED STATES OF AMERICA"):
+            pais = "UNITED STATES"
+        if not pais:
+            # Sin pais declarado. Estas licitaciones son de entrega en Estados
+            # Unidos, y el documento va a un transportista de aqui: dejarlo
+            # fuera hace que "Illinois" sea ambiguo. No es inventar una
+            # coordenada precisa, es decir donde esta el pais, que es lo unico
+            # que el aviso no dice y el papel si necesita.
+            pais = "UNITED STATES"
+        if pais and pais.upper() != cierre.upper():
+            cierre = cierre + ", " + pais
+        lineas.append(cierre)
+    return lineas
+
+
 def _esc_html(bruto) -> str:
     return (str(bruto or "").replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;"))
@@ -844,18 +1040,29 @@ def _blueprint_catalogo(e, datos):
     filas += _fila(e, "Dimensions &amp; Specifications:", _valor_corto(specs))
     cantidad = _num(linea.get("cantidad"))
     unidad = str(linea.get("unidad") or "").strip()
+    # La unidad de LOTE, que es la que el aviso compro, y el entero que la
+    # Capa B resolvio del desglose. Son dos cosas distintas y el papel tiene que
+    # decir las dos a la vez, porque si no el distribuidor tiene que escribir
+    # para preguntar cual de las dos se cotiza.
+    lote = str(datos.get("unidad_lote") or linea.get("unidad_original")
+               or "").strip().upper()
     if cantidad:
+        desglose = f"{cantidad:,.0f}"
+        if lote and unidad and unidad != lote:
+            # Formato pedido: "1 LOT (Broken down as: 100 physical units /
+            # pieces)".
+            #
+            # OJO con la palabra "Broken down" y no "Desglosado en": el punto 1
+            # del encargo prohibe expresamente meter texto en espanol en este
+            # PDF, y "Desglosado en:" que pedia el punto 2 lo es. Un documento
+            # que dice "Desglosado en" en una linea y "Consoidated for" en otra
+            # no lo entiende un distributor de Albuquerque. Va en ingles.
+            valor = "1 %s (Broken down as: %s physical units / pieces)" % (
+                lote, desglose)
+        else:
+            valor = desglose + ((" " + unidad) if unidad else "")
         filas.append([Paragraph("<b>TOTAL UNITS REQUIRED:</b>", e["bp_lbl"]),
-                      Paragraph("<b>%s</b>" % (f"{cantidad:,.0f}"
-                                              + ((" " + unidad) if unidad else "")),
-                                e["bp_val"])])
-        # La aclaracion que evita la pregunta que siempre llega: "esto son 100
-        # piezas o 100 lotes?". No es un adorno, es la duda que hace perder un
-        # ciclo entero de correos.
-        filas += _fila(e, "", "Consolidated for shipment as %s %s within a "
-                                "single %s awarded under this solicitation."
-                       % (f"{cantidad:,.0f}", unidad or "EA",
-                          linea.get("unidad_original") or "LOT"))
+                      Paragraph("<b>%s</b>" % valor, e["bp_val"])])
     # Se reutiliza _ref_plano(), que ya existia y es mas estricto que uno nuevo:
     # exige al menos un DIGITO, para que "Planning" no se lea como plano
     # "anning".
@@ -875,10 +1082,21 @@ def _blueprint_logistica(e, datos):
     CONTENEDOR 2. Como hay que despacharlo y que papeles tienen que ir dentro.
     """
     filas = []
-    destino = _dir_limpio(datos.get("lugar_entrega"))
+    dir_ = dict(datos.get("direccion_entrega") or {})
+    lineas_dir = lineas_direccion(dir_)
+    if not lineas_dir:
+        # Sin direccion fisica no se inventa una. Se avisa en el log para que
+        # quede constancia en Render de lo que faltó, y el papel dice lo que si
+        # se sabe.
+        log.warning("PDF: el aviso %s no trae direccion fisica de entrega; "
+                    "sale solo la ciudad y el estado",
+                    datos.get("referencia_sam") or "(sin numero)")
+        plano = _dir_limpio(datos.get("lugar_entrega"))
+        if plano:
+            lineas_dir = [plano]
     filas += _fila(e, "Delivery Destination (Ship-To Address):",
-                   destino or "As designated by the solicitation on the "
-                              "cover page.")
+                   "<br/>".join(lineas_dir) if lineas_dir else
+                   "As designated by the solicitation on the cover page.")
     fecha = datos.get("fecha_limite")
     if fecha:
         filas += _fila(e, "Delivery Window:",
@@ -1715,13 +1933,36 @@ def _bom_desde_analisis(analisis: dict) -> list[dict]:
     # existe, y un distributoror que luego no encuentra el material contesta
     # lo que sea. Por eso el detector de castellano salta los identificadores
     # alfanumericos en vez de marcarlos como pendientes.
-    desc = (analisis.get("producto") or "").strip()
+    # INGLES NATIVO DE SAM.GOV, no una traduccion.
+    #
+    # El orden es el que importa: primero lo crudo del aviso, que ya esta en
+    # ingles tecnico de adquisiciones porque lo escribio un oficial; y solo si
+    # no hay crudo, se recurre a _ingles() sobre lo que dio Gemini.
+    #
+    # Traducir texto de compra produce frases rare en ingles: "entrega en",
+    # "descripcion de", palabras que existen pero que no suenan a catalogo de un
+    # oficial. El original no tiene ese problema porque no es una traduccion.
+    crudo = str(analisis.get("descripcion_original") or "").strip()
+    if not crudo:
+        crudo = str(analisis.get("titulo_original") or "").strip()
+    desc = crudo or (analisis.get("producto") or "").strip()
     modelo = (analisis.get("modelo_especifico") or "").strip()
     if modelo and modelo.lower() not in desc.lower():
         desc = f"{desc} ({modelo})".strip()
     spec = (analisis.get("especificacion_tecnica_clave") or "").strip()
-    desc, _pd = _ingles(desc, _ACORTAR["descripcion"])
-    spec, _ps = _ingles(spec, _ACORTAR["especificacion"])
+
+    if crudo:
+        desc, _pd = desc[:_ACORTAR["descripcion"]], True
+        # El recorte va con el texto crudo. _ACORTAR existe porque un
+        # .replace() o un .sub() sobre una cadena larga puede ensanchar una fila
+        # de la tabla mas alla del ancho de pagina y reventar con LayoutError.
+        spec, _ps = spec[:_ACORTAR["especificacion"]], True
+        if texto_en_espanol(desc) or texto_en_espanol(spec):
+            log.info("desde_aviso: el texto crudo del aviso trae palabras en "
+                     "espanol; se deja tal cual porque es la fuente oficial")
+    else:
+        desc, _pd = _ingles(desc, _ACORTAR["descripcion"])
+        spec, _ps = _ingles(spec, _ACORTAR["especificacion"])
     return [{
         "clin": "1",
         "parte": modelo,
@@ -2429,6 +2670,21 @@ def desde_aviso(aviso: dict, db_path: str | None = None) -> dict:
         "psc": aviso.get("classificationCode", ""),
         "ui_link": aviso.get("uiLink", ""),
         "lugar_entrega": lugar_de_entrega_aviso(aviso),
+        # La direccion fisica completa, sacada del propio aviso. No se inventa
+        # ningun campo: lo que no este en SAM.gov no sale.
+        "direccion_entrega": _direccion_completa(aviso),
+        # El texto CRUDO del aviso, en ingles, tal cual lo publico el
+        # gobierno. Esto es lo que va a la pagina 1 sin pasar por el traductor.
+        #
+        # La razon es que Gemini devuelve los campos en castellano, y el
+        # traductor _ingles() los convierte palabra por palabra. Un traductor
+        # sobre texto de compra produce frases rare: "entrega en", "descripcion
+        # de", palabras que existen en ingles pero que no suenan a ingles de
+        # catalogo. El aviso original ya esta escrito por un oficial en ingles
+        # técnico de adquisiciones, y ese texto es mejor que cualquier
+        # traduccion.
+        "descripcion_original": str(_bom0.get("descripcion") or "").strip(),
+        "titulo_original": str(aviso.get("title") or "").strip(),
         # El producto y la especificacion van LIMPIOS, no crudos.
         #
         # Antes ponian el titulo entero del aviso y los primeros 800
@@ -2784,6 +3040,14 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # existia dentro del texto de instrucciones, ya compuesto, y de ahi no
         # se podia sacar una direccion limpia sin desarmar una frase entera.
         "lugar_entrega": _dir_limpio(lugar),
+        # La direccion fisica completa, campo por campo. Aqui es donde sale el
+        # ZIP, y sale SOLO si el aviso lo trae: inventarlo manda el material al
+        # estado equivocado.
+        "direccion_entrega": dict(analisis.get("direccion_entrega") or {}),
+        # La unidad de LOTE que compro el aviso, distinta de la unidad fisica
+        # que resolvio la Capa B. Las dos van en el papel a la vez.
+        "unidad_lote": str((analisis.get("qty_corregido") or {})
+                           .get("unidad_original") or "").strip().upper(),
         "referencia_sam": (analisis.get("solicitation") or "").strip(),
         "titulo_sam": (analisis.get("title") or "").strip(),
         "fecha_limite": (analisis.get("limite") or "").strip(),
