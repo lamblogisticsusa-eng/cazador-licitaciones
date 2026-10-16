@@ -1008,8 +1008,28 @@ def lineas_direccion(dir_: dict) -> list:
     return lineas
 
 
+# Marcas internas de "esto no se pudo traducir". Ninguna debe salir en un
+# papel comercial: el distribuidor no sabe que significan y, si las ve, deduce
+# que el texto no es de fiar.
+_RE_MARCA_INTERNA = re.compile(r"\[(?:SEE NOTE|VER NOTA|VER NOTA\]|NOTA)\]",
+                              re.I)
+
+
+def _limpiar_marcas(bruto):
+    """
+    Quita las marcas internas y deja los espacios normales.
+
+    Se colapsan los espacios dobles que deja el hueco de la marca: sin esto,
+    "Bearing material [SEE NOTE] final" conserva dos espacios en medio, que en
+    una celda de tabla se ven como una columna partida.
+    """
+    limpio = _RE_MARCA_INTERNA.sub("", str(bruto or ""))
+    return re.sub(r"[ \t]{2,}", " ", limpio).strip()
+
+
 def _esc_html(bruto) -> str:
-    return (str(bruto or "").replace("&", "&amp;").replace("<", "&lt;")
+    limpio = _limpiar_marcas(bruto)
+    return (limpio.replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;"))
 
 
@@ -1159,8 +1179,8 @@ def _blueprint_catalogo(e, datos):
             # Y va en ingles, no "Desglosado en": el encargo prohibe expresamente
             # meter espanol en este PDF, y un papel que dice "Desglosado en" en
             # una linea y "Consolidated for" en otra no lo entiende nadie.
-            valor = "1 %s (Broken down as: %s Physical %s)" % (
-                lote, f"{cantidad:,.0f}", _plural_unidad(unidad))
+            valor = "1 %s (Broken down as: %s Physical Units)" % (
+                lote, f"{cantidad:,.0f}")
         else:
             valor = f"{cantidad:,.0f}" + ((" " + unidad) if unidad else "")
         filas.append([Paragraph("<b>QUANTITY / VOLUMEN:</b>", e["bp_lbl"]),
@@ -1196,9 +1216,15 @@ def _blueprint_logistica(e, datos):
         plano = _dir_limpio(datos.get("lugar_entrega"))
         if plano:
             lineas_dir = [plano]
-    filas += _fila(e, "Delivery Destination (Ship-To Address):",
-                   "<br/>".join(lineas_dir) if lineas_dir else
-                   "As designated by the solicitation on the cover page.")
+    # Si no se ha resuelto una direccion REAL, la fila NO se dibuja.
+    #
+    # Antes caia en "As designated by the solicitation on the cover page", que
+    # es una frase generica: el transportista no tiene donde llevar el palet y
+    # el papel aparenta estar completo. Una fila que no esta es un hueco que el
+    # proveedor rellena llamando; una frase vacia es un hueco que nadie ve.
+    if lineas_dir:
+        filas += _fila(e, "Delivery Destination (Ship-To Address):",
+                       "<br/>".join(lineas_dir))
     fecha = datos.get("fecha_limite")
     if fecha:
         filas += _fila(e, "Delivery Window:",
@@ -2060,9 +2086,18 @@ def _bom_desde_analisis(analisis: dict) -> list[dict]:
     # El [SEE NOTE] es un marcador interno de "esto no se pudo traducir".
     # NUNCA sale en un papel comercial: el distribuidor no sabe que significa y,
     # si lo lee, deduce que el texto no es de fiar.
-    crudo = re.sub(re.escape(MARCA_PENDIENTE), "", crudo).strip()
-    desc = re.sub(re.escape(MARCA_PENDIENTE), "",
-                  crudo or (analisis.get("producto") or "")).strip()
+    crudo = _limpiar_marcas(crudo)
+    # RESPALDO EN INGLES, y solo si fallan los dos campos crudos.
+    #
+    # No es traduccion ni reescritura: es un texto generico que
+    # describe lo que el documento ES, para que la celda no quede en
+    # blanco y el distribuidor sepa que falta el detalle. Un hueco se
+    # rellena con el hueco del proveedor; un texto inventado se rellena
+    # con una mentira.
+    desc = (crudo
+            or _limpiar_marcas(analisis.get("producto") or "")
+            or "Material and specifications as described in the solicitation "
+               "attachments.")
     modelo = (analisis.get("modelo_especifico") or "").strip()
     if modelo and modelo.lower() not in desc.lower():
         desc = f"{desc} ({modelo})".strip()

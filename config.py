@@ -50,7 +50,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "5.0.1"
+KYOMOTO_VERSION = "5.0.2"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -562,6 +562,36 @@ SET_ASIDE_PYME_PUNTOS = 2
 # "puedes pedir la certificacion y cosyelo mas adelante"; ahora valen 0 mientras
 # L.A.M.B. no tenga la certificacion. Se gana en no gastar cuota en avisos a los
 # que no se puede presentar, y se pierde verlos.
+# =====================================================================
+# DIRECCION FISICA POR OFICINA CONTRATANTE
+# =====================================================================
+# Algunas oficinas no publican su direccion de entrega en ningun sitio del JSON
+# de SAM.gov, y con eso el bloque de envio del PDF se queda sin destino. Este
+# diccionario es el sitio donde se anaden a mano, y solo a mano.
+#
+# VACIO A PROPOSITO. No se rellena con direcciones deducidas ni con las que
+# suenen bien. Una direccion de un almacen federal inventada no es un error de
+# formato: es material que sale hacia otro sitio, y el aviso lo muestra en
+# mayusculas.
+#
+# COMO SE USA
+#   La clave es el nombre o el codigo de la oficina, tal cual viene en
+#   fullParentPathName o contractingOffice. Con mayusculas y sin acentos raros.
+#
+#   "697DCK": {
+#       "nombre": "FAA Logistics Warehouse",
+#       "calle": "<street address>",
+#       "ciudad": "<city>",
+#       "estado": "<state>",
+#       "zip": "<zip>",
+#   },
+#
+# Y sale en el PDF tal cual, con el orden que ya se usa: instalacion, calle,
+# ciudad, estado y ZIP.
+DIRECCIONES_POR_OFICINA = {
+    # "697DCK": {...},   # anadir aqui la direccion VERIFICADA
+}
+
 SET_ASIDES_PERMITIDOS = ("SBA", "TOTAL SMALL BUSINESS", "FULL AND OPEN",
                          "TOTAL SMALL BUSINESS COMPETITIVE", "NONE",
                          "UNRESTRICTED", "NA", "")
