@@ -159,6 +159,12 @@ def _ruta_logo() -> str:
     return ""
 
 
+# El hueco que se le reserva al logo. Lo USA la cabecera para no pasar por
+# debajo: medido, la cabecera llegaba a 6,30 pulgadas y el logo arrancaba en
+# 5,90, y se solapaban 1,15.
+_ANCHO_LOGO_RESERVADO = 2.00 * inch
+
+
 def _encabezado_logo(canvas, doc, ancho: float) -> None:
     """
     Logo arriba a la derecha.
@@ -439,7 +445,8 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
     ]
     bloque = Table([[filas_datos[0], filas_datos[1]], [filas_datos[2], filas_datos[3]],
                     [filas_datos[4], ""]],
-                   colWidths=[3.15 * inch, 3.15 * inch],
+                   colWidths=[(ancho - _ANCHO_LOGO_RESERVADO) / 2,
+                   (ancho - _ANCHO_LOGO_RESERVADO) / 2],
                    style=TableStyle([
                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
                        ("BACKGROUND", (0, 0), (-1, -1), GRIS_CLARO),
@@ -807,6 +814,34 @@ def texto_en_espanol(bruto) -> bool:
     return len(set(m.group(0).lower() for m in _RE_ESPANOL.finditer(limpio))) >= 2
 
 
+def _direccion_entrega_disponible(analisis: dict) -> dict:
+    """
+    La direccion que se puede pintar, la haya dejado quien hizo el analisis o
+    no.
+
+    Un aviso en vivo ya trae "direccion_entrega" puesta por desde_aviso(). Un
+    analisis guardado por el barrido puede no traerla, y entonces se mira si el
+    propio analisis conserva las claves de NASA: si trae "shipToAddress" o
+    "deliveryLocation", la direccion esta ahi y no hay motivo para perderla.
+
+    Que se pinte solo el pais NO es opcion: si al final solo se ha resuelto eso,
+    se devuelve vacio y el bloque avisa por el log. Un papel con "UNITED STATES"
+    en el Ship-To es peor que uno sin destino, porque parece que si lo tiene.
+    """
+    if not isinstance(analisis, dict):
+        return {}
+    directa = dict(analisis.get("direccion_entrega") or {})
+    if set(directa) - {"pais"}:
+        return directa
+    try:
+        desde_bruto = _direccion_completa(analisis)
+    except Exception:
+        desde_bruto = {}
+    if set(desde_bruto) - {"pais"}:
+        return desde_bruto
+    return {}
+
+
 def _direccion_completa(aviso: dict) -> dict:
     """
     La direccion fisica del destino, campo por campo. {"nombre","calle",
@@ -828,8 +863,11 @@ def _direccion_completa(aviso: dict) -> dict:
     # lastPerformanceRequirement es donde muchas agencias ponen la direccion
     # entera en texto plano, y es la unica fuente cuando placeOfPerformance
     # solo trae ciudad y estado.
+    # NASA Shared Services Center publica la direccion de entrega en
+    # shipToAddress y deliveryLocation, no en placeOfPerformance. Con solo este
+    # ultimo, el Ship-To del PDF se queda en el pais y no dice nada.
     for clave in ("lastPerformanceRequirement", "mainAddress",
-                  "deliveryAddress"):
+                  "deliveryAddress", "shipToAddress", "deliveryLocation"):
         v = aviso.get(clave)
         if isinstance(v, dict):
             bloques.append(v)
@@ -847,7 +885,13 @@ def _direccion_completa(aviso: dict) -> dict:
                     break
             if destino in salida:
                 break
-    return salida
+
+    # REGLA DURA: si lo unico que se ha resuelto es el pais, NO vale.
+    #
+    # Un Ship-To que dice "UNITED STATES" no es una direccion, es decir que no
+    # se sabe. Se descarta para que el lector siga mirando en las claves
+    # secundarias, que es donde la NASA publica la direccion de verdad.
+    return {} if set(salida) <= {"pais"} else salida
 
 
 _RE_ZIP = re.compile(r"^\d{5}(?:-\d{4})?$")
@@ -2000,10 +2044,25 @@ def _bom_desde_analisis(analisis: dict) -> list[dict]:
     # Traducir texto de compra produce frases rare en ingles: "entrega en",
     # "descripcion de", palabras que existen pero que no suenan a catalogo de un
     # oficial. El original no tiene ese problema porque no es una traduccion.
+    # PURIFICACION EN CASCADA, de mas fiable a menos:
+    #
+    #   1) description_original -> el texto tecnico crudo de la API de SAM.gov
+    #   2) titulo_original      -> el titulo, tambien crudo
+    #   3) producto             -> el BOM, que en un aviso en vivo ya sale de la
+    #                              descripcion cruda, pero en uno guardado por
+    #                              el barrido puede venir de Gemini
+    #
+    # El primero gana siempre. Lo que sale a la pagina 1 es ESO, no una version
+    # traducida ni una reescritura.
     crudo = str(analisis.get("descripcion_original") or "").strip()
     if not crudo:
         crudo = str(analisis.get("titulo_original") or "").strip()
-    desc = crudo or (analisis.get("producto") or "").strip()
+    # El [SEE NOTE] es un marcador interno de "esto no se pudo traducir".
+    # NUNCA sale en un papel comercial: el distribuidor no sabe que significa y,
+    # si lo lee, deduce que el texto no es de fiar.
+    crudo = re.sub(re.escape(MARCA_PENDIENTE), "", crudo).strip()
+    desc = re.sub(re.escape(MARCA_PENDIENTE), "",
+                  crudo or (analisis.get("producto") or "")).strip()
     modelo = (analisis.get("modelo_especifico") or "").strip()
     if modelo and modelo.lower() not in desc.lower():
         desc = f"{desc} ({modelo})".strip()
@@ -3101,7 +3160,7 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # La direccion fisica completa, campo por campo. Aqui es donde sale el
         # ZIP, y sale SOLO si el aviso lo trae: inventarlo manda el material al
         # estado equivocado.
-        "direccion_entrega": dict(analisis.get("direccion_entrega") or {}),
+        "direccion_entrega": _direccion_entrega_disponible(analisis),
         # La BASE en ingles, ya limpia, para que el blueprint superior se pueda
         # hidratar cuando no hay Capa B. Son los mismos valores que salen en la
         # tabla de la pagina 1, y se calculan aqui una sola vez para que las dos
@@ -3111,8 +3170,14 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         "spec_base": _valor_corto(spec, 220),
         # La unidad de LOTE que compro el aviso, distinta de la unidad fisica
         # que resolvio la Capa B. Las dos van en el papel a la vez.
+        # La unidad de LOTE. Primero la que dejo la correccion; y si no hay
+        # correccion, la que declara el propio aviso. Sin este respaldo, un
+        # aviso sin Capa B no puede pintar "1 LOT (...)" y se queda en un
+        # "50 SET" suelto, que es justo la duda que ese texto queria cerrar.
         "unidad_lote": str((analisis.get("qty_corregido") or {})
-                           .get("unidad_original") or "").strip().upper(),
+                           .get("unidad_original")
+                           or (analisis.get("unidad_medida") or "")
+                           or "").strip().upper(),
         "referencia_sam": (analisis.get("solicitation") or "").strip(),
         "titulo_sam": (analisis.get("title") or "").strip(),
         "fecha_limite": (analisis.get("limite") or "").strip(),
