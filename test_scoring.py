@@ -187,12 +187,22 @@ check("'Total Small Business Set-Aside' cuenta (antes no contaba)",
       "-> con igualdad exacta se escapaba, porque no es igual a 'TOTAL'")
 
 print()
-print("  LOS QUE EXIGEN CERTIFICACION AVISAN:")
+print("  LOS QUE EXIGEN CERTIFICACION AHORA VALEN 0 (v5.0.0):")
+# CAMBIO DE PRODUCTO, no un descuido. Antes pasaban con puntaje y un aviso de
+# "puedes pedir la certificacion y cosyelo mas adelante", porque L.A.M.B. es
+# una unipersonal sin certificacion SOCIOECONOMICA todavia.
+#
+# Ahora la capa legal los devuelve 0 en el acto, porque no se puede presentar y
+# cada uno que llega al final consume cuota de Gemini para nada.
+#
+# LO QUE SE PIERDE: mientras L.A.M.B. no tenga WOSB, EDWOSB, HBC, VOSBC o
+# SDVOSBC, esos avisos no se ven. Si se consigue una certificacion, hay que
+# anadir su nombre a config.SET_ASIDES_PERMITIDOS y vuelven a entrar.
 for sa in ("WOSB", "EDWOSB", "HBC", "VOSBC", "SDVOSBC"):
     p, m = puntua("43--PARTS KIT,ROTARY PUMP", set_aside=sa)
-    avisa = any("certificacion" in x for x in m)
-    check(f"    {sa:10} {BASE} -> {p}  avisa de la certificacion", avisa,
-          f"-> {m}")
+    explica = any("no puede presentarse" in x for x in m)
+    check(f"    {sa:10} {BASE} -> {p}  y lo explica", p == 0 and explica,
+          f"-> {p} {m}")
 
 print()
 print("  LOS QUE NO SON DE PYME NO SUMAN:")

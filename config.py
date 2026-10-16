@@ -50,7 +50,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "4.5.0"
+KYOMOTO_VERSION = "5.0.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -528,6 +528,77 @@ SET_ASIDE_PYME = {
     "EDWOSB 927", "WOSB 927", "HBC 927", "SDVOSBC 927", "VOSBC 927",
 }
 SET_ASIDE_PYME_PUNTOS = 2
+
+# =====================================================================
+# PRE-CUALIFICACION POR CAPAS (v5.0.0)
+# =====================================================================
+# Tres filtros por codigo, ANTES de gastar una llamada en Gemini. La idea es
+# que un falso positivo no llegue nunca a la Capa B, porque cada llamada que se
+# ahorra es cuota que le llega a una oportunidad de verdad.
+
+# --- Módulo legal: set-asides en los que L.A.M.B. puede presentarse ---
+#
+# ESTOS SON PERMISIBLES, NO LOS ÚNICOS PERMITIDOS.
+#
+# OJO CON LEERLO COMO UNA IGUALDAD EXACTA. Se pidió la lista
+# ["SBA", "TOTAL SMALL BUSINESS", "NONE", "UNRESTRICTED"] y aplicarla con
+# igualdad, y eso parte en cero TODO el negocio:
+#
+# SAM.gov manda el valor COMPLETO. Lo que llega de la API es
+# "TOTAL SMALL BUSINESS SET-ASIDE", que NO es igual a "TOTAL SMALL BUSINESS".
+# Con igualdad se devolvía 0 justo al set-aside que más le conviene a una PYME,
+# que es el que esta lista pretendia proteger.
+#
+# Ya se cayo en ese mismo error el 30-sep-2026 y quedo escrito mas abajo, en
+# SET_ASIDE_PYME. Por eso aqui la comparacion es por PALABRA y no por igualdad.
+#
+# "FULL AND OPEN" y "TOTAL SMALL BUSINESS COMPETITIVE" estan aqui por el mismo
+# motivo que "TOTAL SMALL BUSINESS": son los literales que de verdad manda
+# SAM.gov. "UNRESTRICTED" no aparece nunca en la respuesta de la API, asi que
+# dejarlo como unico nombre de esa categoria era dejar esa categoria vacia.
+#
+# Y los socioeconomicos (WOSB, EDWOSB, HBC, VOSBC, SDVOSBC, 8(A)) NO estan, y
+# eso es un cambio de producto, no un descuido. Antes pasaban con un aviso de
+# "puedes pedir la certificacion y cosyelo mas adelante"; ahora valen 0 mientras
+# L.A.M.B. no tenga la certificacion. Se gana en no gastar cuota en avisos a los
+# que no se puede presentar, y se pierde verlos.
+SET_ASIDES_PERMITIDOS = ("SBA", "TOTAL SMALL BUSINESS", "FULL AND OPEN",
+                         "TOTAL SMALL BUSINESS COMPETITIVE", "NONE",
+                         "UNRESTRICTED", "NA", "")
+
+# --- Módulo táctico: penalización por coincidencia de patrón ---
+#
+# re.I se escribe DENTRO del patron y no como bandera, para que el patron sea
+# autocontenido y se pueda pegar tal cual en una prueba.
+PENALIZACION_MANTENIMIENTO = -20
+PENALIZACION_ARMAMENTO = -20
+
+# Palabras que ya cubre TRABAJO_EN_SITIO. Si se vuelven a penalizar aqui, el
+# mismo "repair" resta dos veces, y un "REPAIR PARTS KIT" -que es precisely lo
+# que se vende- se hunde por doble.
+PALABRAS_YA_PENALIZADAS = {"repair", "maintenance", "overhaul", "refurbish"}
+
+# --- Urgencia logística ---
+#
+# Un deadline de dos dias no sirve para una estructura metalica que hay que
+# cotizar a medida, y es la norma para un carton de toner.
+PENALIZACION_URGENCIA = -10
+DIAS_URGENCIA = 2
+
+# PSC de commodity de catalogo: lo que se compra en caja y se repone.
+# 70 = mobiliario y accesorios, 75 = papel y material de oficina.
+PSC_COMERCIAL_CATALOGO = ("70", "75")
+COMERCIAL_CATALOGO_PALABRAS = ("toner", "cartridge", "printer", "paper",
+                               "medical supply", "medical supplies",
+                               "first aid", "office supply", "binder")
+
+# Suministros que exigen cotizacion industrial a medida. Aqui un plazo corto es
+# un no, porque el precio sale de un plano y no de un catalogo.
+COTIZACION_INDUSTRIAL_PALABRAS = (
+    "steel structure", "structural steel", "metal building", "container",
+    "crane", "hoist", "gantry", "scaffold", "stair", "platform",
+    "fabrication", "conveyor", "tank", "chute", "ladder", "mezzanine",
+)
 
 # Set-asides donde la empresa tiene que tener certificacion de propiedad.
 SET_ASIDE_CON_CERTIFICACION = {

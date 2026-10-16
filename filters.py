@@ -135,6 +135,165 @@ _RE_ORIGEN = _compilar_cots(config.EXCLUSION_CERTIFICACION_ORIGEN)
 # La etiqueta que se pide en el log de descarte.
 TAG_ALTA_COMPLEJIDAD = "high_complexity_defense"
 
+# =====================================================================
+# v5.0.0 - PRE-CUALIFICACION POR CAPAS
+# =====================================================================
+# Tres filtros por codigo que corren ANTES de la llamada a Gemini. Todo lo que
+# hay aqui trabaja con lo que SAM.gov devuelve, y NUNCA lanza: un campo a None
+# o un tipo raro se trata como "no lo sé", no como una excepción. Un filtro que
+# revienta con un aviso raro es un filtro que ha dejado de filtrar.
+
+import re as _re
+
+# Servicios de taller o mantenimiento. El patron lleva (?i) DENTRO, para que
+# sea autocontenido y se pueda pegar en una prueba sin banderas aparte.
+_RE_MANTENIMIENTO = _re.compile(
+    r"(?i)\b(repair|modification|overhaul|maintenance|reman|refurbish)\b")
+_RE_ARMAMENTO = _re.compile(
+    r"(?i)\b(f-15|f-16|f-22|f-35|aircraft coatings|missile|munition|warhead"
+    r"|torpedo)\b")
+
+# El campo de set-aside de SAM.gov se llama typeOfSetAside. Se aceptan los dos
+# por si el analysis ya lo renombro.
+_CAMPOS_SET_ASIDE = ("typeOfSetAside", "setAside", "set_aside")
+
+
+def _valor_set_aside(opp: dict) -> str:
+    """El set-aside del aviso, en mayusculas y sin comas sobrantes. "" si no hay."""
+    if not isinstance(opp, dict):
+        return ""
+    for campo in _CAMPOS_SET_ASIDE:
+        v = opp.get(campo)
+        if v is None:
+            continue
+        s = _texto(v).upper().strip()
+        if s:
+            return s
+    return ""
+
+
+def set_aside_permitido(opp: dict) -> tuple[bool, str]:
+    """
+    ¿Puede L.A.M.B. presentarse a este aviso?
+
+    COMPARA POR PALABRA, NO POR IGUALDAD. Y no es un detalle: SAM.gov manda
+    "TOTAL SMALL BUSINESS SET-ASIDE", y el permiso es "TOTAL SMALL BUSINESS".
+    Con igualdad se devolvía 0 justo al set-aside que más le conviene a una
+    empresa unipersonal, que es lo que este módulo tiene que proteger.
+
+    Un set-aside ausente o vacío NO se rechaza: hay avisos que no lo traen, y
+    sin ese dato no hay motivo para descartarlos.
+    """
+    valor = _valor_set_aside(opp)
+    # "N/A" LLEGA COMO "N A". _texto() normaliza los separadores, asi que la
+    # barra ya no esta cuando se compara. Sin contemplarlo aqui, un aviso con
+    # set-aside "N/A" -que es un valor perfectamente normal de SAM.gov-
+    # salia con 0 puntos por no estar en la lista de permitidos.
+    #
+    # Ojo con lo que significa esto: un valor que no se reconoce NO se
+    # rechaza por ser raro. Se rechaza solo si se reconoce como un programa de
+    # certificacion al que L.A.M.B. no puede presentarse. La duda preferible.
+    NA_EQUIVALENTES = ("", "NA", "N A", "N/A", "NAN", "NONE", "NONE - NO "
+                       "SET-ASIDE", "NO SETASIDE", "UNRESTRICTED",
+                       "FULL AND OPEN", "FULLY OPEN")
+    if valor in NA_EQUIVALENTES:
+        return True, valor
+    plano = _re.sub(r"[^A-Z0-9 ]+", " ", valor)
+    plano = " ".join(plano.split())
+    for permitido in config.SET_ASIDES_PERMITIDOS:
+        clave = _re.sub(r"[^A-Z0-9 ]+", " ", str(permitido).upper()).strip()
+        if not clave:
+            continue
+        if clave in plano or plano in clave:
+            return True, valor
+    return False, valor
+
+
+def penalizaciones_patron(texto: str) -> tuple[int, list[str]]:
+    """
+    Penalizacion por coincidencia de patron sobre el texto del aviso.
+
+    Devuelve (puntos, motivos). Siempre 0 si no hay nada.
+
+    Una palabra que YA esta en TRABAJO_EN_SITIO no se penaliza dos veces: el
+    mismo "repair" seria restar 20 aqui y hasta 8 alla, y un "REPAIR PARTS KIT"
+    -que es justamente material que se vende- se hundiria por doble.
+    """
+    texto = _texto(texto)
+    if not texto:
+        return 0, []
+    puntos, motivos = 0, []
+
+    hallados = {m.group(1).lower() for m in _RE_MANTENIMIENTO.finditer(texto)}
+    nuevos = sorted(hallados - config.PALABRAS_YA_PENALIZADAS)
+    if nuevos:
+        puntos += config.PENALIZACION_MANTENIMIENTO
+        motivos.append("mantenimiento/taller (%s) %+d"
+                       % (", ".join(nuevos[:3]),
+                          config.PENALIZACION_MANTENIMIENTO))
+
+    armas = sorted({m.group(0).lower() for m in _RE_ARMAMENTO.finditer(texto)})
+    if armas:
+        puntos += config.PENALIZACION_ARMAMENTO
+        motivos.append("armamento/aeroespacial (%s) %+d"
+                       % (", ".join(armas[:3]), config.PENALIZACION_ARMAMENTO))
+    return puntos, motivos
+
+
+def _psc(opp: dict) -> str:
+    """Los dos primeros digitos del PSC, o "" si no lo hay."""
+    v = opp.get("classificationCode")
+    if v is None:
+        v = opp.get("psc")
+    s = _texto(v).strip()
+    m = _re.match(r"(\d{2})", s)
+    return m.group(1) if m else ""
+
+
+def es_comercial_catalogo(opp: dict, texto: str = "") -> bool:
+    """
+    Commodity de catalogo: se compra en caja y se repone.
+
+    El plazo corto NO le resta: un carton de toner con dos dias de margen se
+    pide igual.
+    """
+    if _psc(opp) in config.PSC_COMERCIAL_CATALOGO:
+        return True
+    bajo = _texto(texto).lower()
+    return any(p in bajo for p in config.COMERCIAL_CATALOGO_PALABRAS)
+
+
+def penalizacion_urgencia(opp: dict, texto: str = "",
+                          dias: int | None = None) -> tuple[int, list[str]]:
+    """
+    Puerta de viabilidad logistico-temporal.
+
+    Un aviso de dos dias para unas estructuras metalicas es un no: el precio
+    sale de un plano y del acero de la semana, no de un catalogo. Para un
+    consumible de catalogo, dos dias son lo normal y no resta nada.
+    """
+    if dias is None:
+        try:
+            import sam_api
+            dias = sam_api.dias_restantes(opp)
+        except Exception:
+            dias = None
+    try:
+        dias = int(dias)
+    except (TypeError, ValueError):
+        return 0, []
+    if dias > config.DIAS_URGENCIA:
+        return 0, []
+    if es_comercial_catalogo(opp, texto):
+        return 0, []
+    bajo = _texto(texto).lower()
+    if any(p in bajo for p in config.COTIZACION_INDUSTRIAL_PALABRAS):
+        return (config.PENALIZACION_URGENCIA,
+                ["cotizacion a medida con %s dias de margen %+d"
+                 % (dias, config.PENALIZACION_URGENCIA)])
+    return 0, []
+
+
 def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     """
     Devuelve (puntaje, motivos). Los motivos se muestran en /debug para que
@@ -142,9 +301,34 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     """
     titulo = _texto(opp.get("title"))
     cuerpo = _texto(descripcion)
-    combo = f"{titulo} {cuerpo}"
+    # El crudo de SAM.gov tiene prioridad: es el texto oficial, y el titulo y la
+    # descripcion del analysis pueden venir traducidos por Gemini.
+    crudo = _texto(opp.get("description_original")) or cuerpo
+    combo = " ".join(x for x in (titulo, crudo) if x)
     motivos: list[str] = []
     puntos = 0
+
+    # --- CAPA LEGAL: set-aside. Early exit. ---
+    #
+    # Va PRIMERO y con salida inmediata a proposito: si la empresa no puede
+    # presentarse, el resto del computo no sirve de nada y se ahorra la llamada
+    # a Gemini, que es lo que esta capa persigue.
+    ok_sa, valor_sa = set_aside_permitido(opp)
+    if not ok_sa:
+        return 0, ["Set-aside '%s' fuera de los permitidos: L.A.M.B. no puede "
+                   "presentarse" % (valor_sa or "(sin dato)")]
+
+    # --- CAPA TACTICA: penalizacion por patron ---
+    p_patron, m_patron = penalizaciones_patron(combo)
+    if p_patron:
+        puntos += p_patron
+        motivos.extend(m_patron)
+
+    # --- CAPA LOGISTICA: urgencia ---
+    p_urg, m_urg = penalizacion_urgencia(opp, combo)
+    if p_urg:
+        puntos += p_urg
+        motivos.extend(m_urg)
 
     # --- Veto por NAICS (gana sobre todo) ---
     veredicto = es_bien_por_naics(opp)

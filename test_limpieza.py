@@ -141,7 +141,7 @@ check("Cada nombre es un modelo distinto de verdad (no subcadena de otro)",
 check("Siguen siendo al menos cinco modelos usables",
       len({principal} | set(alternos)) >= 5,
       f"-> {len({principal} | set(alternos))}")
-check("La version subio a 4.5.0", config.KYOMOTO_VERSION == "4.5.0",
+check("La version subio a 5.0.0", config.KYOMOTO_VERSION == "5.0.0",
       f"-> {config.KYOMOTO_VERSION}")
 
 print()
