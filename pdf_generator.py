@@ -249,17 +249,28 @@ def _estilos() -> dict:
     e["bp_lbl"] = ParagraphStyle("bp_lbl", fontName="Helvetica-Bold",
                                  fontSize=8, leading=10.5,
                                  textColor=colors.HexColor("#1B3B6F"))
+    # wordWrap=True es el valor por defecto de ReportLab, pero se pone
+    # explicito: es lo que hace que un texto largo BAJE DE RENGLON en vez de
+    # salirse por la derecha. Con el ajuste de tamano de este encargo, una
+    # directiva larga cabe en menos lineas y el bloque no crece tanto.
     e["bp_val"] = ParagraphStyle("bp_val", fontName="Helvetica",
-                                 fontSize=9, leading=12, textColor=colors.black)
+                                 fontSize=9.5, leading=12,
+                                 textColor=colors.black,
+                                 wordWrap="CJK")
+    e["bp_fuerte"] = ParagraphStyle("bp_fuerte", fontName="Helvetica-Bold",
+                                    fontSize=9, leading=11.5,
+                                    textColor=colors.HexColor("#1B3B6F"),
+                                    wordWrap="CJK")
+    e["bp_lbl"] = ParagraphStyle("bp_lbl", fontName="Helvetica-Bold",
+                                 fontSize=8, leading=10.5,
+                                 textColor=colors.HexColor("#1B3B6F"),
+                                 wordWrap="CJK")
     # El MPN en Courier. Es un codigo de inventario y el distribuidor lo
     # teclea para buscarlo en su almacen; en una fuente de palo seco el "0"
     # y la "O" se confunden, y un parte equivocado es cotizar el material
     # equivocado.
     e["bp_mpn"] = ParagraphStyle("bp_mpn", fontName="Courier-Bold",
                                  fontSize=9.5, leading=12, textColor=AZUL)
-    e["bp_fuerte"] = ParagraphStyle("bp_fuerte", fontName="Helvetica-Bold",
-                                    fontSize=8.5, leading=11.5,
-                                    textColor=colors.HexColor("#1B3B6F"))
     e["nota"] = ParagraphStyle("nota", fontName="Helvetica-Oblique",
                                fontSize=8, leading=10.5, textColor=GRIS)
     e["firma_nombre"] = ParagraphStyle("firma_nombre",
@@ -669,17 +680,23 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         # que es justo lo contrario de "dos contenedores independientes".
         # KeepTogether los mueve enteros si no caben, y el PageBreak los
         # arranca en la 2 sin depender de donde haya quedado la tabla del BOM.
+        # KeepTogether POR CADA BLOQUE, y no sobre los dos juntos.
+        #
+        # Con los dos en un solo KeepTogether, si no caben se iban los dos a la
+        # pagina 3, dejando la 2 a medias. Con uno cada uno, el que no cabe
+        # baja entero y el otro se queda donde estaba. Es lo que se pidio: que
+        # el motor empuje el bloque largo completo en vez de partir sus lineas
+        # a la mitad.
         _cat = _blueprint_catalogo(e, datos)
         _log = _blueprint_logistica(e, datos)
         if _cat is not None or _log is not None:
             f.append(PageBreak())
-            _bloques = []
             if _cat is not None:
-                _bloques.append(_cat)
-                _bloques.append(Spacer(1, 0.16 * inch))
+                f.append(KeepTogether([_cat]))
+            if _cat is not None and _log is not None:
+                f.append(Spacer(1, 0.16 * inch))
             if _log is not None:
-                _bloques.append(_log)
-            f.append(KeepTogether(_bloques))
+                f.append(KeepTogether([_log]))
 
         if datos.get("notas"):
             f.append(Spacer(1, 0.14 * inch))
@@ -768,9 +785,9 @@ _CLAVES_DIRECCION = (
 # traductor: es una guarda. Si aparece una de estas en un campo que deberia
 # venir en ingles de SAM.gov, se avisa.
 _RE_ESPANOL = re.compile(
-    r"\b(de|del|la|el|los|las|un|una|y|o|para|con|sin|por|que|como|"
+    r"\b(de|del|la|el|los|las|un|una|y|o|para|que|como|"
     r"cantidad|descripci[oó]n|especificaci[oó]n|suministro|entrega|"
-    r"pedido|requisitos?|material|pliegos?|lote|unidades|env[ií]o|"
+    r"pedido|requisitos?|pliegos?|lote|unidades|env[ií]o|"
     r"embalaje|garant[ií]a|cl[aá]usula|n[uú]mero)\b", re.I)
 
 
@@ -980,7 +997,11 @@ def _contenedor(e, titulo, filas):
     if not filas:
         return None
     ancho = LETTER[0] - config.PDF_MARGEN_IZQUIERDO - config.PDF_MARGEN_DERECHO
-    ancho_et = ancho * 0.33
+    # 25/75, y no 33/67. Con el 33 los valores largos de LOGISTICS (las
+    # directivas de drop-shipping y el CoC) se partian en muchas lineas y
+    # empujaban el bloque a la pagina siguiente. Con el 75 caben en menos
+    # renglones y el bloque entero cabe en la 2.
+    ancho_et = ancho * 0.25
     cuerpo = Table(filas, colWidths=[ancho_et, ancho - ancho_et],
                    hAlign="LEFT",
                    style=TableStyle([
@@ -1010,6 +1031,28 @@ def _contenedor(e, titulo, filas):
                  ]))
 
 
+_UNIDADES_CORTAS = {"EA", "KT", "CA", "PR", "BG", "PK", "PL", "HD", "CS",
+                    "BX", "LO", "CTN", "DR", "FT", "LB", "OZ", "GA", "PT"}
+
+
+def _plural_unidad(unidad: str) -> str:
+    """
+    "SET" -> "SETS", pero "EA" se queda en "EA".
+
+    Las siglas de dos letras del catalogo de unidades son abreviaturas, no
+    palabras: "50 EA" no se escribe "50 EAS". Las que si son palabra se
+    pluralizan, que es lo que el distributor lee.
+    """
+    u = str(unidad or "").strip().upper()
+    if not u:
+        return ""
+    if u in _UNIDADES_CORTAS:
+        return u
+    if u.endswith("S"):
+        return u
+    return u + "S"
+
+
 def _blueprint_catalogo(e, datos):
     """
     CONTENEDOR 1. Que tiene que buscar el distribuidor en su almacen.
@@ -1022,46 +1065,61 @@ def _blueprint_catalogo(e, datos):
     ctx = dict(datos.get("contexto_semantico") or {})
     # El contexto manda sobre el detalle: es el que pasa por la verificacion
     # contra el corpus.
+    #
+    # Y DETRAS de eso, la BASE. Antes este bloque sacaba TODO de la Capa B, que
+    # solo existe en una licitacion consolidada, asi que en cualquier aviso
+    # normal salia con una sola linea ("1 LOT") y media pagina en blanco.
+    # Ajustar el ancho de columna no lo arregla: lo que falta es la fuente de
+    # los datos, y esa es la ficha del aviso.
     marca = ctx.get("manufacturer_brand") or det.get("manufacturer_brand_name")
-    parte = ctx.get("part_number") or det.get("manufacturer_part_number")
+    parte = (ctx.get("part_number") or det.get("manufacturer_part_number")
+             or str(datos.get("parte_base") or "").strip())
     producto = (ctx.get("product_specification_summary")
-                or det.get("resolved_product_name"))
+                or det.get("resolved_product_name")
+                or datos.get("identidad_base") or "")
     specs = (ctx.get("dimensions_or_specs")
-             or det.get("dimensions_or_specs") or "")
+             or det.get("dimensions_or_specs")
+             or datos.get("spec_base") or "")
     linea = (datos.get("lineas") or [{}])[0] or {}
 
     filas = []
     filas += _fila(e, "Manufacturer / Brand:", _valor_corto(marca, 90))
     if parte:
+        # El MPN en Courier. Es un codigo de inventario y el distribuidor lo
+        # teclea para buscarlo en su almacen; en una fuente de palo seco el "0"
+        # y la "O" se confunden, y un parte equivocado es cotizar el material
+        # equivocado.
         filas.append([Paragraph("<b>MANUFACTURER PART NUMBER (MPN):</b>",
                                 e["bp_lbl"]),
                       Paragraph(_esc_html(str(parte)), e["bp_mpn"])])
     filas += _fila(e, "Product Identity:", _valor_corto(producto))
-    filas += _fila(e, "Dimensions &amp; Specifications:", _valor_corto(specs))
+    filas += _fila(e, "Material Specification:", _valor_corto(specs))
     cantidad = _num(linea.get("cantidad"))
-    unidad = str(linea.get("unidad") or "").strip()
-    # La unidad de LOTE, que es la que el aviso compro, y el entero que la
+    unidad = str(linea.get("unidad") or "").strip().upper()
+    # La unidad de LOTE, que es la que compro el aviso, y el entero que la
     # Capa B resolvio del desglose. Son dos cosas distintas y el papel tiene que
     # decir las dos a la vez, porque si no el distribuidor tiene que escribir
     # para preguntar cual de las dos se cotiza.
     lote = str(datos.get("unidad_lote") or linea.get("unidad_original")
                or "").strip().upper()
     if cantidad:
-        desglose = f"{cantidad:,.0f}"
         if lote and unidad and unidad != lote:
-            # Formato pedido: "1 LOT (Broken down as: 100 physical units /
-            # pieces)".
+            # "1 LOT (Broken down as: 50 Physical SETS)".
             #
-            # OJO con la palabra "Broken down" y no "Desglosado en": el punto 1
-            # del encargo prohibe expresamente meter texto en espanol en este
-            # PDF, y "Desglosado en:" que pedia el punto 2 lo es. Un documento
-            # que dice "Desglosado en" en una linea y "Consoidated for" en otra
-            # no lo entiende un distributor de Albuquerque. Va en ingles.
-            valor = "1 %s (Broken down as: %s physical units / pieces)" % (
-                lote, desglose)
+            # Se nombra la unidad REAL de las piezas, y no un "units/pieces"
+            # generico: si el desglose son 50 conjuntos, decir "units" deja al
+            # distribuidor sin saber si 50 es el numero de piezas o el de
+            # conjuntos, y eso es exactamente la duda que hace perder el ciclo
+            # de correos.
+            #
+            # Y va en ingles, no "Desglosado en": el encargo prohibe expresamente
+            # meter espanol en este PDF, y un papel que dice "Desglosado en" en
+            # una linea y "Consolidated for" en otra no lo entiende nadie.
+            valor = "1 %s (Broken down as: %s Physical %s)" % (
+                lote, f"{cantidad:,.0f}", _plural_unidad(unidad))
         else:
-            valor = desglose + ((" " + unidad) if unidad else "")
-        filas.append([Paragraph("<b>TOTAL UNITS REQUIRED:</b>", e["bp_lbl"]),
+            valor = f"{cantidad:,.0f}" + ((" " + unidad) if unidad else "")
+        filas.append([Paragraph("<b>QUANTITY / VOLUMEN:</b>", e["bp_lbl"]),
                       Paragraph("<b>%s</b>" % valor, e["bp_val"])])
     # Se reutiliza _ref_plano(), que ya existia y es mas estricto que uno nuevo:
     # exige al menos un DIGITO, para que "Planning" no se lea como plano
@@ -3044,6 +3102,13 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # ZIP, y sale SOLO si el aviso lo trae: inventarlo manda el material al
         # estado equivocado.
         "direccion_entrega": dict(analisis.get("direccion_entrega") or {}),
+        # La BASE en ingles, ya limpia, para que el blueprint superior se pueda
+        # hidratar cuando no hay Capa B. Son los mismos valores que salen en la
+        # tabla de la pagina 1, y se calculan aqui una sola vez para que las dos
+        # mitades del documento no puedan divergir.
+        "identidad_base": _valor_corto(desc, 150),
+        "parte_base": modelo,
+        "spec_base": _valor_corto(spec, 220),
         # La unidad de LOTE que compro el aviso, distinta de la unidad fisica
         # que resolvio la Capa B. Las dos van en el papel a la vez.
         "unidad_lote": str((analisis.get("qty_corregido") or {})
