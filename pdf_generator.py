@@ -795,7 +795,9 @@ _RE_ESPANOL = re.compile(
     r"\b(de|del|la|el|los|las|un|una|y|o|para|que|como|"
     r"cantidad|descripci[oó]n|especificaci[oó]n|suministro|entrega|"
     r"pedido|requisitos?|pliegos?|lote|unidades|env[ií]o|"
-    r"embalaje|garant[ií]a|cl[aá]usula|n[uú]mero)\b", re.I)
+    r"embalaje|garant[ií]a|cl[aú]sula|n[uú]mero|"
+    r"solicitud|cotizaci[oó]n|rodamiento|expediente|licitaci[oó]n|"
+    r"adquisici[oó]n|protecci[oó]n|suministros?)\b", re.I)
 
 
 def texto_en_espanol(bruto) -> bool:
@@ -1033,6 +1035,27 @@ def _esc_html(bruto) -> str:
             .replace(">", "&gt;"))
 
 
+def _identidad_producto(desc: str, modelo: str = "",
+                        tope: int = 260) -> str:
+    """
+    La identidad del producto: la definicion de fabrica tal cual, sin que el
+    recorte se lleve por delante el numero de parte.
+
+    Si hay modelo y no cabe dentro del texto, se pone DELANTE. No al final: al
+    final es justo donde lo corta el recorte, y el lector del PDF ve el
+    principio de la celda primero.
+    """
+    limpio = " ".join(re.sub(r"<[^>]+>", " ", str(desc or "")).split())
+    mod = " ".join(str(modelo or "").split())
+    if mod and mod.lower() not in limpio.lower():
+        limpio = (mod + " - " + limpio).strip(" -")
+    if len(limpio) <= tope:
+        return _esc_html(limpio)
+    # Al recortar, se corta por una PALABRA, que un corte a lo bruto deja a
+    # medias y produce "POWDER-CO" en un documento comercial.
+    return _esc_html(limpio[:tope].rsplit(" ", 1)[0]) + " ..."
+
+
 def _valor_corto(bruto, tope=180) -> str:
     """Un valor de una linea, sin html, para una celda de la tabla."""
     if not bruto:
@@ -1210,9 +1233,14 @@ def _blueprint_logistica(e, datos):
         # Sin direccion fisica no se inventa una. Se avisa en el log para que
         # quede constancia en Render de lo que faltó, y el papel dice lo que si
         # se sabe.
-        log.warning("PDF: el aviso %s no trae direccion fisica de entrega; "
-                    "sale solo la ciudad y el estado",
-                    datos.get("referencia_sam") or "(sin numero)")
+        log.warning(
+            "PDF: el aviso %s NO trae direccion fisica de entrega en "
+            "placeOfPerformance, shipToAddress ni deliveryLocation. Se deja "
+            "el hueco con instruccion. REVISAR A MANO el pliego adjunto.",
+            datos.get("referencia_sam") or "(sin numero)")
+        # Se permite el respaldo SOLO si viene de una fuente de entrega. El
+        # lugar_de_entrega_aviso() ya no cae en la oficina contratante, asi que
+        # lo que llegue aqui es ciudad y estado de verdad del destino.
         plano = _dir_limpio(datos.get("lugar_entrega"))
         if plano:
             lineas_dir = [plano]
@@ -1225,6 +1253,11 @@ def _blueprint_logistica(e, datos):
     if lineas_dir:
         filas += _fila(e, "Delivery Destination (Ship-To Address):",
                        "<br/>".join(lineas_dir))
+    else:
+        # Hueco con instruccion, no hueco a secas y no direccion inventada.
+        filas += _fila(e, "Delivery Destination (Ship-To Address):",
+                       _esc_html(SIN_DESTINO_CONFIRMADO),
+                       estilo_val="bp_fuerte")
     fecha = datos.get("fecha_limite")
     if fecha:
         filas += _fila(e, "Delivery Window:",
@@ -2022,6 +2055,16 @@ def _bom_desde_aviso(aviso: dict, descripcion: str = "") -> list[dict]:
     return salida
 
 
+# Texto que va en el Ship-To cuando no se sabe la direccion de entrega.
+#
+# No es una frase de relleno: es una instruccion al proveedor, y por eso esta
+# en ingles nativo como el resto. Y no lleva ningun dato de la oficina
+# contratante, porque el proveedor tiene que ir al ALMACEN, no a la oficina que
+# firma el contrato.
+SIN_DESTINO_CONFIRMADO = ("Exact delivery facility address to be confirmed "
+                          "upon award assignment")
+
+
 def lugar_de_entrega_aviso(aviso: dict) -> str:
     """
     Destino de entrega en ingles, a partir de placeOfPerformance o del titulo.
@@ -2035,10 +2078,16 @@ def lugar_de_entrega_aviso(aviso: dict) -> str:
         v = pop.get(clave) if isinstance(pop, dict) else None
         if v and str(v).strip():
             partes.append(str(v).strip())
-    if not partes:
-        txt = str(aviso.get("fullParentPathName") or "")
-        if txt:
-            partes.append(txt.split(" / ")[-1].strip())
+    # REGLA 3: aqui YA NO se cae en fullParentPathName.
+    #
+    # fullParentPathName es la OFICINA QUE HACE EL CONTRATO, no el sitio donde
+    # va el material. Ponerla en el Ship-To mandaba al transportista a la
+    # direccion equivocada, y en un documento de compra eso es material
+    # perdido y un aviso que vuelve.
+    #
+    # Antes se caia aqui a proposito porque no habia otra cosa. Ahora hay: el
+    # lector de direcciones mira shipToAddress y deliveryLocation, y si no
+    # encuentra nada se pone SIN_DESTINO_CONFIRMADO, que es honesto.
     if not partes:
         return ""
     sitio = ", ".join(partes)
@@ -2087,6 +2136,31 @@ def _bom_desde_analisis(analisis: dict) -> list[dict]:
     # NUNCA sale en un papel comercial: el distribuidor no sabe que significa y,
     # si lo lee, deduce que el texto no es de fiar.
     crudo = _limpiar_marcas(crudo)
+
+    # REGLA 1: INGLES NATIVO, SIN EXCEPCIONES.
+    #
+    # Antes un texto crudo en espanol pasaba igual, y solo se avisaba por el
+    # log. Un aviso no dice que el documento va a espanol y el log no lo lee
+    # nadie. Si el texto trae espanol, NO SE ESCRIBE: se cae al siguiente
+    # candidato de la cascada, y si todos estan en espanol, al texto generico.
+    #
+    # No se "traduce". Un traductor sobre texto de compra produce frases rare,
+    # y un texto raro en un campo que identifica el material es peor que un
+    # texto honesto que acknowledge que falta el detalle.
+    if crudo and texto_en_espanol(crudo):
+        log.warning("desde_aviso: la descripcion original trae espanol y no "
+                    "se escribe en el PDF; se busca la siguiente fuente")
+        crudo = ""
+
+    # REGLA 2: LA IDENTIDAD DEL PRODUCTO NO SE TRUNCA.
+    #
+    # El numero de parte va casi siempre al FINAL de la descripcion del aviso.
+    # Un recorte a 150 caracteres se lo comia, y sin numero de parte el
+    # distribuidor no sabe que cotizar: que es justo lo que este documento
+    # existe para que sepa.
+    #
+    # Por eso el limite es holgado y, cuando hay modelo, se asegura que quede.
+    #
     # RESPALDO EN INGLES, y solo si fallan los dos campos crudos.
     #
     # No es traduccion ni reescritura: es un texto generico que
@@ -3200,7 +3274,11 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # hidratar cuando no hay Capa B. Son los mismos valores que salen en la
         # tabla de la pagina 1, y se calculan aqui una sola vez para que las dos
         # mitades del documento no puedan divergir.
-        "identidad_base": _valor_corto(desc, 150),
+        # 260 caracteres en vez de 150, y con el modelo delante si no cabe.
+        # Es el mismo texto que va en la tabla de la pagina 1, no una version
+        # aparte: dos textos distintos para el mismo campo es como las dos
+        # mitades del documento dejan de cuadrar.
+        "identidad_base": _identidad_producto(desc, modelo),
         "parte_base": modelo,
         "spec_base": _valor_corto(spec, 220),
         # La unidad de LOTE que compro el aviso, distinta de la unidad fisica
