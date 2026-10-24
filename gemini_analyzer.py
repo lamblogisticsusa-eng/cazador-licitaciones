@@ -578,23 +578,38 @@ DESCRIPCION OFICIAL
 
 
 def _extraer_json(texto: str) -> dict:
-    """Tolerante: quita cercas de markdown y busca el primer objeto JSON."""
+    """Tolerante: quita cercas de markdown y busca el primer objeto JSON.
+
+    v5.2.1: la respuesta de la IA puede salir como ARRAY de objetos JSON (por
+    ejemplo cuando se le evalua con un Synthetic Metadata Fallback y el modelo
+    se desborda de formato). Se normaliza a dict tomando el primer elemento
+    valido, ANTES de que el llamador haga .get() sobre una lista y reviente con
+    "AttributeError: 'list' object has no attribute 'get'".
+    """
     if not texto:
         raise GeminiError("Gemini devolvio respuesta vacia")
     limpio = texto.strip()
     limpio = re.sub(r"^```(?:json)?|```$", "", limpio, flags=re.MULTILINE).strip()
+    datos = None
     try:
-        return json.loads(limpio)
+        datos = json.loads(limpio)
     except json.JSONDecodeError:
-        pass
-    inicio = limpio.find("{")
-    fin = limpio.rfind("}")
-    if inicio == -1 or fin <= inicio:
-        raise GeminiError(f"Gemini no devolvio JSON: {limpio[:300]}")
-    try:
-        return json.loads(limpio[inicio:fin + 1])
-    except json.JSONDecodeError as e:
-        raise GeminiError(f"JSON ilegible de Gemini: {e} | {limpio[:300]}")
+        datos = None
+    if not isinstance(datos, dict) and isinstance(datos, list) and len(datos) > 0:
+        datos = datos[0]
+    if not isinstance(datos, dict):
+        inicio = limpio.find("{")
+        fin = limpio.rfind("}")
+        if inicio == -1 or fin <= inicio:
+            raise GeminiError(f"Gemini no devolvio JSON: {limpio[:300]}")
+        try:
+            datos = json.loads(limpio[inicio:fin + 1])
+        except json.JSONDecodeError as e:
+            raise GeminiError(f"JSON ilegible de Gemini: {e} | {limpio[:300]}")
+    if not isinstance(datos, dict):
+        raise GeminiError(
+            f"Gemini devolvio JSON que no es un objeto: {type(datos).__name__} | {str(datos)[:300]}")
+    return datos
 
 
 def _num(valor):

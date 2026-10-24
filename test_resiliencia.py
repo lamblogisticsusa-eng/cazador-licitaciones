@@ -349,6 +349,11 @@ for etiqueta, error, debe, no_debe in CASOS:
     if etiqueta == "429":
         check("  y lo marca con aviso, no como error", "⚠" in cuerpo or "límite" in cuerpo)
 
+JSON_LISTA = '[{"viable": true, "motivo_descarte": null, "producto": "x"}]'
+d = ga._extraer_json(JSON_LISTA)
+check("La respuesta de Gemini como ARRAY se convierte al 1er objeto",
+      isinstance(d, dict) and d.get("viable") is True, f"-> {type(d).__name__} {d}")
+
 for s in ("", "-wal", "-shm"):
     try:
         os.remove(DB + s)
