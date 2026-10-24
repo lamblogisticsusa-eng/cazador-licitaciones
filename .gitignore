@@ -14,6 +14,17 @@ venv/
 render.local.yaml
 secrets.yaml
 
+# Credenciales locales (kyomoto.local.json, .env.local, *.local.json, *.pem,
+# credentials.json): nunca deben entrar al repositorio ni a ningun backup.
+kyomoto.local.json
+.env.local
+*.local.json
+*.pem
+credentials.json
+secrets.json
+.env.*
+!.env.example
+
 # Sistema
 Thumbs.db
 desktop.ini

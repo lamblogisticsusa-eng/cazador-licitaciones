@@ -2,6 +2,7 @@
 Kyomoto - Configuracion central.
 Todas las claves se leen de variables de entorno. Nunca se hardcodean.
 """
+import json
 import os
 
 # Se muestra en /selftest y /estado para saber que codigo esta
@@ -50,7 +51,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "5.2.1"
+KYOMOTO_VERSION = "5.2.2"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -72,6 +73,19 @@ def _float(nombre: str, por_defecto: float) -> float:
 
 
 # --- Credenciales ---
+# v5.2.2 = blindaje de seguridad: las llaves SOLO viven en variables de entorno
+# del sistema (os.environ). Si existe un fichero local gitignored
+# (kyomoto.local.json) con las credenciales, se copian a os.environ antes de
+# leerlas: el arranque en local queda cubierto y el fichero nunca se sube al repo.
+_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kyomoto.local.json")
+if os.path.exists(_LOCAL):
+    try:
+        with open(_LOCAL, "r", encoding="utf-8") as _f:
+            for _k, _v in (json.load(_f) or {}).items():
+                os.environ.setdefault(str(_k), str(_v))
+    except Exception:
+        pass
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 SAM_API_KEY = os.getenv("SAM_API_KEY", "").strip()
