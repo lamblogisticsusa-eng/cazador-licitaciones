@@ -614,6 +614,7 @@ def analizar(
     descripcion: str,
     lugar: str = "",
     continuar=None,
+    degradado: bool = False,
 ) -> dict:
     """
     Devuelve el analisis ya normalizado.
@@ -624,6 +625,11 @@ def analizar(
     Google y sin esperar. Lo usa el escaner para propagar el cortacircuitos:
     cuando un hilo recibe un 429, los demas se enteran por aqui en vez de
     descubrir por su cuenta el mismo 429 y dormir cada uno lo suyo.
+
+    `degradado` marca el analisis como salido de un Synthetic Metadata
+    Fallback: la descripcion oficial no pudo descargarse y se evaluo con los
+    metadatos del aviso. Las cifras financieras que salgan de ahi son de una
+    fuente degradada, no de la licitacion.
     """
     # La llamada sale por gemini_conn. Aqui no queda politica de reintentos: ni
     # backoff, ni cambio de modelo, ni el reintento sin thinking_budget. Vive ahi
@@ -819,6 +825,11 @@ def analizar(
         "notice_id": opp.get("noticeId"),
         "viable": bool(datos["viable"]),
         "motivo_descarte": _limpiar_ia(datos.get("motivo_descarte"))[:300],
+        # v5.2.0: resiliencia. Se marca cuando el analisis salio de un Synthetic
+        # Metadata Fallback (la descripcion oficial no pudo descargarse) o cuando
+        # la propia llamada llego sin texto. Los consumidores lo leen para saber
+        # que las cifras financieras son de una fuente degradada, no oficial.
+        "is_degraded": bool(degradado) or not bool(str(descripcion or "").strip()),
         "sin_descripcion": not bool(descripcion.strip()),
         "producto": _limpiar_ia(datos.get("producto"))[:400],
         "modelo_especifico": _limpiar_ia(datos.get("modelo_especifico"))[:120],

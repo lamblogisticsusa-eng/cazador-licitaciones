@@ -75,6 +75,35 @@ def limite_descargas(n: int | None = None):
     return config.MAX_DESCARGAS_CONCURRENTES
 
 
+# v5.2.0: limite de peticiones por segundo a la ruta de detalles de SAM.gov.
+# El cliente HTTP es requests y bloqueante, asi que el temporizador se hace aqui,
+# antes de enviar: si la ultima peticion fue hace menos de un segundo, se duerme
+# el resto. El barrido programado no se altera: esto solo aplica a los detalles.
+_ultimo_detalle_ts = 0.0
+
+
+def _respetar_rate_limit() -> None:
+    """
+    v5.2.0: no mas de config.RATE_LIMIT_SAM_POR_SEG peticiones por segundo en la
+    ruta de detalles.
+
+    SAM.gov responde 429/503 cuando se le pica demasiado rapido (medido en los
+    fines de semana, cuando la cuota diaria ya esta cerca de agotarse). Con el
+    barrido cada 2 horas el patron era encadenar detalles sin pausa, que es
+    justo lo que dispara el tope y deja la cola de descripciones bloqueada.
+
+    Es sincrono y bloqueante (requests no es async), y vive en el propio
+    despachador: el pool de descargas ya se serializa con el semaforo, asi que el
+    orden de llegada es estable y el rate limit se cumple sin tocar el flujo.
+    """
+    global _ultimo_detalle_ts
+    ahora = time.monotonic()
+    espera = _ultimo_detalle_ts + float(config.RATE_LIMIT_SAM_POR_SEG) - ahora
+    if espera > 0:
+        time.sleep(espera)
+    _ultimo_detalle_ts = time.monotonic()
+
+
 # Rotacion del indice PSC. Sin esto, si siempre se Asking los primeros N codigos,
 # los demas no se ven nunca: el starve es silencioso y no sale en ningun log.
 _INDICE_ROTACION = 0
@@ -306,7 +335,8 @@ def _espera(i: int) -> int:
     return escala[min(i, len(escala) - 1)]
 
 
-def _get(params: dict, reintentos: int | None = None) -> requests.Response:
+def _get(params: dict, reintentos: int | None = None,
+        timeout: float | None = None) -> requests.Response:
     """
     Una peticion a SAM.gov, con reintentos y backoff escalonado.
 
@@ -325,7 +355,12 @@ def _get(params: dict, reintentos: int | None = None) -> requests.Response:
     ultima = None
     for i in range(intentos):
         try:
-            r = _sesion.get(url, params=params, timeout=config.TIMEOUT_HTTP)
+            r = _sesion.get(url, params=params,
+                           timeout=config.TIMEOUT_HTTP if timeout is None
+                           else float(timeout))
+            # v5.2.0: rate limit de 4 peticiones/segundo en la ruta de detalles.
+            if url == BASE_DESC or "noticeid" in params:
+                _respetar_rate_limit()
         except requests.Timeout as e:
             # Timeout de lectura: la peticion entro, la respuesta no llego.
             espera = _espera(i)
@@ -384,6 +419,51 @@ def _descripcion_interna(opp: dict) -> str:
     return limpiar_html(bruto)[: config.MAX_CHARS_DESCRIPCION]
 
 
+def metadatos_sinteticos(opp: dict) -> dict | None:
+    """
+    v5.2.0: metadatos sinteticos de respaldo para cuando la descarga de la
+    descripcion no pudo completarse (timeout agotado, 429/503 persistente o
+    respuesta sin texto).
+
+    Se construye SOLO con los campos que estan en memoria: titulo, PSC, NAICS y
+    set-aside. No se inventa un solo numero: el texto del resumen sale del titulo
+    y de los metadatos que el aviso trae, sin cifras de costo.
+
+    El llamador decide (con el score heuristico) si esto se envia a Gemini con
+    is_degraded=True o si se descarta. Aqui solo se arma el objeto.
+    """
+    if not isinstance(opp, dict):
+        return None
+    titulo = " ".join(str(opp.get("title") or "").split())
+    psc = str(opp.get("classificationCode") or opp.get("psc") or "").strip()
+    naics_lista = opp.get("naicsCodes") or []
+    naics = str((naics_lista[0] if naics_lista else opp.get("naicsCode"))
+                or "").strip()
+    sa = str(opp.get("typeOfSetAside") or "").strip()
+
+    resumen = titulo
+    if psc:
+        resumen = f"{titulo} (PSC {psc})"
+    if naics:
+        resumen = f"{resumen} (NAICS {naics})"
+    if sa and sa.upper() != "NA":
+        resumen = f"{resumen} (Set-aside: {sa.upper()})"
+
+    return {
+        "noticeId": opp.get("noticeId"),
+        "title": titulo,
+        "description": resumen,
+        "classificationCode": psc,
+        "naicsCode": naics,
+        "typeOfSetAside": sa,
+        "solicitationNumber": opp.get("solicitationNumber"),
+        "placeOfPerformance": opp.get("placeOfPerformance") or {},
+        "shipToAddress": opp.get("shipToAddress") or {},
+        "deliveryLocation": opp.get("deliveryLocation") or {},
+        "es_degradado": True,
+    }
+
+
 def obtener_descripcion(notice_id: str, opp: dict | None = None) -> str:
     """
     Texto real de la oportunidad. Devuelve "" si falla (no revienta el escaneo).
@@ -407,7 +487,11 @@ def obtener_descripcion(notice_id: str, opp: dict | None = None) -> str:
         if ya_venia:
             return ya_venia
     try:
-        r = _get({"api_key": config.SAM_API_KEY, "noticeid": notice_id}, reintentos=2)
+        # v5.2.0: timeout estricto de 3.5s y 2 reintentos para la descarga de
+        # detalle. Un detalle que se cuelga en Render se resuelve rapido y sin
+        # bloquear el barrido, en vez de aguantar el timeout general de 45s.
+        r = _get({"api_key": config.SAM_API_KEY, "noticeid": notice_id},
+                reintentos=config.REINTENTOS_DESC, timeout=config.TIMEOUT_DESC)
         if r.status_code != 200:
             return ""
         crudo = r.text

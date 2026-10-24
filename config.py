@@ -50,7 +50,7 @@ import os
 # traia callback_query, asi que Telegram nunca entregaba las pulsaciones),
 # PSC permisivo (cualquier codigo de 4 digitos cuenta como producto), y el
 # Purchase Order en PDF con el comando /pdf.
-KYOMOTO_VERSION = "5.1.0"
+KYOMOTO_VERSION = "5.2.0"
 
 
 def _bool(nombre: str, por_defecto: bool = False) -> bool:
@@ -239,6 +239,9 @@ PRESUPUESTO_MINIMO = _int("PRESUPUESTO_MINIMO", 10)
 MAX_A_GEMINI = _int("MAX_A_GEMINI", 4)
 # Piso de puntaje. Subirlo deja solo lo mas limpio a costa de revisar menos.
 PUNTAJE_MINIMO = _int("PUNTAJE_MINIMO", 6)
+# v5.2.0: con el Synthetic Metadata Fallback (descripcion no descargable) solo se
+# fuerza el analisis con Gemini si el puntaje heuristico alcanza este minimo.
+PUNTAJE_MINIMO_DEGRADADO = _int("PUNTAJE_MINIMO_DEGRADADO", 8)
 MAX_DESCRIPCIONES = _int("MAX_DESCRIPCIONES", 40)
 # Tope duro de avisos que te llegan por barrido, ordenados por puntaje.
 # Esto es lo que hace que recibas 5-10 buenos y no 25 mediocres.
@@ -817,6 +820,37 @@ COTS_PUNTOS = 2
 # Rango valido de un PSC federal. Cuatro digitos, 1000 a 9999.
 PSC_MINIMO = 1000
 PSC_MAXIMO = 9999
+
+# --- v5.2.0: severas palabras de armamento pesado y familias COTS industriales -
+
+# Palabras SEVERAS de armamento pesado. El filtro de exclusion de alta
+# complejidad (high_complexity_defense) se restringe a estas pocas: son las que
+# implican fabricar o rediseñar un sistema de armas, un misil guiado, un nuclear,
+# una arma explosiva, un warhead o la propulsión de un submarino. Con ellas el
+# resto del filtro (producto, mantenimiento, servicios, NAICS) sigue filtrando
+# lo que ya descartaba, y los articulos COTS de repuesto (rodamientos, valvulas,
+# empaqueturas, mangueras, cables) ya no se cuelan por palabras de plataforma.
+EXCLUSION_COMPLEJIDAD_DEFENSA_SEVERA = (
+    "AIRCRAFT ENGINE RESTRUCTURING", "GUIDED MISSILE", "NUCLEAR", "CLASSIFIED",
+    "EXPLOSIVE ORDNANCE", "WARHEAD", "SUBMARINE PROPULSION",
+)
+
+# Familias PSC de suministros industriales estandar y ferreteria comercial
+# (43xx, 47xx, 48xx, 51xx, 53xx). Donde el PSC cae en una de estas familias el
+# aviso es COTS de repuesto: se compra en catalogo o como pieza de un sistema
+# ya existente, por lo que la exclusion de alta complejidad se salta por completo
+# y el aviso pasa con su puntaje completo (+2 COTS si aplica).
+PSC_COTS_INDUSTRIAL = ("43", "47", "48", "51", "53")
+
+# v5.2.0: timeout estricto y reintentos limitados para la descarga de
+# descripciones. El timeout de 45s de la API general es para los bloques de
+# busqueda; una peticion de detalle que se cuelga en Render se resuelve con un
+# timeout mucho mas corto y dos reintentos, en vez de bloquear el barrido.
+TIMEOUT_DESC = _float("TIMEOUT_DESC", 3.5)
+REINTENTOS_DESC = _int("REINTENTOS_DESC", 2)
+
+# v5.2.0: limite de peticiones a la API de SAM.gov en la ruta de detalles.
+RATE_LIMIT_SAM_POR_SEG = _float("RATE_LIMIT_SAM_POR_SEG", 4.0)
 
 # --- Purchase Order en PDF (ver pdf_generator.py) ---
 # Carta, con margenes en pulgadas. Se dejan-generosos porque el PDF lleva

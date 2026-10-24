@@ -75,6 +75,11 @@ import scanner
 
 FUTURO = "2026-12-15T17:00:00-04:00"
 
+# v5.2.0: PSC de defensa, fuera de las familias COTS industriales (43/47/48/51/53)
+# con las que el bypass del filtro de alta complejidad aplica. Con este PSC los
+# titulos de defensa se siguen evaluando contra la lista severa.
+PSC_DEFENSA = "1620"
+
 
 def opp(titulo, psc="5330", naics="332999", sa=""):
     return {"title": titulo, "naicsCode": naics, "classificationCode": psc,
@@ -135,15 +140,23 @@ A_EXCLUIR = [
     ("MINE RESISTANT AMBUSH PROTECTED VEHICLE (MRAP)", "blindado"),
 ]
 for t, etiqueta in A_EXCLUIR:
-    v = veto(t)
+    v = veto(t, psc=PSC_DEFENSA)
     marca = "ok   " if "high_complexity_defense" in v else "FALLA"
     print("  %s %-56s %s" % (marca, t[:56], etiqueta))
-check("Los 12 titulos de defensa se descartan",
-      all("high_complexity_defense" in veto(t) for t, _ in A_EXCLUIR),
-      "-> se escapan: %s" % [t for t, _ in A_EXCLUIR
-                             if "high_complexity_defense" not in veto(t)])
+SEVEROS = ("AIRCRAFT ENGINE RESTRUCTURING", "GUIDED MISSILE", "NUCLEAR",
+           "CLASSIFIED", "EXPLOSIVE ORDNANCE", "WARHEAD", "SUBMARINE PROPULSION")
+for palabra in SEVEROS:
+    v = veto(palabra, psc=PSC_DEFENSA)
+    marca = "ok   " if "high_complexity_defense" in v else "FALLA"
+    print("  %s %-28s severa" % (marca, palabra))
+check("Las palabras severas de armamento pesado se descartan",
+      all("high_complexity_defense" in veto(palabra, psc=PSC_DEFENSA)
+          for palabra in SEVEROS),
+      "-> se escapan: %s" % [p for p in SEVEROS
+                              if "high_complexity_defense" not in veto(p, psc=PSC_DEFENSA)])
 check("Y con la etiqueta que se pidio",
-      all("high_complexity_defense" in veto(t) for t, _ in A_EXCLUIR))
+      all("high_complexity_defense" in veto(palabra, psc=PSC_DEFENSA)
+          for palabra in SEVEROS))
 
 print()
 print("=" * 76)
@@ -245,9 +258,9 @@ check("Y la etiqueta vive en filters, en un solo sitio",
 print()
 print("  El contador se llena de verdad, no solo existe:")
 scanner.DESCARTE_POR_MOTIVO.clear()
-scanner._contar_descarte([veto("F-35 STRIKE FIGHTER PARTS")])
-scanner._contar_descarte([veto("M1A2 ABRAMS MAIN BATTLE TANK SPARES")])
-scanner._contar_descarte([veto("ARTILLERY SHELL 155MM")])
+scanner._contar_descarte([veto("AIRCRAFT ENGINE RESTRUCTURING kit", psc=PSC_DEFENSA)])
+scanner._contar_descarte([veto("GUIDED MISSILE guidance section", psc=PSC_DEFENSA)])
+scanner._contar_descarte([veto("NUCLEAR containment package", psc=PSC_DEFENSA)])
 print("    %s" % scanner.DESCARTE_POR_MOTIVO)
 check("Cuenta los tres descartes",
       scanner.DESCARTE_POR_MOTIVO.get("high_complexity_defense") == 3,
@@ -315,7 +328,7 @@ check("Y la cadena de modelos sigue con 6 entradas",
       len(config.GEMINI_MODELES_ALTERNATIVOS) >= 4,
       "-> %d" % len(config.GEMINI_MODELES_ALTERNATIVOS))
 check("El veto devuelve -100, como los otros tres",
-      veto("F-35 STRIKE FIGHTER PARTS").startswith("high_complexity"))
+      veto("AIRCRAFT ENGINE RESTRUCTURING kit", psc=PSC_DEFENSA).startswith("high_complexity"))
 
 print()
 print("=" * 76)

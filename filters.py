@@ -101,6 +101,26 @@ def _es_psc_producto(psc: str) -> bool:
     return config.PSC_MINIMO <= int(psc) <= config.PSC_MAXIMO
 
 
+def _es_familia_cots_industrial(psc: str) -> bool:
+    """
+    True si el PSC cae en una familia de suministros industriales estandar o
+    ferreteria comercial (43xx, 47xx, 48xx, 51xx, 53xx).
+
+    Es el bypass del filtro de alta complejidad para articulos COTS de repuesto:
+    rodamientos, valvulas, empaqueturas, mangueras, cables, herramientas y
+    repuestos de maquinaria. El aviso compra una PIEZA de un sistema que ya
+    existe, no un sistema nuevo, asi que las palabras de plataforma o armamento
+    que pueda traer el titulo no son un motivo para descartar: lo que descarta a
+    un negocio de reventa de repuestos es que sea servicio, o que no haya
+    producto tangible.
+
+    Fuera de esas familias (defensa, aeroespacial, naval, armamentaria) devuelve
+    False y el aviso pasa por el filtro de alta complejidad normal.
+    """
+    prefijo = _texto(psc).strip()[:2]
+    return bool(prefijo) and prefijo in config.PSC_COTS_INDUSTRIAL
+
+
 # --- Exclusiones COTS Easy-Supply (10-oct-2026) ---------------------------
 #
 # Compiladas aqui, una vez al cargar el modulo, no en cada aviso: el filtro
@@ -128,7 +148,15 @@ def _compilar_cots(palabras):
     return _re_cots.compile(r"(?:\b(?:" + cuerpo + r")\b)")
 
 
-_RE_DEFENSA = _compilar_cots(config.EXCLUSION_COMPLEJIDAD_DEFENSA)
+# v5.2.0: la exclusion de alta complejidad se restringe a las palabras SEVERAS
+# de armamento pesado (config.EXCLUSION_COMPLEJIDAD_DEFENSA_SEVERA). Antes la
+# lista era amplia: un aviso de plataforma militar o de municion se descartaba
+# por el encabezado de la licitacion. Con la lista severa, que es la que implica
+# fabricar/rediseñar un sistema de armas, un misil guiado, un nuclear, una arma
+# explosiva, un warhead o la propulsión de un submarino, el filtro se mantiene
+# para lo que de verdad conviene descartar, y los articulos COTS de repuesto
+# (rodamientos, valvulas, empaqueturas, mangueras, cables) pasan por el bypass.
+_RE_DEFENSA = _compilar_cots(config.EXCLUSION_COMPLEJIDAD_DEFENSA_SEVERA)
 _RE_COMBUSTIBLE = _compilar_cots(config.EXCLUSION_COMBUSTIBLE_DEFENSA)
 _RE_ORIGEN = _compilar_cots(config.EXCLUSION_CERTIFICACION_ORIGEN)
 
@@ -389,7 +417,14 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     # Medido antes de aplicar: 0 de los 11 titulos reales del barrido del
     # 29-sep (los kits de repuestos navales, que son el nucleo del negocio) se
     # tocan, y los 12 titulos de ejemplo que si hay que excluir caen todos.
-    _m = _RE_DEFENSA.search(titulo)
+    # v5.2.0: bypass COTS para las familias de suministros industriales y
+    # ferreteria comercial. Se mira el PSC antes del patron: si la familia es
+    # COTS (rodamientos, valvulas, empaqueturas, mangueras, cables, repuestos),
+    # la exclusion de alta complejidad se salta y el aviso pasa con su puntaje
+    # completo (+2 COTS si aplica, mas abajo).
+    _bypass_cots = _es_familia_cots_industrial(
+        str(opp.get("classificationCode") or ""))
+    _m = None if _bypass_cots else _RE_DEFENSA.search(titulo)
     if _m:
         return -100, [f"{TAG_ALTA_COMPLEJIDAD}: {titulo.strip()[:50]} "
                       f"({_m.group(0).strip()})"]

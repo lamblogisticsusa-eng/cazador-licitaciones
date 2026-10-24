@@ -330,6 +330,26 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             _contar_descarte(motivos, opp.get("noticeId", ""))
             continue
 
+        # v5.2.0: resiliencia ante la caida del endpoint de descripciones.
+        #
+        # Si la descarga no pudo completarse (timeout agotado, 429/503 persistente
+        # o respuesta sin texto) el aviso NO se bloquea y NO se descarta: se arma
+        # un Synthetic Metadata Fallback con los campos que estan en memoria
+        # (titulo, PSC, NAICS, set-aside) y, si el puntaje heuristico sigue por
+        # encima del minimo operativo, se manda a Gemini con is_degraded=True.
+        # Asi el barrido termina con exito y la IA hace el analisis financiero con
+        # los metadatos disponibles en vez de frenar la cola del escaneo.
+        degradado = False
+        if not desc.strip():
+            metadatos = sam_api.metadatos_sinteticos(opp)
+            if metadatos is not None:
+                desc = str(metadatos.get("description") or "")
+                degradado = True
+                puntos, motivos = filters.puntuar(opp, desc)
+                if puntos < config.PUNTAJE_MINIMO_DEGRADADO:
+                    _contar_descarte(motivos, opp.get("noticeId", ""))
+                    continue
+
         # El tope de USD se aplica AQUI, con los datos que ya tenemos, para no
         # gastar una de las 10 llamadas diarias en un contrato que dice
         # "Not to Exceed USD 350,000".
@@ -346,7 +366,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             puntos += 2
             motivos.append(f"Valor declarado {valor:,.0f} USD dentro del rango")
 
-        puntuadas.append((puntos, opp, desc, motivos))
+        puntuadas.append((puntos, opp, desc, motivos, degradado))
 
     if descartados_por_valor:
         _log(
@@ -375,10 +395,10 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     resumen["puntuales"] = len(puntuadas)
     resumen["detalle_puntajes"] = [
         {"puntaje": p, "titulo": o.get("title", "")[:70], "motivos": m[:4]}
-        for p, o, _, m in puntuadas[:12]
+        for p, o, _, m, _d in puntuadas[:12]
     ]
     _log(f"Pasan el filtro: {len(puntuadas)} (de {len(candidatas)})")
-    for p, o, _, _ in puntuadas[:8]:
+    for p, o, _, _, _d in puntuadas[:8]:
         _log(f"   [{p:>3}] {o.get('title', '')[:78]}")
 
     # Los descartes por alta complejidad / defensa, con la etiqueta pedida.
@@ -457,18 +477,24 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     def _continuar() -> bool:
         return not sin_cuota.is_set()
 
-    def _analizar(opp: dict, desc: str, lugar: str) -> dict:
+    def _analizar(opp: dict, desc: str, lugar: str,
+                  continuar=None, degradado: bool = False) -> dict:
         with throttle:
-            r = gemini_analyzer.analizar(opp, desc, lugar, continuar=_continuar)
+            r = gemini_analyzer.analizar(
+                opp, desc, lugar,
+                continuar=_continuar if continuar is None else continuar,
+                degradado=degradado)
             time.sleep(config.GEMINI_PAUSA_SEG)
             return r
 
     with ThreadPoolExecutor(max_workers=max(1, config.GEMINI_WORKERS)) as pool:
         futuros = {}
-        for p, o, d, _ in a_analizar:
+        for p, o, d, _m, degradado in a_analizar:
             if not quota.reservar(o["noticeId"]):
                 continue  # ya conto hoy
-            futuros[pool.submit(_analizar, o, d, filters.lugar_de_entrega(o))] = (p, o)
+            futuros[pool.submit(_analizar, o, d,
+                                filters.lugar_de_entrega(o),
+                                continuar=_continuar, degradado=degradado)] = (p, o)
         resumen["analizadas"] = len(futuros)
 
         for fut in as_completed(futuros):
