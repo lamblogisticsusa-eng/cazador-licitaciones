@@ -12,6 +12,11 @@ requests>=2.32.0
 Flask>=3.1.0
 reportlab>=4.2.0
 
+# kyomoto_main.py: rastreo asincrono de adjudicaciones (UEI) y oportunidades
+# COTS con asyncio + aiohttp. Es el UNICO modulo que lo usa; los demas siguen
+# con requests. Se fija 3.9+ por ClientTimeout y el manejo de cookies.
+aiohttp>=3.9.0
+
 # gunicorn NO se usa: el servicio corre con "python main.py" porque el bot
 # necesita run_polling() en primer plano, no un servidor WSGI de workers.
 # python-docx se elimino: no se usaba en ningun modulo.

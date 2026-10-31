@@ -5,6 +5,7 @@ detectan ANTES de gastar una llamada, y si los buenos siguen pasando.
 """
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("SAM_API_KEY", "SAM-clave-de-prueba")
 os.environ.setdefault("DRY_RUN", "1")
@@ -24,13 +25,22 @@ def check(nombre, cond, extra=""):
         print(f"  FALLA {nombre} {extra}")
 
 
-def aviso(titulo, naics="332919", pais="USA", estado="OR", set_aside="NONE", dl="2026-11-01"):
+# El vencimiento se calcula relativo a HOY, nunca quemado. Con "2026-11-01"
+# fijo, al llegar esa fecha el aviso caia a 1 dia y penalizacion_urgencia le
+# restaba 10 puntos: el test pasaba a FALLAR por una razon que no tiene nada
+# que ver con lo que mide. 60 dias por delante deja el caso siempre por encima
+# de DIAS_URGENCIA.
+DL_FUTURO = (datetime.now(timezone.utc) + timedelta(days=60)).strftime("%Y-%m-%d")
+
+
+def aviso(titulo, naics="332919", pais="USA", estado="OR", set_aside="NONE",
+          dl=None):
     return {
         "title": titulo,
         "naicsCode": naics,
         "classificationCode": "5330",
         "typeOfSetAside": set_aside,
-        "responseDeadLine": dl + "T18:00:00-07:00",
+        "responseDeadLine": (dl or DL_FUTURO) + "T18:00:00-07:00",
         "placeOfPerformance": {
             "city": {"name": "Portland"},
             "state": {"code": estado, "name": estado},
@@ -59,7 +69,7 @@ print("  -- destino en el extranjero --")
 dubai = {
     "title": "K LOADER PARTS SUPPLY AT AL MINHAD AIRBASE",
     "naicsCode": "333924", "classificationCode": "5330", "typeOfSetAside": "NONE",
-    "responseDeadLine": "2026-11-01T18:00:00-07:00",
+    "responseDeadLine": DL_FUTURO + "T18:00:00-07:00",
     "placeOfPerformance": {
         "city": {"name": "Dubai"},
         "state": {"code": "AE", "name": "AE"},
@@ -75,7 +85,7 @@ check("Dubai cae por debajo del piso (veto practico)", p < config.PUNTAJE_MINIMO
 usa = {
     "title": "K LOADER PARTS SUPPLY",
     "naicsCode": "333924", "classificationCode": "5330", "typeOfSetAside": "NONE",
-    "responseDeadLine": "2026-11-01T18:00:00-07:00",
+    "responseDeadLine": DL_FUTURO + "T18:00:00-07:00",
     "placeOfPerformance": {
         "city": {"name": "Norfolk"},
         "state": {"code": "VA", "name": "Virginia"},
