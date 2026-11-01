@@ -421,7 +421,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
     # el telefono se pierden de vista, y es justo el dato que el oficial de
     # contratacion va a buscar.
     f.append(Paragraph(f"UEI {UEI} &nbsp;|&nbsp; NCAGE {NCAGE}", e["dir"]))
-    f.append(Spacer(1, 0.22 * inch))
+    f.append(Spacer(1, 0.14 * inch))
 
     # --- Titulo ---
     f.append(Paragraph("PURCHASE ORDER", e["titulo"]))
@@ -458,7 +458,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                    ]))
     f.append(bloque)
-    f.append(Spacer(1, 0.20 * inch))
+    f.append(Spacer(1, 0.12 * inch))
 
     # --- Proveedor ---
     f.append(Paragraph("SUPPLIER / VENDOR", e["h2"]))
@@ -477,7 +477,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]))
     f.append(proveedor)
-    f.append(Spacer(1, 0.20 * inch))
+    f.append(Spacer(1, 0.12 * inch))
 
     # --- Lineas de la orden ---
     f.append(Paragraph("ITEMS ORDERED", e["h2"]))
@@ -569,7 +569,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
     estilo.append(("LINEABOVE", (0, -1), (-1, -1), 0.9, AZUL))
     tabla.setStyle(TableStyle(estilo))
     f.append(tabla)
-    f.append(Spacer(1, 0.18 * inch))
+    f.append(Spacer(1, 0.12 * inch))
 
     # --- Instrucciones y condiciones ---
     # --- Bill of Materials / Request for Quotation ---
@@ -598,9 +598,12 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         # lo detecta nadie mirando el PDF, pero quien copia el texto recibe la
         # cabecera partida. "Part No." es como lo escribe cualquier catalogo,
         # y el glosario de siglas de abajo lo aclara.
+        # UNIT PRICE y AMOUNT van EN BLANCO a proposito, igual que en la tabla
+        # ITEMS ORDERED: quien rellena el precio es el distribuidor, no el
+        # documento. Un $0.00 es un precio FALSO, no un hueco.
         cab = ["CLIN", "PART NO. / NSN",
                "DESCRIPTION &amp; SALIENT CHARACTERISTICS",
-               "QTY", "UOI", "UNIT PRICE"]
+               "QTY", "UOI", "UNIT PRICE", "AMOUNT"]
         # El JSON estructurado manda en la PRIMERA fila, que es la que el
         # comprador lee antes de decidir seguir. Las siguientes salen del BOM,
         # que en un aviso de varios CLIN ya viene del propio aviso.
@@ -631,6 +634,8 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
                 Paragraph(_fmt(_cant) if _cant else HUECO, e["celda"]),
                 Paragraph(_uni or HUECO, e["celda"]),
                 Paragraph(b.get("precio") or "", e["celda_b"]),
+                # AMOUNT en blanco: el distribuidor calcula importe x cantidad.
+                Paragraph("", e["celda_b"]),
             ])
         if _est.get("fuente"):
             log.info("generar_po: BOM desde %s (%s)", _est.get("_modelo") or "IA",
@@ -639,9 +644,12 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         # dos lineas. "UNIT PRICE" no cabia en 0.48" y salia "UNIT PRIC / E",
         # que se ve bien en el PDF pero rompe el texto a quien lo copia, y
         # "PART NUMBER / NSN" se partia igual. La descripcion es la unica
-        # columna elastica, asi que absorbe el ajuste.
-        _anchos_bom = [0.52 * inch, 1.32 * inch, ancho - 3.38 * inch,
-                       0.50 * inch, 0.42 * inch, 0.62 * inch]
+        # columna elastica, asi que absorbe el ajuste de AMOUNT. Se afina
+        # PART NO./NSN a 1.18" y los precios a 0.58" para devolverle ancho a
+        # la descripcion (3.22") y que la tabla no crezca en altura: una fila
+        # mas alta empuja el glosario fuera de la pagina 1.
+        _anchos_bom = [0.52 * inch, 1.18 * inch, ancho - 3.78 * inch,
+                       0.50 * inch, 0.42 * inch, 0.58 * inch, 0.58 * inch]
         _t_bom = Table(_f_bom, colWidths=_anchos_bom, repeatRows=1)
         _t_bom.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), AZUL),
@@ -650,6 +658,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("ALIGN", (0, 0), (0, -1), "CENTER"),
             ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+            ("ALIGN", (5, 1), (6, -1), "RIGHT"),
             ("LEFTPADDING", (0, 0), (-1, -1), 5),
             ("RIGHTPADDING", (0, 0), (-1, -1), 5),
             ("TOPPADDING", (0, 0), (-1, -1), 5),
@@ -2188,7 +2197,14 @@ def _bom_desde_analisis(analisis: dict) -> list[dict]:
                      "espanol; se deja tal cual porque es la fuente oficial")
     else:
         desc, _pd = _ingles(desc, _ACORTAR["descripcion"])
+        # ZERO-SPANISH: sin texto crudo utilizable, un campo en castellano no
+        # va al papel; se cae al generico en ingles.
+        desc = _cero_espanol(_pd, desc, analisis,
+                             "Item as described in the attached specification",
+                             _ACORTAR["descripcion"])
         spec, _ps = _ingles(spec, _ACORTAR["especificacion"])
+        spec = _cero_espanol(_ps, spec, analisis, "",
+                             _ACORTAR["especificacion"])
     return [{
         "clin": "1",
         "parte": modelo,
@@ -2615,6 +2631,36 @@ def _ingles(texto: str, limite: int = 0) -> tuple[str, bool]:
     if limite:
         t = _recortar(t, limite)
     return t, False
+
+
+def _cero_espanol(pendiente: bool, texto_trad: str, analisis: dict,
+                  generico: str, limite: int = 0) -> str:
+    """
+    ZERO-SPANISH a nivel de documento: si un campo quedo sin traducir, NO se
+    escribe en castellano ni con la marca [SEE NOTE].
+
+    Es la misma REGLA 1 que desde_aviso() aplica al texto crudo: un documento
+    que va a un distribuidor de EE.UU. no puede llevar espanol (el proveedor no
+    lo entiende) ni un marcador interno como [SEE NOTE] (que solo alarmaria sin
+    decir nada util). En vez de eso se cae a la cascada de INGLES NATIVO de
+    SAM.gov, de mas fiable a menos:
+
+        1) descripcion_original -> el texto tecnico crudo de la API
+        2) titulo_original      -> el titulo, tambien crudo
+        3) `generico`           -> un texto en ingles que describe el campo
+
+    Lo que NUNCA se hace es inventar una traduccion: un traductor sobre texto
+    de compra produce frases raras, y el original de SAM.gov ya esta escrito
+    por un oficial de contratacion en ingles tecnico. Si el campo venia limpio
+    (pendiente=False) se devuelve tal cual, sin tocarlo.
+    """
+    if not pendiente:
+        return texto_trad
+    for clave in ("descripcion_original", "titulo_original"):
+        crudo = _limpiar_marcas(str(analisis.get(clave) or "")).strip()
+        if crudo and not texto_en_espanol(crudo):
+            return _recortar(crudo, limite) if limite else crudo
+    return generico
 
 
 def _estimar_precio(descripcion: str, bom: list[dict]) -> dict:
@@ -3089,11 +3135,17 @@ def _notas_ingles(analisis: dict, pendientes: int = 0) -> str:
         )
 
     if pendientes:
+        # Ya NO se menciona [SEE NOTE] ni "castellano sin traducir": el
+        # documento zero-spanish nunca lleva espanol ni marcadores internos,
+        # asi que el aviso al usuario se redacta en ingles llano y sin la
+        # marca, diciendo que hay campos tomados de la fuente oficial o
+        # referidos al aviso.
         texto += (
-            "\n\nNOTE: %d field(s) marked [%s] contain source text that was "
-            "not machine-translated. Verify the wording before issuing this "
-            "document to the supplier."
-            % (pendientes, MARCA_PENDIENTE.strip("[]"))
+            "\n\nNOTE: %d field(s) could not be cleanly translated and are "
+            "shown using the official SAM.gov source text or a generic "
+            "English reference. Verify the wording against the official "
+            "notice before issuing this document to the supplier."
+            % pendientes
         )
     return texto
 
@@ -3154,10 +3206,24 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         desc = f"{desc} ({modelo})".strip()
     spec = (analisis.get("especificacion_tecnica_clave") or "").strip()
     desc, _p1 = _ingles(desc, _ACORTAR["descripcion"])
+    # ZERO-SPANISH: si Gemini devolvio castellano y no se pudo traducir limpio,
+    # el campo NO va al papel en espanol ni con [SEE NOTE]. Se cae al ingles
+    # nativo de SAM.gov (descripcion_original/titulo_original) y si no hay, a un
+    # texto generico en ingles. Es la misma REGLA 1 que desde_aviso().
+    desc = _cero_espanol(_p1, desc, analisis,
+                         "Physical item per the SAM.gov specification",
+                         _ACORTAR["descripcion"])
     spec, _p2 = _ingles(spec, _ACORTAR["especificacion"])
+    # La especificacion NO reutiliza el texto crudo: duplicaria la descripcion
+    # en la columna de al lado. Si no se tradujo, se deja vacia (muchos items
+    # no llevan spec separada) en vez de meter castellano.
+    spec = _cero_espanol(_p2, spec, analisis, "",
+                         _ACORTAR["especificacion"])
     # El lugar de entrega tambien lo escribo yo en las instrucciones, pero
     # aparece suelto en algunos analisis.
     lugar, _p3 = _ingles(analisis.get("lugar_entrega") or "")
+    lugar = _cero_espanol(_p3, lugar, analisis,
+                          "the installation designated by the Government")
 
     # El texto que este modulo genera va en ingles de origen, no traducido.
     # No es un detalle de estilo: estas lineas y las condiciones de pago de
@@ -3213,8 +3279,17 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         for _b in _bom:
             _desc_b = str(_b.get("descripcion") or "").strip()
             _desc_b, _pb = _ingles(_desc_b, _ACORTAR["descripcion"])
+            # ZERO-SPANISH tambien en el BOM multi-CLIN: cada linea que no se
+            # pudo traducir cae al ingles de SAM.gov o al generico, nunca
+            # espanol ni [SEE NOTE].
+            _desc_b = _cero_espanol(_pb, _desc_b, analisis,
+                                    "Physical item per the SAM.gov "
+                                    "specification",
+                                    _ACORTAR["descripcion"])
             _spec_b = str(_b.get("especificacion") or "").strip()
             _spec_b, _ps = _ingles(_spec_b, _ACORTAR["especificacion"])
+            _spec_b = _cero_espanol(_ps, _spec_b, analisis, "",
+                                    _ACORTAR["especificacion"])
             lineas.append({
                 "sku": _sku,
                 "descripcion": _desc_b or desc,

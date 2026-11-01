@@ -289,16 +289,20 @@ check("Con la marca visible", pdfg.MARCA_PENDIENTE in r[0])
 # Y en el documento completo.
 raro_an = dict(AN, producto=raro)
 d2 = pdfg.desde_analisis(raro_an)
-check("El documento entero lo avisa en las notas",
-      "not machine-translated" in d2["notas"])
-# Son las OCURRENCIAS marcadas en el documento, no los campos logicos: la
-# descripcion se imprime dos veces, en la linea de la orden y en la del BOM,
-# y el usuario ve dos marcas. Decir "1 field" con dos marcas en el papel haria
-# pensar que se ha colado una.
-check("Y dice cuantos campos son",
-      "2 field(s)" in d2["notas"], "-> %r" % d2["notas"][-140:])
-check("Y la descripcion va marcada",
-      pdfg.MARCA_PENDIENTE in d2["lineas"][0]["descripcion"])
+check("El documento lo avisa en las notas, en ingles y sin marca",
+      "could not be cleanly translated" in d2["notas"])
+# ZERO-SPANISH: el castellano de Gemini NO llega al papel, ni con [SEE NOTE].
+# El campo afectado cae al ingles nativo de SAM.gov (descripcion_original/
+# titulo_original) o a un generico en ingles, y las notas lo avisan en ingles.
+check("Y dice que hay campos afectados",
+      "field(s) could not be cleanly translated" in d2["notas"],
+      "-> %r" % d2["notas"][-180:])
+check("La descripcion NO lleva [SEE NOTE] al papel",
+      pdfg.MARCA_PENDIENTE not in d2["lineas"][0]["descripcion"],
+      "-> %r" % d2["lineas"][0]["descripcion"])
+check("Ni lleva castellano: se ha caido al ingles",
+      not pdfg.texto_en_espanol(d2["lineas"][0]["descripcion"]),
+      "-> %r" % d2["lineas"][0]["descripcion"])
 
 print()
 print("=" * 76)
