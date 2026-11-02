@@ -283,7 +283,10 @@ check("Y el titulo del contenedor sale limpio",
 
 print()
 celda2 = " ".join(t2.split())
-_celda = celda2[celda2.index("ITEMS ORDERED"):celda2.index("BILL OF MATERIALS")]
+# La tabla unica reemplaza a ITEMS ORDERED: la celda del material va desde su
+# titulo hasta el blueprint de la pagina 2.
+_celda = celda2[celda2.index("LINE ITEMS")
+                :celda2.index("INDUSTRIAL SUPPLY BLUEPRINT")]
 # UEI y NCAGE van en la CABECERA, el pie y el glosario, no en la tabla de
 # items. Comprobarlo contra el trozo de la tabla no podia funcionar nunca.
 print("  En el PDF de W912ES27QA004:")

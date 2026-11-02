@@ -289,13 +289,19 @@ check("Con la marca visible", pdfg.MARCA_PENDIENTE in r[0])
 # Y en el documento completo.
 raro_an = dict(AN, producto=raro)
 d2 = pdfg.desde_analisis(raro_an)
-check("El documento lo avisa en las notas, en ingles y sin marca",
-      "could not be cleanly translated" in d2["notas"])
+# CLEAN FOOTER: el documento ya NO avisa de traducciones ni fallbacks en el
+# pie. Requisito explicito: el papel debe lucir 100% natural, nativo y seguro
+# de si mismo, sin delatar procesos internos de traduccion. Quien necesita
+# saber que hay campos tomados de la fuente oficial es el usuario de Telegram,
+# y para eso esta el aviso _aviso_pend de main.py (comprobado en la seccion 7),
+# que es un canal distinto al papel que va al proveedor.
+check("El documento NO avisa de traducciones ni fallbacks en el pie",
+      "could not be cleanly translated" not in d2["notas"])
 # ZERO-SPANISH: el castellano de Gemini NO llega al papel, ni con [SEE NOTE].
 # El campo afectado cae al ingles nativo de SAM.gov (descripcion_original/
-# titulo_original) o a un generico en ingles, y las notas lo avisan en ingles.
-check("Y dice que hay campos afectados",
-      "field(s) could not be cleanly translated" in d2["notas"],
+# titulo_original) o a un generico en ingles.
+check("Ni menciona campos afectados: el papel se ve natural",
+      "field(s) could not be cleanly translated" not in d2["notas"],
       "-> %r" % d2["notas"][-180:])
 check("La descripcion NO lleva [SEE NOTE] al papel",
       pdfg.MARCA_PENDIENTE not in d2["lineas"][0]["descripcion"],
@@ -379,7 +385,7 @@ if PdfReader:
     print()
     print("  Y la disposicion sigue igual que antes:")
     for cabecera in ("PURCHASE ORDER", "PURCHASE ORDER NO.", "DATE", "SAM.GOV REFERENCE",
-                     "RESPONSE DUE", "SUPPLIER / VENDOR", "ITEMS ORDERED",
+                     "RESPONSE DUE", "SUPPLIER / VENDOR", "LINE ITEMS",
                      "INDUSTRIAL SUPPLY BLUEPRINT", "LOGISTICS", "COMPLIANCE BLUEPRINT",
                      "BILL OF MATERIALS"):
         check("  Sigue la cabecera: %s" % cabecera, cabecera in texto)

@@ -329,7 +329,7 @@ if PdfReader:
 
     print()
     print("  Lo que tiene que leerse:")
-    for lo in ("BILL OF MATERIALS / REQUEST FOR QUOTATION",
+    for lo in ("LINE ITEMS / BILL OF MATERIALS (BOM)",
                "CLIN", "PART NO. / NSN", "UOI", "QTY",
                "DELIVERY DESTINATION", "PACKAGING",
                "Unit of Issue", "Contract Line Item Number",

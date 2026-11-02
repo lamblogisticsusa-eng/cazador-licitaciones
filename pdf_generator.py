@@ -479,28 +479,23 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
     f.append(proveedor)
     f.append(Spacer(1, 0.12 * inch))
 
-    # --- Lineas de la orden ---
-    f.append(Paragraph("ITEMS ORDERED", e["h2"]))
-    cabecera = ["ITEM", "DESCRIPTION / TECHNICAL SPECIFICATION",
-                "QTY", "UNIT", "UNIT PRICE", "AMOUNT"]
-    filas = [[Paragraph(h, e["celda_b"]) for h in cabecera]]
-    total = 0.0
-    # El documento no lleva precios: los pone el distribuidor. Ver la nota en
-    # desde_analisis(), que explica por que el estimado propio NO se imprime.
-    # EL DEFAULT ES "SIN PRECIO", y no al reves.
+    # --- Preparar datos comunes a ambas tablas ---
     #
-    # Antes era mostrar_precios=True, y desde_analisis() pasaba False. Funcionaba
-    # por ese False explicito. Pero el default era el lado peligroso: cualquier
-    # llamante que se olvidara de la clave sacaba un documento con "$0.00" en
-    # UNIT PRICE y AMOUNT, y un cero es un precio FALSO, no un hueco. El
-    # proveedor no lee "no hay precio", lee "cero".
+    # REGLA DE TABLA UNICA: si el documento lleva BOM, la tabla unificada de
+    # la seccion siguiente (LINE ITEMS / BILL OF MATERIALS) pinta los items con
+    # las 7 columnas (CLIN, numero de parte, descripcion, cantidad, UOI, precio
+    # y amount), y la tabla de ITEMS ORDERED se OMITE: antes salian las dos y
+    # el material aparecia repetido. Sin BOM (una orden de compra simple) se
+    # mantiene la tabla de ITEMS ORDERED byte a byte, que es el comportamiento
+    # de siempre y lo que exige test_pdf_rfq.py seccion 5.
     #
-    # Ponerlo al reves hace que el fallo sea imposible en vez de improbable: las
-    # celdas salen en blanco salvo que alguien pida verlas a proposito.
+    # El documento no lleva precios: los pone el distribuidor. EL DEFAULT ES
+    # "SIN PRECIO", y no al reves: un $0.00 es un precio FALSO, no un hueco, y
+    # el proveedor no lee "no hay precio", lee "cero".
     _sin_precio = not datos.get("mostrar_precios", False)
     # El bloque tecnico se calcula UNA vez y solo si hay detalle del lote. Sin
-    # detalle, _tec es "" y el documento sale exactamente igual que antes: ni una
-    # linea de mas, ni un ancho cambiado, ni una maqueta tocada.
+    # detalle, _tec es "" y el documento sale exactamente igual que antes: ni
+    # una linea de mas, ni un ancho cambiado, ni una maqueta tocada.
     _tec = ""
     _det = datos.get("lote_detalle") or {}
     if _det:
@@ -509,80 +504,20 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             _tec = _integral.bloque_tecnico(_det)
         except Exception:
             _tec = ""
-    for i, ln in enumerate(datos.get("lineas") or [], start=1):
-        cant = _num(ln.get("cantidad"))
-        precio = _num(ln.get("precio_unitario"))
-        importe = cant * precio
-        total += importe
-        desc = ln.get("descripcion") or ""
-        spec = ln.get("especificacion") or ""
-        if spec:
-            desc = f"{desc}<br/><font size=7.5 color='#5B6770'>{spec}</font>"
-            # TECHNICAL & DELIVERY REQUIREMENTS, debajo de la descripcion.
-            #
-            # Cambio de criterio respecto a 3.8.0, que decidio que esto NO iba
-            # al PDF por considerarlo informacion interna. El encargo lo pide al
-            # reves y el motivo es correcto: un distribuidor de EE.UU. NO PUEDE
-            # cotizar sin el parte y la medida. Un "1 LOT" sin saber si son 24
-            # rodamientos o 6 cierrapuertas no se cotiza, se rechaza.
-            #
-            # Lo que NO cambia es el precio: las celdas siguen EN BLANCO, que es
-            # lo que protege la negociacion y no tiene relacion con esto.
-            if _tec and i == 1:
-                desc += ('<br/><font size=7.5 color="#1B3B6F">'
-                         '<b>TECHNICAL &amp; DELIVERY REQUIREMENTS</b></font>'
-                         f'<br/><font size=7.5>{_tec}</font>')
-        # El numero de linea, no el de solicitud: este no cabe en la columna
-        # (0.62") y ademas ya sale arriba, en SAM.GOV REFERENCE. Lo que el
-        # distribuidor necesita para citar una linea es "1", "2", "3".
-        filas.append([
-            Paragraph(str(i), e["celda_b"]),
-            Paragraph(desc, e["celda"]),
-            Paragraph(_fmt(cant) if cant else HUECO, e["celda"]),
-            Paragraph(ln.get("unidad") or HUECO, e["celda"]),
-            # Celda en blanco en vez de $0.00 cuando el aviso no declara valor.
-            # Ver la nota de "precio_desconocido" en desde_analisis().
-            Paragraph("" if _sin_precio else _usd(precio), e["celda"]),
-            Paragraph("" if _sin_precio else _usd(importe), e["celda_b"]),
-        ])
-    filas.append(["", Paragraph("TOTAL (USD)", e["celda_b"]), "", "",
-                  "",
-                  Paragraph("" if _sin_precio else _usd(total), e["celda_b"])])
-
-    anchos = [0.62 * inch, ancho - 3.02 * inch, 0.52 * inch, 0.48 * inch,
-              0.90 * inch, 0.90 * inch]
-    tabla = Table(filas, colWidths=anchos, repeatRows=1)
-    estilo = [
-        ("BACKGROUND", (0, 0), (-1, 0), AZUL),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.4, GRIS_LINEA),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
-        ("ALIGN", (0, 0), (0, -1), "CENTER"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F7F8FA")]),
-    ]
-    estilo.append(("BACKGROUND", (0, -1), (-1, -1), GRIS_CLARO))
-    estilo.append(("LINEABOVE", (0, -1), (-1, -1), 0.9, AZUL))
-    tabla.setStyle(TableStyle(estilo))
-    f.append(tabla)
-    f.append(Spacer(1, 0.12 * inch))
-
-    # --- Instrucciones y condiciones ---
-    # --- Bill of Materials / Request for Quotation ---
-    #
-    # Se dibuja SOLO si hay contenido. Sin esto, el documento sale exactamente
-    # como antes: mismo Purchase Order, misma tabla de items, mismo pie. El
-    # bloque es para el caso en que el usuario quiere mandar el documento a un
-    # distribuidor a cotizar, y entonces la parte tecnica va en ingles con los
-    # campos que el comprador necesita para cotizar sin preguntar nada.
     _bom = datos.get("bom") or []
+    _lineas = datos.get("lineas") or []
+
     if _bom:
+        # --- Tabla unica: LINE ITEMS / BILL OF MATERIALS (BOM) ---
+        #
+        # La tabla del BOM ES la tabla de items, unificada. Las columnas CLIN
+        # y PART NO. / NSN vienen del BOM (es su valor anadido sobre lineas);
+        # la descripcion, especificacion, cantidad y unidad se toman de lineas,
+        # que preserva la unidad original del aviso (el BOM la normaliza y un
+        # "KIT" se caeria a "EA"). En un aviso multi-CLIN lineas se construye
+        # desde el propio BOM, asi que ambas vienen alineadas fila a fila.
         f.append(KeepTogether([
-            Paragraph("BILL OF MATERIALS / REQUEST FOR QUOTATION", e["h2"]),
+            Paragraph("LINE ITEMS / BILL OF MATERIALS (BOM)", e["h2"]),
             Spacer(1, 0.05 * inch),
             Paragraph(
                 "Please quote your best unit price for each line item below. "
@@ -594,32 +529,40 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             Spacer(1, 0.10 * inch),
         ]))
         # "PART NO. / NSN" y no "PART NUMBER / NSN" porque esta ultima se
-        # partia en dos lineas en una columna de 1.32". Se ve bien, asi que no
-        # lo detecta nadie mirando el PDF, pero quien copia el texto recibe la
-        # cabecera partida. "Part No." es como lo escribe cualquier catalogo,
-        # y el glosario de siglas de abajo lo aclara.
-        # UNIT PRICE y AMOUNT van EN BLANCO a proposito, igual que en la tabla
-        # ITEMS ORDERED: quien rellena el precio es el distribuidor, no el
-        # documento. Un $0.00 es un precio FALSO, no un hueco.
+        # partia en dos lineas en una columna de 1.32". "Part No." es como lo
+        # escribe cualquier catalogo, y el glosario de siglas de abajo lo
+        # aclara.
+        # UNIT PRICE y AMOUNT van EN BLANCO a proposito: quien rellena el
+        # precio es el distribuidor, no el documento. Un $0.00 es un precio
+        # FALSO, no un hueco.
         cab = ["CLIN", "PART NO. / NSN",
                "DESCRIPTION &amp; SALIENT CHARACTERISTICS",
                "QTY", "UOI", "UNIT PRICE", "AMOUNT"]
         # El JSON estructurado manda en la PRIMERA fila, que es la que el
-        # comprador lee antes de decidir seguir. Las siguientes salen del BOM,
-        # que en un aviso de varios CLIN ya viene del propio aviso.
-        #
-        # Se consume el JSON y no el BOM ya "traducido" por el pipeline porque
-        # el JSON lleva el texto EXACTO que salio del parsing, con su
-        # producto_limpio y su descripcion_distribuidor. Si se usara el BOM, el
-        # JSON solo habria servido como intermedio y su valor estaria en que
-        # se vea de donde salio cada dato, no en que se imprima literal.
+        # comprador lee antes de decidir seguir. Las identidades de CLIN y
+        # PART NO. salen del BOM; el contenido (descripcion, cantidad, unidad)
+        # sale de lineas, que es la fuente mas fiel para la unidad de medida
+        # original del aviso.
         _est = datos.get("estructurado") or {}
         _f_bom = [[Paragraph(h, e["celda_b"]) for h in cab]]
-        for _i, b in enumerate(_bom):
-            _d = b.get("descripcion") or ""
-            _s = b.get("especificacion") or ""
-            _cant = _num(b.get("cantidad"))
-            _uni = b.get("unidad") or ""
+        for _i in range(max(len(_bom), len(_lineas))):
+            _b = _bom[_i] if _i < len(_bom) else {}
+            _l = _lineas[_i] if _i < len(_lineas) else {}
+            _clin = _b.get("clin") or ""
+            _parte = _b.get("parte") or ""
+            # DESCRIPCION y especificacion: del BOM, que trae el texto preciso
+            # parseado del aviso de SAM.gov (para un RFQ en vivo es la
+            # descripcion real del material). lineas, en un CLIN unico, solo
+            # lleva el nombre generico del producto, y usarlo aqui perderia el
+            # detalle ("20-FOOT CONTAINER WITH GANTRY BEAM..."). En multi-CLIN
+            # lineas se construye desde el propio BOM, asi que coinciden.
+            # CANTIDAD: las dos fuentes dan el mismo numero.
+            # UNIDAD: de lineas, que preserva la unidad original del aviso (el
+            # BOM la normaliza y un "KIT" se caeria a "EA").
+            _d = _b.get("descripcion") or _l.get("descripcion") or ""
+            _s = _b.get("especificacion") or _l.get("especificacion") or ""
+            _cant = _num(_b.get("cantidad")) or _num(_l.get("cantidad"))
+            _uni = _l.get("unidad") or _b.get("unidad") or ""
             if _i == 0 and _est:
                 _d = _est.get("producto_limpio") or _d
                 _s = _est.get("descripcion_distribuidor") or _s
@@ -627,29 +570,42 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
                 _uni = _est.get("unidad") or _uni
             if _s:
                 _d = f"{_d}<br/><font size=7.5 color='#5B6770'>{_s}</font>"
+            # El bloque tecnico del lote consolidado va en la PRIMERA fila,
+            # debajo de la especificacion. Sin esto el detalle del lote (parte,
+            # fabricante, medidas) se quedaba fuera del papel unificado.
+            if _tec and _i == 0:
+                _d += ('<br/><font size=7.5 color="#1B3B6F">'
+                       '<b>TECHNICAL &amp; DELIVERY REQUIREMENTS</b></font>'
+                       f'<br/><font size=7.5>{_tec}</font>')
             _f_bom.append([
-                Paragraph(str(b.get("clin") or ""), e["celda_b"]),
-                Paragraph(b.get("parte") or "__________", e["celda"]),
+                Paragraph(_clin, e["celda_b"]),
+                Paragraph(_parte or "__________", e["celda"]),
                 Paragraph(_d, e["celda"]),
                 Paragraph(_fmt(_cant) if _cant else HUECO, e["celda"]),
                 Paragraph(_uni or HUECO, e["celda"]),
-                Paragraph(b.get("precio") or "", e["celda_b"]),
+                # UNIT PRICE en blanco: el distribuidor pone su precio.
+                Paragraph("", e["celda_b"]),
                 # AMOUNT en blanco: el distribuidor calcula importe x cantidad.
                 Paragraph("", e["celda_b"]),
             ])
+        # Fila de TOTAL, tambien en blanco: el distribuidor suma sus importes.
+        # Conserva la cabecera "TOTAL (USD)" que el PO siempre ha llevado.
+        _f_bom.append(["", "", Paragraph("TOTAL (USD)", e["celda_b"]),
+                       "", "", "", ""])
         if _est.get("fuente"):
             log.info("generar_po: BOM desde %s (%s)", _est.get("_modelo") or "IA",
                      _est["fuente"])
-        # Los anchos estan calculados para que NINGUNA cabecera se parta en
-        # dos lineas. "UNIT PRICE" no cabia en 0.48" y salia "UNIT PRIC / E",
-        # que se ve bien en el PDF pero rompe el texto a quien lo copia, y
-        # "PART NUMBER / NSN" se partia igual. La descripcion es la unica
-        # columna elastica, asi que absorbe el ajuste de AMOUNT. Se afina
-        # PART NO./NSN a 1.18" y los precios a 0.58" para devolverle ancho a
-        # la descripcion (3.22") y que la tabla no crezca en altura: una fila
-        # mas alta empuja el glosario fuera de la pagina 1.
-        _anchos_bom = [0.52 * inch, 1.18 * inch, ancho - 3.78 * inch,
-                       0.50 * inch, 0.42 * inch, 0.58 * inch, 0.58 * inch]
+        # Los anchos estan calculados para que NINGUNA cabecera se parta en dos
+        # lineas, midiendo el texto real de la cabecera en Helvetica-Bold 8.5pt
+        # (el estilo celda_b): "UNIT PRICE" ocupa 48.2pt y "AMOUNT" 37.3pt, asi
+        # que necesitan 0.82" y 0.66" respectivamente para caber en un renglon.
+        # Con 0.58" la cabecera se partia ("UNIT" / "PRICE" y, peor, "AMOUN" /
+        # "T" dentro de la palabra), y quien copia el texto recibia dos letras
+        # sueltas. La descripcion es la unica columna elastica (queda en 2.90"),
+        # y absorbe el ajuste; aun asi su cabecera "DESCRIPTION & SALIENT
+        # CHARACTERISTICS" (188.9pt) cabe holgada en una linea.
+        _anchos_bom = [0.52 * inch, 1.18 * inch, ancho - 4.10 * inch,
+                       0.50 * inch, 0.42 * inch, 0.82 * inch, 0.66 * inch]
         _t_bom = Table(_f_bom, colWidths=_anchos_bom, repeatRows=1)
         _t_bom.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), AZUL),
@@ -663,8 +619,12 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             ("RIGHTPADDING", (0, 0), (-1, -1), 5),
             ("TOPPADDING", (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2),
              [colors.white, colors.HexColor("#F7F8FA")]),
+            # La fila de TOTAL lleva su propio fondo y su linea superior, como
+            # en la tabla de ITEMS ORDERED de siempre.
+            ("BACKGROUND", (0, -1), (-1, -1), GRIS_CLARO),
+            ("LINEABOVE", (0, -1), (-1, -1), 0.9, AZUL),
         ]))
         f.append(_t_bom)
         f.append(Spacer(1, 0.08 * inch))
@@ -717,6 +677,64 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         if datos.get("notas"):
             f.append(Spacer(1, 0.14 * inch))
             f.append(Paragraph(datos["notas"], e["nota"]))
+
+    else:
+        # --- ITEMS ORDERED (legacy, sin BOM) ---
+        # Sin BOM, se mantiene la tabla ITEMS ORDERED tal cual, byte a byte,
+        # para no romper la retrocompatibilidad con el flujo /pdf a mano y con
+        # test_pdf_rfq.py seccion 5, que exige "ITEMS ORDERED" presente y
+        # "BILL OF MATERIALS" ausente cuando el usuario quita el BOM.
+        f.append(Paragraph("ITEMS ORDERED", e["h2"]))
+        cabecera = ["ITEM", "DESCRIPTION / TECHNICAL SPECIFICATION",
+                    "QTY", "UNIT", "UNIT PRICE", "AMOUNT"]
+        filas = [[Paragraph(h, e["celda_b"]) for h in cabecera]]
+        total = 0.0
+        for i, ln in enumerate(_lineas, start=1):
+            cant = _num(ln.get("cantidad"))
+            precio = _num(ln.get("precio_unitario"))
+            importe = cant * precio
+            total += importe
+            desc = ln.get("descripcion") or ""
+            spec = ln.get("especificacion") or ""
+            if spec:
+                desc = f"{desc}<br/><font size=7.5 color='#5B6770'>{spec}</font>"
+                # TECHNICAL & DELIVERY REQUIREMENTS, debajo de la descripcion.
+                if _tec and i == 1:
+                    desc += ('<br/><font size=7.5 color="#1B3B6F">'
+                             '<b>TECHNICAL &amp; DELIVERY REQUIREMENTS</b></font>'
+                             f'<br/><font size=7.5>{_tec}</font>')
+            filas.append([
+                Paragraph(str(i), e["celda_b"]),
+                Paragraph(desc, e["celda"]),
+                Paragraph(_fmt(cant) if cant else HUECO, e["celda"]),
+                Paragraph(ln.get("unidad") or HUECO, e["celda"]),
+                Paragraph("" if _sin_precio else _usd(precio), e["celda"]),
+                Paragraph("" if _sin_precio else _usd(importe), e["celda_b"]),
+            ])
+        filas.append(["", Paragraph("TOTAL (USD)", e["celda_b"]), "", "",
+                      "",
+                      Paragraph("" if _sin_precio else _usd(total), e["celda_b"])])
+        anchos = [0.62 * inch, ancho - 3.02 * inch, 0.52 * inch, 0.48 * inch,
+                  0.90 * inch, 0.90 * inch]
+        tabla = Table(filas, colWidths=anchos, repeatRows=1)
+        estilo = [
+            ("BACKGROUND", (0, 0), (-1, 0), AZUL),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.4, GRIS_LINEA),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+            ("ALIGN", (0, 0), (0, -1), "CENTER"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F7F8FA")]),
+        ]
+        estilo.append(("BACKGROUND", (0, -1), (-1, -1), GRIS_CLARO))
+        estilo.append(("LINEABOVE", (0, -1), (-1, -1), 0.9, AZUL))
+        tabla.setStyle(TableStyle(estilo))
+        f.append(tabla)
+        f.append(Spacer(1, 0.12 * inch))
 
     doc.build(f)
     return buffer.getvalue()
@@ -1236,46 +1254,85 @@ def _blueprint_logistica(e, datos):
     CONTENEDOR 2. Como hay que despacharlo y que papeles tienen que ir dentro.
     """
     filas = []
-    dir_ = dict(datos.get("direccion_entrega") or {})
-    lineas_dir = lineas_direccion(dir_)
-    if not lineas_dir:
-        # Sin direccion fisica no se inventa una. Se avisa en el log para que
-        # quede constancia en Render de lo que faltó, y el papel dice lo que si
-        # se sabe.
-        log.warning(
-            "PDF: el aviso %s NO trae direccion fisica de entrega en "
-            "placeOfPerformance, shipToAddress ni deliveryLocation. Se deja "
-            "el hueco con instruccion. REVISAR A MANO el pliego adjunto.",
-            datos.get("referencia_sam") or "(sin numero)")
-        # Se permite el respaldo SOLO si viene de una fuente de entrega. El
-        # lugar_de_entrega_aviso() ya no cae en la oficina contratante, asi que
-        # lo que llegue aqui es ciudad y estado de verdad del destino.
-        plano = _dir_limpio(datos.get("lugar_entrega"))
-        if plano:
-            lineas_dir = [plano]
-    # Si no se ha resuelto una direccion REAL, la fila NO se dibuja.
+    # AWARD PACKAGE READINESS (adjudicacion ganada).
     #
-    # Antes caia en "As designated by the solicitation on the cover page", que
-    # es una frase generica: el transportista no tiene donde llevar el palet y
-    # el papel aparenta estar completo. Una fila que no esta es un hueco que el
-    # proveedor rellena llamando; una frase vacia es un hueco que nadie ve.
+    # Cuando el bot detecta una adjudicacion ganada (Award Notice) y consigue
+    # el PDF oficial de SAM.gov, puede inyectar datos tecnicos REALES en este
+    # diccionario (datos["award"]). Cada clave SOBRESCRIBE el valor por
+    # defecto de la fila correspondiente; si no hay award (un RFQ estandar),
+    # se mantienen los defaults limpios de siempre. Es puramente aditivo y
+    # retrocompatible: sin la clave "award", el blueprint sale identico.
+    #
+    # Claves soportadas (todas opcionales):
+    #   shipping_destination : lista de lineas o string. Direccion EXACTA de
+    #                          la base o agencia militar destino.
+    #   delivery_window      : string. Ventana de entrega concreta.
+    #   packaging            : string. Instrucciones precisas de empaque.
+    #   freight_marking      : string. Marcado de carga especifico.
+    #   traceability         : string. CoC y numeros de lote.
+    #   delivery_contact     : string. Punto de contacto en destino.
+    _aw = dict(datos.get("award") or {})
+
+    # --- Destino de envio ---
+    # Con award se usa la direccion exacta de la base/agencia; sin award, la
+    # resolucion normal del aviso (placeOfPerformance / shipToAddress).
+    _aw_dest = _aw.get("shipping_destination")
+    if _aw_dest:
+        if isinstance(_aw_dest, (list, tuple)):
+            lineas_dir = [str(x).strip() for x in _aw_dest if str(x).strip()]
+        else:
+            _t = str(_aw_dest).strip()
+            lineas_dir = [_t] if _t else []
+    else:
+        dir_ = dict(datos.get("direccion_entrega") or {})
+        lineas_dir = lineas_direccion(dir_)
+        if not lineas_dir:
+            # Sin direccion fisica no se inventa una. Se avisa en el log para
+            # que quede constancia en Render de lo que falto, y el papel dice
+            # lo que si se sabe.
+            log.warning(
+                "PDF: el aviso %s NO trae direccion fisica de entrega en "
+                "placeOfPerformance, shipToAddress ni deliveryLocation. Se "
+                "deja el hueco con instruccion. REVISAR A MANO el pliego.",
+                datos.get("referencia_sam") or "(sin numero)")
+            # Respaldo SOLO si viene de una fuente de entrega.
+            plano = _dir_limpio(datos.get("lugar_entrega"))
+            if plano:
+                lineas_dir = [plano]
+    # Si no se ha resuelto una direccion REAL, la fila NO se dibuja con una
+    # frase generica: hueco con instruccion, no direccion inventada.
     if lineas_dir:
         filas += _fila(e, "Delivery Destination (Ship-To Address):",
                        "<br/>".join(lineas_dir))
     else:
-        # Hueco con instruccion, no hueco a secas y no direccion inventada.
         filas += _fila(e, "Delivery Destination (Ship-To Address):",
                        _esc_html(SIN_DESTINO_CONFIRMADO),
                        estilo_val="bp_fuerte")
-    fecha = datos.get("fecha_limite")
-    if fecha:
-        filas += _fila(e, "Delivery Window:",
-                       "On or before %s." % _fecha_pdf(fecha))
-    filas += _fila(e, "Packaging:",
-                   "Packaging suitable for transportation: the supplier shall "
-                   "pack the material so that it is preserved in the "
-                   "condition required for delivery. Each shipping box must "
-                   "be individually labelled and palletised.")
+
+    # --- Ventana de entrega ---
+    _aw_win = _aw.get("delivery_window")
+    if _aw_win:
+        filas += _fila(e, "Delivery Window:", _esc_html(str(_aw_win)))
+    else:
+        fecha = datos.get("fecha_limite")
+        if fecha:
+            filas += _fila(e, "Delivery Window:",
+                           "On or before %s." % _fecha_pdf(fecha))
+
+    # --- Empaque ---
+    _aw_pack = _aw.get("packaging")
+    if _aw_pack:
+        filas += _fila(e, "Packaging:", _esc_html(str(_aw_pack)))
+    else:
+        filas += _fila(e, "Packaging:",
+                       "Packaging suitable for transportation: the supplier "
+                       "shall pack the material so that it is preserved in "
+                       "the condition required for delivery. Each shipping "
+                       "box must be individually labelled and palletised.")
+
+    # Estas dos son reglas de pie de la casa (FOB Destination y Blind
+    # Drop-Shipping); no se sobreescriben con award porque no son datos del
+    # pliego sino politica permanente de L.A.M.B.
     filas += _fila(e, "Shipping Term (FOB):",
                    "FOB Destination. Freight and all shipping charges must be "
                    "fully included in your final price quote.")
@@ -1285,21 +1342,41 @@ def _blueprint_logistica(e, datos):
                    "physical packaging. Shipping labels and packing slips must "
                    "show L.A.M.B. Logistics LLC as the Shipper of Record.",
                    estilo_val="bp_fuerte")
-    filas += _fila(e, "Quality Assurance &amp; Traceability:",
-                   "A genuine Manufacturer Certificate of Conformance (CoC) "
-                   "identifying the part number and matching lot number MUST "
-                   "be physically included inside every shipping box. Orders "
-                   "delivered without a CoC will be automatically rejected at "
-                   "the vendor's expense.",
-                   estilo_val="bp_fuerte")
+
+    # --- Trazabilidad (CoC y lotes) ---
+    _aw_trace = _aw.get("traceability")
+    if _aw_trace:
+        filas += _fila(e, "Quality Assurance &amp; Traceability:",
+                       _esc_html(str(_aw_trace)), estilo_val="bp_fuerte")
+    else:
+        filas += _fila(e, "Quality Assurance &amp; Traceability:",
+                       "A genuine Manufacturer Certificate of Conformance "
+                       "(CoC) identifying the part number and matching lot "
+                       "number MUST be physically included inside every "
+                       "shipping box. Orders delivered without a CoC will be "
+                       "automatically rejected at the vendor's expense.",
+                       estilo_val="bp_fuerte")
+
+    # --- Marcado de carga ---
     # El numero de solicitud va con el CLIN. Sin esto el transportista deja el
     # palet en la puerta, porque no hay forma de saber a que direccion va.
-    sol = str(datos.get("referencia_sam") or "").strip()
-    filas += _fila(e, "Freight Marking:",
-                   "Every pallet or shipping label must clearly display "
-                   "Federal Solicitation Number: <b>%s</b> and <b>CLIN 1</b>. "
-                   "Each shipment must include a packing list."
-                   % _esc_html(sol if sol else "as shown on the cover page"))
+    _aw_freight = _aw.get("freight_marking")
+    if _aw_freight:
+        filas += _fila(e, "Freight Marking:", _esc_html(str(_aw_freight)))
+    else:
+        sol = str(datos.get("referencia_sam") or "").strip()
+        filas += _fila(e, "Freight Marking:",
+                       "Every pallet or shipping label must clearly display "
+                       "Federal Solicitation Number: <b>%s</b> and "
+                       "<b>CLIN 1</b>. Each shipment must include a packing "
+                       "list."
+                       % _esc_html(sol if sol else
+                                   "as shown on the cover page"))
+
+    # --- Contacto en destino (solo si el award lo trae) ---
+    _aw_contact = _aw.get("delivery_contact")
+    if _aw_contact:
+        filas += _fila(e, "Delivery Contact:", _esc_html(str(_aw_contact)))
     # El pago se queda. Packaging y condiciones eran cajas sueltas y ahora son
     # parte de este bloque, porque el factoring es una condicion de entrega:
     # sin saber donde remitir la factura, la operacion no cierra.
@@ -3134,19 +3211,14 @@ def _notas_ingles(analisis: dict, pendientes: int = 0) -> str:
             "this document." % _amd
         )
 
-    if pendientes:
-        # Ya NO se menciona [SEE NOTE] ni "castellano sin traducir": el
-        # documento zero-spanish nunca lleva espanol ni marcadores internos,
-        # asi que el aviso al usuario se redacta en ingles llano y sin la
-        # marca, diciendo que hay campos tomados de la fuente oficial o
-        # referidos al aviso.
-        texto += (
-            "\n\nNOTE: %d field(s) could not be cleanly translated and are "
-            "shown using the official SAM.gov source text or a generic "
-            "English reference. Verify the wording against the official "
-            "notice before issuing this document to the supplier."
-            % pendientes
-        )
+    # El parametro `pendientes` se MANTIENE por compatibilidad con la firma
+    # publica (desde_analisis() lo pasa), pero ya NO genera ninguna nota al
+    # pie. Requisito explicito: el documento debe lucir 100% natural, nativo y
+    # seguro de si mismo, sin delatar procesos internos de traduccion o
+    # fallback. Quien necesita saber que hay campos tomados de la fuente
+    # oficial es el usuario de Telegram, y para eso esta el aviso _aviso_pend
+    # en main.py, que es un canal distinto al papel que va al proveedor.
+    del pendientes  # la firma se conserva; el conteo vive en main.py.
     return texto
 
 
@@ -3388,6 +3460,12 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # Lo aplica generar_po(), que es donde vive el punto unico. Asi una
         # sobreescritura no puede perderse por el camino.
         "contexto_semantico": _contexto,
+        # AWARD PACKAGE READINESS: si el analisis trae datos de una
+        # adjudicacion ganada (Award Notice + PDF oficial de SAM.gov), viajan
+        # aqui para que el blueprint de logistica inyecte el destino exacto, el
+        # empaque, el marcado de carga y la trazabilidad reales. Sin award, la
+        # clave es {} y el blueprint usa los defaults limpios. Aditivo.
+        "award": dict(analisis.get("award") or {}),
         "instrucciones": "\n".join(inst),
         # Condiciones en ingles, por lo mismo que las instrucciones: van al
         # proveedor. El factoring se declara porque es lo que hace posible la

@@ -357,9 +357,11 @@ if PdfReader:
     check("Y el titulo de SAM.gov se conserva literal en la cabecera",
           "SAM.GOV TITLE 53--PARTS KIT" in txt,
           "-> la referencia al aviso ha cambiado y no debe")
-    _celda = txt[txt.index("ITEMS ORDERED"):txt.index("SUPPLIER")
-                 if "SUPPLIER" in txt[txt.index("ITEMS ORDERED"):]
-                 else txt.index("BILL OF MATERIALS")]
+    # La tabla unica reemplaza a ITEMS ORDERED: la celda del material va desde
+    # su titulo hasta el blueprint de la pagina 2. "53--" solo vive en la
+    # cabecera SAM.GOV TITLE, asi que no debe colarse en la linea de cobro.
+    _celda = txt[txt.index("LINE ITEMS")
+                 :txt.index("INDUSTRIAL SUPPLY BLUEPRINT")]
     check("Pero no en la celda del material", "53--" not in _celda,
           "-> el codigo de clase se ha colado en la linea de cobro")
 check("Y el aviso tenia 1 enmienda y se cuenta",
@@ -453,7 +455,11 @@ for etiqueta, texto in (("multilinea", DESCRIPCION), ("BLOQUE UNICO", BLOB)):
     if PdfReader:
         _t = " ".join("\n".join(pg.extract_text() or ""
                                 for pg in PdfReader(io.BytesIO(_b)).pages).split())
-        _celda = _t[_t.index("ITEMS ORDERED"):_t.index("BILL OF MATERIALS")]
+        # La tabla unica reemplaza a ITEMS ORDERED: la celda del material va
+        # desde su titulo hasta el blueprint de la pagina 2, sin la narrativa
+        # de la enmienda ni el pie de pagina.
+        _celda = _t[_t.index("LINE ITEMS")
+                    :_t.index("INDUSTRIAL SUPPLY BLUEPRINT")]
         check("  %s: y la celda del PDF sale limpia" % etiqueta,
               "AMD" not in _celda and "Narrative" not in _celda
               and "acknowledge" not in _celda.lower(),

@@ -268,7 +268,7 @@ if _txt:
         ("Referencia SAM.gov", "W9127N26QA145"),
         ("Bloque de proveedor", "SUPPLIER / VENDOR"),
         ("Nombre del distribuidor", "Grainger Industrial Supply"),
-        ("Tabla de articulos", "ITEMS ORDERED"),
+        ("Tabla de articulos", "LINE ITEMS / BILL OF MATERIALS"),
         ("Cantidad", "45"),
         ("Unidad", "KIT"),
         # El precio NO se imprime: es una hoja de cotizacion y lo pone el
@@ -297,7 +297,7 @@ if _txt:
     check("  Y con la zona horaria", "EDT" in _txt)
 
     print()
-    print("  La columna ITEM no parte el numero de solicitud:")
+    print("  La columna CLIN no parte el numero de solicitud:")
     # "26QA14" no sirve para esto: es subcadena de "W9127N26QA145" y siempre
     # esta, partido o no. Lo que delata una columna estrecha es que el numero
     # aparezca FRAGMENTADO en lineas sueltas en vez de entero en una.
@@ -310,12 +310,12 @@ if _txt:
     check("  El numero aparece entero en una linea",
           "W9127N26QA145" in _lineas_txt,
           "-> la columna ITEM lo parte porque no cabe en 0.62 pulgadas")
-    # Y la columna ITEM lleva el numero de linea, no el de solicitud.
-    # El encabezado de la tabla tiene 6 celdas (ITEM, DESCRIPTION, QTY, UNIT,
-    # UNIT PRICE, AMOUNT) y pypdf las saca en lineas separadas, asi que el
-    # numero de linea esta unas 7 lineas despues, no 3.
-    _tras_item = _lineas_txt.index("ITEM") if "ITEM" in _lineas_txt else -1
-    check("  La columna ITEM lleva el numero de linea",
+    # Y la columna CLIN lleva el numero de linea, no el de solicitud.
+    # La tabla unificada tiene 7 celdas (CLIN, PART NO. / NSN, DESCRIPTION,
+    # QTY, UOI, UNIT PRICE, AMOUNT) y pypdf las saca en lineas separadas, asi
+    # que el numero de linea ("1") esta a 7 lineas de la cabecera CLIN.
+    _tras_item = _lineas_txt.index("CLIN") if "CLIN" in _lineas_txt else -1
+    check("  La columna CLIN lleva el numero de linea",
           _tras_item >= 0 and "1" in _lineas_txt[_tras_item:_tras_item + 9],
           f"-> {_lineas_txt[_tras_item:_tras_item + 9]}")
 

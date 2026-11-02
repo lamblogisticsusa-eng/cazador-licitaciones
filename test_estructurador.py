@@ -457,7 +457,12 @@ for aviso, desc, resp, sol, cant, uni in (
         sam_api.obtener_descripcion = _real
     t = " ".join("\n".join(pg.extract_text() or ""
                           for pg in PdfReader(io.BytesIO(b)).pages).split())
-    celda = t[t.index("ITEMS ORDERED"):t.index("BILL OF MATERIALS")]
+    # La tabla unica reemplaza a las dos de antes: ITEMS ORDERED y BOM ya no
+    # son dos secciones sino UNA ("LINE ITEMS / BILL OF MATERIALS (BOM)"). La
+    # celda se acota desde su titulo hasta el blueprint de la pagina 2, para
+    # que la comprobacion de "sin tramite administrativo" no mire el pie de
+    # pagina (que si menciona "point of contact" en la nota de AMENDMENTS).
+    celda = t[t.index("LINE ITEMS"):t.index("INDUSTRIAL SUPPLY BLUEPRINT")]
     bom = t[t.index("BILL OF MATERIALS"):]
     print()
     print("  %s  ->  %d bytes" % (sol, len(b)))
