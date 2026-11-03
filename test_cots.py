@@ -42,6 +42,7 @@ import io
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 DB = os.path.join(tempfile.gettempdir(), "kyo_test_cots.db")
 for s in ("", "-wal", "-shm"):
@@ -73,7 +74,12 @@ import config
 import filters
 import scanner
 
-FUTURO = "2026-12-15T17:00:00-04:00"
+# Fecha RELATIVA (+10 dias): con una fija el test se podria con el paso del
+# tiempo. Al vencer, filters.puntuar() hace short-circuit a -100 ("Fecha
+# limite ya vencida") y los asserts de puntuacion de abajo (COTS suma, el
+# motivo lo explica, NO veta) revientan; ademas "veto()" pasaria a devolver
+# motivo para TODO titulo, no solo los vetados.
+FUTURO = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
 
 # v5.2.0: PSC de defensa, fuera de las familias COTS industriales (43/47/48/51/53)
 # con las que el bypass del filtro de alta complejidad aplica. Con este PSC los
