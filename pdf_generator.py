@@ -794,6 +794,58 @@ def _dir_limpio(bruto) -> str:
     return texto.strip()
 
 
+def _dato_plano(v):
+    """
+    El valor legible de un campo de SAM.gov, sea cual sea su forma.
+
+    LA MITAD DE LOS CAMPOS LLEGAN COMO OBJETO, NO COMO TEXTO
+
+    La misma ciudad viene de dos maneras segun la agencia que publico el
+    aviso: "Groton" o {"name": "Groton"}; el estado, "Connecticut" o
+    {"code": "IL", "name": "Illinois"}; el pais, "USA" o {"code": "USA",
+    "name": "UNITED STATES"}. Hacer str(v) sobre el objeto imprime el repr
+    de Python en el papel:
+
+        {'name': 'Norfolk'}, {'code': 'VA', 'name': 'Virginia'} 61299
+
+    Que es exactamente lo que salia en el Ship-To: no una direccion, sino el
+    rastro de la maquina que la compuso. Un transportista no puede entregar a
+    un dict, y en una orden federal eso es material perdido.
+
+    filters.lugar_de_entrega() ya desenvolia estos objetos para el mensaje de
+    Telegram; el documento, que es donde mas importa, no. Esta funcion es la
+    misma logica, centralizada, para que las dos mitades no puedan divergir.
+
+    SE PREFIERE EL NOMBRE AL CODIGO
+
+    "Illinois" antes que "IL", porque es como se escribe una direccion
+    postal y como ya sale del resto del pipeline. El codigo es el respaldo
+    para cuando la agencia solo publica el codigo.
+
+    NUNCA INVENTA. Si el objeto no trae ninguna clave legible, devuelve "" y
+    el campo queda vacio: mejor un hueco que un repr de Python.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, (list, tuple)):
+        # Algunas agencias publican la direccion como lista de lineas. Coge la
+        # primera con texto; una lista entera no cabe en una celda.
+        for x in v:
+            s = _dato_plano(x)
+            if s:
+                return s
+        return ""
+    if isinstance(v, dict):
+        # name/text/value/label/description son el valor humano; "code" es el
+        # codigo ("IL", "USA") y solo vale si no hay nombre.
+        for clave in ("name", "text", "value", "label", "description"):
+            s = _dato_plano(v.get(clave))
+            if s:
+                return s
+        return _dato_plano(v.get("code"))
+    return str(v).strip()
+
+
 # La direccion de SAM.gov, en el orden en que se escribe una direccion postal.
 # El orden NO es el del diccionario: es nombre, calle, ciudad, estado, ZIP.
 _CLAVES_DIRECCION = (
@@ -900,9 +952,11 @@ def _direccion_completa(aviso: dict) -> dict:
             if not isinstance(bloque, dict):
                 continue
             for c in claves:
-                v = bloque.get(c)
-                if v and str(v).strip():
-                    salida[destino] = _esc_html(str(v).strip())
+                # _dato_plano, no str(): SAM.gov publica ciudad/estado/pais
+                # como objeto ({"name": "Norfolk"}) en la mitad de los avisos.
+                plano = _dato_plano(bloque.get(c))
+                if plano:
+                    salida[destino] = _esc_html(plano)
                     break
             if destino in salida:
                 break
@@ -2153,9 +2207,13 @@ def lugar_de_entrega_aviso(aviso: dict) -> str:
     pop = aviso.get("placeOfPerformance") or {}
     partes = []
     for clave in ("city", "state"):
-        v = pop.get(clave) if isinstance(pop, dict) else None
-        if v and str(v).strip():
-            partes.append(str(v).strip())
+        # _dato_plano desenvuelve la forma de objeto con la que SAM.gov
+        # publica estos campos ({"name": "Norfolk"}, {"code": "IL", ...}).
+        # Sin eso, aqui se colaba el repr de Python y el lugar de entrega
+        # salia como basura en las instrucciones del documento.
+        v = _dato_plano(pop.get(clave)) if isinstance(pop, dict) else ""
+        if v:
+            partes.append(v)
     # REGLA 3: aqui YA NO se cae en fullParentPathName.
     #
     # fullParentPathName es la OFICINA QUE HACE EL CONTRATO, no el sitio donde

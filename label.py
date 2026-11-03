@@ -1,12 +1,37 @@
 """
-label.py - Genera la etiqueta de envio y el packing list en PDF.
+label.py - Genera la etiqueta de envio (freight / pallet) en PDF.
 
 Sirve para el comando /etiqueta: toma la oportunidad que Kyomoto ya analizo y
-produce un PDF con los datos de envio, listos para imprimir o para pegar sobre
-la caja. Usa reportlab, que ya estaba en tu requirements.txt.
+produce un documento INDEPENDIENTE de la orden de compra, listo para imprimir
+y para pegar sobre la caja o el pallet. Usa reportlab, que ya estaba en tu
+requirements.txt.
 
-NO inventa datos: si no hay peso o direccion, lo deja en blanco para que lo
-rellenes. Kyomoto no se la juega con la informacion de una etiqueta.
+LA ETIQUETA ES UN DOCUMENTO DE ENVIO, NO UNA FICHA INTERNA
+
+Va pegada a la caja y la leen el transportista y el personal de la base
+destino, en Estados Unidos. Por eso:
+
+- Va en INGLES, igual que la orden de compra (Zero-Spanish). El texto de la
+  IA llega en castellano y pasa por la misma capa de traduccion que la
+  orden; lo que no se puede traducir ENTERO no se imprime a medias.
+- El Shipper of Record es L.A.M.B. Logistics LLC con sus datos reales, la
+  UEI y el NCAGE. El pliego exige que las etiquetas muestren al remitente
+  (Blind Drop-Shipping Directive), y "Kyomoto Logistics, Santiago, Chile"
+  no era el remitente de nadie.
+- El Consignee sale de la direccion FISICA del aviso de SAM.gov
+  (direccion_entrega), campo por campo: instalacion, calle, ciudad, estado
+  y ZIP. Si lo unico que se sabe es el pais ("USA"), NO se pinta: un
+  Ship-To generico no es una direccion, es decir que no se sabe, y en un
+  documento de envio eso manda el material a ninguna parte. Se deja el
+  hueco con la instruccion honesta.
+- Referencias cruzadas: solicitud, CLIN y bultos/unidades, que es lo que el
+  personal de la base usa para dar de alta la entrega. El CLIN sale del BOM
+  que ya extrajo el pipeline; los bultos no estan en el aviso, asi que se
+  dejan en blanco para rellenarlos al preparar el envio.
+
+NO inventa datos: lo que no esta en el aviso se deja en blanco o se dice que
+hay que confirmarlo. Una direccion inventada en una etiqueta es material
+perdido.
 """
 from __future__ import annotations
 
@@ -16,8 +41,27 @@ from datetime import datetime
 
 import config
 
-_ANCHO_ETIQUETA = (4, 2)  # pulgadas: 4x2 es el estandar de UPS/FedEx
+# 4x6 pulgadas: el tamano ESTANDAR de la etiqueta de flete (UPS/FedEx/ZPL).
+# Antes el alto se leia de _ANCHO_ETIQUETA[1], que era 2 pulgadas, y el
+# contenido seguia bajando igual: lo que no cabia, salia de la pagina y no se
+# imprimia. _ALTO_ETIQUETA ya valia 6 y nadie lo usaba.
+_ANCHO_ETIQUETA = (4, 2)
 _ALTO_ETIQUETA = 6
+
+# Paleta de la casa, la misma que la orden de compra: navy sobrio y gris.
+_NAVY = "#1B3B6F"
+_GRIS = "#5B6770"
+
+# El texto de la IA trae markdown (**negrita**, _cursiva_, `codigo`). En un
+# papel eso es ruido.
+_RE_MD = re.compile(r"[*_`]+")
+
+# Lo que NO vale como destino: solo el pais, o el marcador de "sin dato" que
+# deja el analisis. Pintar eso en el Consignee es el error que esta funcion
+# existe para evitar.
+_GENERICOS = {"", "usa", "u.s.a.", "us", "u.s.", "united states",
+              "united states of america", "no especificado", "not specified",
+              "n/a", "na", "none", "a confirmar"}
 
 
 def _seguro(texto: str) -> str:
@@ -40,119 +84,224 @@ def nombre_archivo(notice_id: str, solicitation: str) -> str:
     return f"etiqueta_{base}_{_numero(notice_id)}.pdf"
 
 
+def _consignee(analisis: dict, pdfg) -> list[str]:
+    """
+    Las lineas del Consignee, en orden, o [] si no hay destino real.
+
+    Primero la direccion fisica completa (direccion_entrega), que es la que
+    pone desde_aviso() a partir de placeOfPerformance / shipToAddress /
+    deliveryLocation. Solo si no existe se cae al lugar grosero del aviso
+    (ciudad / estado), que al menos si es un sitio.
+
+    Y en ningun caso el pais solo: "USA" en el Ship-To no es una direccion.
+    """
+    dir_ = dict(analisis.get("direccion_entrega") or {})
+    lineas = [str(x).strip() for x in pdfg.lineas_direccion(dir_)
+              if str(x).strip()]
+    if not lineas:
+        lugar = _RE_MD.sub("", str(analisis.get("lugar_entrega") or "")).strip()
+        if lugar:
+            # El lugar puede venir con separadores de casa ("Norfolk / VA /
+            # USA") o con comas ("Norfolk, Virginia, UNITED STATES").
+            trozos = [x.strip() for x in re.split(r"\s*/\s*", lugar) if x.strip()]
+            lineas = trozos
+    if not lineas or all(t.lower() in _GENERICOS for t in lineas):
+        return []
+    return lineas[:4]
+
+
 def generar(notice_id: str, analisis: dict) -> str | None:
     """Crea el PDF y devuelve la ruta, o None si reportlab no esta disponible."""
     try:
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import inch
-        from reportlab.lib.units import inch as _in
         from reportlab.pdfgen import canvas
     except ImportError:
         return None
 
+    analisis = analisis or {}
+    # Las constantes de la casa se importan de pdf_generator, no se copian:
+    # si cambia el telefono o el UEI, cambia en los dos papeles a la vez y no
+    # puede divergir. Import diferido para no acoplar la importacion del
+    # modulo (pdf_generator trae reportlab e integral).
+    import pdf_generator as _pg
+
+    navy = colors.HexColor(_NAVY)
+    gris = colors.HexColor(_GRIS)
+
     os.makedirs(config.ETIQUETAS_DIR, exist_ok=True)
-    ruta = os.path.join(config.ETIQUETAS_DIR, nombre_archivo(notice_id, analisis.get("solicitation", "")))
-    ancho, alto = _ANCHO_ETIQUETA[0] * inch, _ANCHO_ETIQUETA[1] * inch
+    ruta = os.path.join(
+        config.ETIQUETAS_DIR,
+        nombre_archivo(notice_id, analisis.get("solicitation", "")))
+    ancho = _ANCHO_ETIQUETA[0] * inch
+    alto = _ALTO_ETIQUETA * inch
 
     c = canvas.Canvas(ruta, pagesize=(ancho, alto))
-    c.setTitle(f"Etiqueta {analisis.get('solicitation', '')}")
+    c.setTitle(f"Shipping label {analisis.get('solicitation', '')}")
     m = 0.18 * inch
+    izq = m + 9
+    der = ancho - m - 9
 
     # --- Marco ---
-    c.setLineWidth(1.2)
+    c.setStrokeColor(navy)
+    c.setLineWidth(1.4)
     c.rect(m, m, ancho - 2 * m, alto - 2 * m)
 
-    # --- Cabecera ---
-    c.setFont("Helvetica-Bold", 8)
-    c.drawString(m + 8, alto - m - 14, "KYOMOTO LOGISTICS  |  ETIQUETA DE ENVIO")
-    c.setFont("Helvetica", 6.5)
-    c.drawRightString(ancho - m - 8, alto - m - 14,
-                      f"Generada {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    c.setLineWidth(0.5)
-    c.line(m + 6, alto - m - 20, ancho - m - 6, alto - m - 20)
-
-    y = alto - m - 40
-
-    # --- DE / ENVIADO DESDE ---
-    c.setFont("Helvetica-Bold", 6.5)
-    c.drawString(m + 8, y, "DESDE (ORIGEN)")
-    c.setFont("Helvetica", 8)
-    c.drawString(m + 8, y - 12, "Kyomoto Logistics")
-    c.setFont("Helvetica", 7)
-    c.drawString(m + 8, y - 23, "Santiago, Chile")
-    c.setFont("Helvetica", 6.5)
-    c.drawString(m + 8, y - 34, "REMITENTE: completar con tus datos y RUT")
-    y -= 56
-
-    # --- PARA / DIRECCION DE ENTREGA ---
-    c.setFont("Helvetica-Bold", 7.5)
-    c.drawString(m + 8, y, "ENTREGAR A (DESTINO OFICIAL DE LA LICITACION)")
-    y -= 14
-    destino = str(analisis.get("lugar_entrega") or "")
-    c.setFont("Helvetica", 8)
-    if destino and destino != "No especificado":
-        for linea in _cortar(destino, 52)[:4]:
-            c.drawString(m + 8, y, _seguro(linea))
-            y -= 11
-    else:
-        c.setFont("Helvetica-Oblique", 7.5)
-        c.drawString(m + 8, y, "*** SIN DIRECCION: bajar la direccion oficial de SAM.gov ***")
-        y -= 12
-        c.setFont("Helvetica", 7)
-
-    c.setFont("Helvetica", 6.5)
-    c.drawString(m + 8, y, "PUNTO DE CONTACTO EN DESTINO:")
-    y -= 22
-
-    # --- Referencia del contrato ---
+    # --- Banda de cabecera (navy, como la cabecera de tabla de la orden) ---
+    c.setFillColor(navy)
+    c.rect(m, alto - m - 27, ancho - 2 * m, 27, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 10.5)
+    c.drawString(izq, alto - m - 18, "L.A.M.B. LOGISTICS LLC")
     c.setFont("Helvetica-Bold", 7)
-    c.drawString(m + 8, y, "DATOS DEL CONTRATO")
-    y -= 12
+    c.drawRightString(der, alto - m - 17, "SHIPPING / PALLET LABEL")
+    c.setFont("Helvetica", 5.8)
+    c.drawRightString(der, alto - m - 24,
+                      f"Generated {datetime.now().strftime('%m/%d/%Y %H:%M')}")
+    c.setFillColor(colors.black)
+
+    def _titulo(txt, y):
+        """Titulo de seccion en navy con su regla debajo."""
+        c.setFillColor(navy)
+        c.setFont("Helvetica-Bold", 6.5)
+        c.drawString(izq, y, txt)
+        c.setFillColor(colors.black)
+        c.setStrokeColor(gris)
+        c.setLineWidth(0.4)
+        c.line(izq, y - 3.5, der, y - 3.5)
+        return y - 14
+
+    y = alto - m - 42
+
+    # --- SHIPPER OF RECORD ---
+    # El remitente EXACTO que pide el pliego. Los datos salen de las
+    # constantes de la orden: mismo papel, misma identidad.
+    y = _titulo("SHIPPER OF RECORD", y)
+    c.setFont("Helvetica-Bold", 8.5)
+    c.drawString(izq, y, _seguro(_pg.EMPRESA))
+    y -= 11
     c.setFont("Helvetica", 7)
-    for etiqueta, valor in (
-        ("Solicitacion", analisis.get("solicitation", "N/A")),
-        ("Notice ID", _numero(notice_id)),
-        ("Fecha limite", str(analisis.get("limite", "N/A"))[:30]),
-    ):
-        c.drawString(m + 8, y, f"{etiqueta}: {_seguro(valor)}")
+    for linea in _pg.DIRECCION:
+        c.drawString(izq, y, _seguro(linea))
         y -= 10
-
-    y -= 6
-
-    # --- Contenido ---
-    c.setFont("Helvetica-Bold", 7)
-    c.drawString(m + 8, y, "CONTENIDO")
-    y -= 12
-    c.setFont("Helvetica", 7.5)
-    for linea in _cortar(analisis.get("producto", "*** completar ***"), 52)[:5]:
-        c.drawString(m + 8, y, _seguro(linea))
-        y -= 10.5
-    c.setFont("Helvetica", 6.5)
-    c.drawString(m + 8, y, f"Cantidad: {_seguro(analisis.get('cantidad_estimada') or 'a confirmar')}")
+    c.setFont("Helvetica", 6.8)
+    c.drawString(izq, y, f"{_pg.TELEFONO}  |  {_pg.EMAIL}")
     y -= 10
-    c.drawString(m + 8, y, f"Peso total: __________ kg    Volumen: __________ m3")
-    y -= 18
+    c.setFont("Helvetica-Bold", 6.8)
+    c.drawString(izq, y, f"UEI {_pg.UEI}  |  NCAGE {_pg.NCAGE}")
+    y -= 14
 
-    # --- Aviso de valor ---
-    c.setFont("Helvetica-Bold", 6.5)
-    c.drawString(m + 8, y, "DECLARACION DE VALOR (verificar antes de enviar)")
-    y -= 10
-    c.setFont("Helvetica", 7)
-    valor = analisis.get("valor_contrato_usd")
-    c.drawString(m + 8, y, f"Valor declarado (USD): {'%.2f' % valor if valor else 'a definir'}")
-    y -= 10
-    c.setFont("Helvetica-Oblique", 6)
-    c.drawString(m + 8, y, "Verificar el umbral de sobreprecio de USPS segun el valor declarado.")
-    y -= 20
+    # --- CONSIGNEE ---
+    # El elemento dominante de la etiqueta: es lo que lee el transportista y
+    # el personal de la base, y tiene que verse a distancia. Por eso va mas
+    # grande que el resto.
+    y = _titulo("CONSIGNEE (SHIP TO)", y)
+    lineas = _consignee(analisis, _pg)
+    if lineas:
+        c.setFont("Helvetica-Bold", 9.5)
+        for linea in lineas[:4]:
+            c.drawString(izq, y, _seguro(linea))
+            y -= 12.5
+    else:
+        # Sin direccion fisica no se inventa una. Se dice lo que falta, que
+        # es lo mismo que hace la orden de compra en su fila de Ship-To.
+        c.setFont("Helvetica-Oblique", 7)
+        c.drawString(izq, y, _seguro(_pg.SIN_DESTINO_CONFIRMADO)[:64])
+        y -= 12
+    y -= 4
 
-    # --- Barra inferior de codigos ---
-    c.setFont("Helvetica-Bold", 7)
-    c.drawString(m + 8, y, "IDENTIFICACION")
-    y -= 12
-    c.setFont("Courier", 11)
-    c.drawString(m + 8, y, f"||KYO{_numero(notice_id)}||")
-    y -= 12
-    c.setFont("Helvetica", 6)
-    c.drawString(m + 8, y, "Kyomoto no es transportista. Kyomoto coordina; el porte lo contrata el usuario.")
+    # --- REFERENCIAS CRUZADAS ---
+    # Solicitud, CLIN y bultos/unidades: lo que el personal de la base usa
+    # para casar el bulto con la linea del contrato.
+    y = _titulo("REFERENCES", y)
+    clins = []
+    for b in (analisis.get("bom_lineas") or []):
+        if isinstance(b, dict):
+            cl = str(b.get("clin") or "").strip()
+            if cl and cl not in clins:
+                clins.append(cl)
+    cant = analisis.get("cantidad_total")
+    try:
+        cant_txt = ("%d" % cant) if float(cant) == int(float(cant)) else str(cant)
+    except (TypeError, ValueError):
+        cant_txt = ""
+    uni = str(analisis.get("unidad_medida") or "").strip().upper()
+    unidades = f"{cant_txt} {uni}".strip() if cant_txt else ""
+    try:
+        vence = _pg._fecha_pdf(analisis.get("limite")) or ""
+    except Exception:
+        vence = ""
+    refs = (
+        ("Solicitation No.", str(analisis.get("solicitation") or "").strip()),
+        ("Notice ID", _numero(notice_id)),
+        ("CLIN", ", ".join(clins)),
+        ("Units", unidades),
+        ("Packages (boxes / pallets)", ""),   # no esta en el aviso: se rellena
+        ("Delivery due", vence),
+    )
+    for etiqueta, valor in refs:
+        c.setFont("Helvetica", 6.4)
+        c.setFillColor(gris)
+        c.drawString(izq, y, etiqueta)
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica-Bold", 7.4)
+        c.drawString(izq + 108, y, _seguro(valor) or "____________")
+        y -= 11
+    y -= 3
+
+    # --- CONTENIDO ---
+    y = _titulo("CONTENTS", y)
+    prod = _RE_MD.sub("", str(analisis.get("producto") or "")).strip()
+    prod_en = ""
+    if prod:
+        try:
+            traducido, pendiente = _pg._ingles(prod, 150)
+            # Si no se pudo traducir ENTERO, el castellano no va a un papel
+            # que lee un transportista de EE.UU. Se queda en blanco y mandan
+            # los identificadores, que no tienen idioma.
+            if not pendiente:
+                prod_en = traducido
+        except Exception:
+            prod_en = ""
+    lineas_c = [x for x in _cortar(prod_en, 56)[:3] if x] if prod_en else []
+    if lineas_c:
+        c.setFont("Helvetica", 7.2)
+        for linea in lineas_c:
+            c.drawString(izq, y, _seguro(linea))
+            y -= 9.5
+    # Piezas / NSN: identificadores tecnicos, validos en cualquier idioma.
+    piezas = []
+    for b in (analisis.get("bom_lineas") or []):
+        if isinstance(b, dict):
+            pn = str(b.get("parte") or "").strip()
+            if pn and pn not in piezas:
+                piezas.append(pn)
+    c.setFont("Helvetica", 6.8)
+    if piezas:
+        c.drawString(izq, y, "Part / NSN: " + _seguro(", ".join(piezas)[:64]))
+        y -= 9.5
+    elif not lineas_c:
+        c.setFont("Helvetica-Oblique", 6.8)
+        c.drawString(izq, y, "Item description: see the solicitation.")
+        y -= 9.5
+    c.setFont("Helvetica", 6.2)
+    c.setFillColor(gris)
+    c.drawString(izq, y,
+                 "Mark every box with the solicitation number and the CLIN.")
+    c.setFillColor(colors.black)
+    y -= 13
+
+    # --- Relleno a mano (peso y volumen no estan en el aviso) ---
+    c.setFont("Helvetica", 6.6)
+    c.drawString(izq, y, "Total weight: ____________     "
+                         "Volume: ____________")
+    y -= 10
+    c.setFont("Helvetica", 5.6)
+    c.setFillColor(gris)
+    c.drawString(izq, y,
+                 "Shipper of Record for blind drop-shipping: "
+                 f"{_pg.EMPRESA}.")
+    c.setFillColor(colors.black)
 
     c.showPage()
     c.save()
