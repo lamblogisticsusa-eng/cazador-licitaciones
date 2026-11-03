@@ -369,12 +369,17 @@ for lo, motivo in (
     print("    %-46s %s" % (lo[:46], "FALTA BIEN" if lo not in txt else "ESTA (mal)"))
     check("  El PDF NO lleva %s" % motivo[:46], lo not in txt)
 print()
-print("  Y el nombre comercial ahora sale a proposito, como identidad de producto:")
-print("    %-46s %s" % ("Product Identity",
-                       "ESTA BIEN" if "PRODUCT IDENTITY" in txt.upper()
+# El contenedor "INDUSTRIAL SUPPLY BLUEPRINT" (que llevaba la fila "Product
+# Identity") se retiro de la pagina 2 por duplicar la pagina 1. El nombre
+# comercial NO se ha perdido: vive ahora en la columna DESCRIPTION de la
+# tabla unica LINE ITEMS / BOM ("S-1 series insert bearings ... from The
+# Timken Company"), que es donde el distribuidor lo lee.
+print("  Y el nombre comercial sale en la tabla unificada (DESCRIPTION):")
+print("    %-46s %s" % ("S-1 series insert bearings",
+                       "ESTA BIEN" if "S-1 series insert bearings" in txt
                        else "FALTA (mal)"))
-check("  Y sale como PRODUCT IDENTITY",
-      "PRODUCT IDENTITY" in txt.upper())
+check("  Y el nombre comercial esta en el PDF",
+      "S-1 series insert bearings" in txt)
 print()
 print("  Y el precio sigue en blanco, que es lo que protege la negociacion:")
 check("  Ni una cifra de dinero", "$" not in txt and "$0.00" not in txt)

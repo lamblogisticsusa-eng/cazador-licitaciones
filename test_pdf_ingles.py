@@ -386,7 +386,7 @@ if PdfReader:
     print("  Y la disposicion sigue igual que antes:")
     for cabecera in ("PURCHASE ORDER", "PURCHASE ORDER NO.", "DATE", "SAM.GOV REFERENCE",
                      "RESPONSE DUE", "SUPPLIER / VENDOR", "LINE ITEMS",
-                     "INDUSTRIAL SUPPLY BLUEPRINT", "LOGISTICS", "COMPLIANCE BLUEPRINT",
+                     "LOGISTICS", "COMPLIANCE BLUEPRINT",
                      "BILL OF MATERIALS"):
         check("  Sigue la cabecera: %s" % cabecera, cabecera in texto)
 

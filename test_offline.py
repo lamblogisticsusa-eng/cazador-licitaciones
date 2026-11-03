@@ -5,6 +5,7 @@ presupuesto, el render y el menu se pueden verificar siempre.
 """
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("DRY_RUN", "1")
 os.environ.setdefault("SAM_API_KEY", "x")
@@ -76,10 +77,17 @@ print()
 print("=" * 70)
 print("3) EL FILTRO SIGUE FUNCIONANDO SIN RED")
 print("=" * 70)
+# La fecha limite es RELATIVA (+10 dias), no fija. Con una fecha fija el test
+# se podria con el paso del tiempo: al vencer el aviso "bueno",
+# sam_api.dias_restantes() devolvia negativo y filters.puntuar() caia a -100
+# ("Fecha limite ya vencida"), rompiendo el test SOLO, sin relacion con ningun
+# cambio de codigo. +10 dias deja dias >= DIAS_MINIMO_PARA_POSTULAR (7), que es
+# donde filters.py deja de penalizar, y la fecha nunca vence.
+_LIMITE = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
 buena = {
     "title": "USNS MERCY FIRE PUMP VALVES",
     "naicsCode": "332911", "classificationCode": "5330", "typeOfSetAside": "SBA",
-    "responseDeadLine": "2026-11-01T18:00:00-07:00",
+    "responseDeadLine": _LIMITE,
     "placeOfPerformance": {"city": {"name": "Norfolk"}, "state": {"code": "VA", "name": "VA"},
                           "country": {"code": "USA", "name": "UNITED STATES"}},
 }

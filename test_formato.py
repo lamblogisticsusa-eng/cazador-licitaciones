@@ -5,6 +5,7 @@ Usa los datos del ejemplo que dio, para comparar directamente.
 import io
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("DRY_RUN", "1")
 os.environ.setdefault("SAM_API_KEY", "x")
@@ -27,7 +28,11 @@ FICHA = {
         "12 módulos de control electrónico + 4 kits de alternadores de repuesto, "
         "estándar MIL-STD, entrega física directa en base aérea",
     "lugar_entrega": "Wright-Patterson AFB / Ohio / UNITED STATES",
-    "limite": "2026-11-04T17:00:00-04:00",
+    # Fecha RELATIVA (+10 dias): el "Vence en" que busca el assert de abajo
+    # solo aparece con dias >= 2; con una fija el test se podria al llegar el
+    # vencimiento (dias 0/1/negativo renderizan "VENCE HOY"/"Vence mañana"/
+    # "VENCIÓ", sin la cadena "Vence en").
+    "limite": (datetime.now(timezone.utc) + timedelta(days=10)).isoformat(),
     "sin_descripcion": False,
     "valor_contrato_usd": 85000.0,
     "precio_unitario_costo": 3250.0,

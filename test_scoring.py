@@ -42,6 +42,7 @@ corregida lo cumple igual, sin comerse los kits de repuesto.
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 DB = os.path.join(tempfile.gettempdir(), "kyo_test_scoring.db")
 for s in ("", "-wal", "-shm"):
@@ -76,7 +77,12 @@ def puntua(titulo, set_aside="", desc=""):
     opp = {
         "title": titulo, "naicsCode": "332999",
         "classificationCode": "2915", "typeOfSetAside": set_aside,
-        "responseDeadLine": "2026-11-04T17:00:00-04:00",
+        # Fecha RELATIVA (+10 dias): con una fija el test se podria con el
+        # paso del tiempo. Al vencer, filters.puntuar() hace short-circuit a
+        # -100 ("Fecha limite ya vencida") y los motivos de obra en sitio
+        # desaparecen, rompiendo el assert de "obra en sitio" de abajo.
+        "responseDeadLine":
+            (datetime.now(timezone.utc) + timedelta(days=10)).isoformat(),
     }
     return filters.puntuar(opp, desc)
 
@@ -251,7 +257,12 @@ p_serv, m_serv = puntua("43--PARTS KIT,ROTARY PUMP", "Total Small Business")
 p_serv2 = filters.puntuar(
     {"title": "43--PARTS KIT,ROTARY PUMP", "naicsCode": _NAICS_SERVICIOS,
      "classificationCode": "2915", "typeOfSetAside": "Total Small Business",
-     "responseDeadLine": "2026-11-04T17:00:00-04:00"}, "")[0]
+     # Fecha RELATIVA: con el veto de NAICS de servicios este caso tiene que
+     # caer a -100 POR EL VETO, no por vencimiento. Con una fecha fija, al
+     # pasar la fecha el -100 seria de expiracion y el assert dejaria de
+     # comprobar lo que dice.
+     "responseDeadLine":
+         (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()}, "")[0]
 print(f"  NAICS de servicios de prueba: {_NAICS_SERVICIOS}")
 print(f"  Con set-aside y NAICS de servicios: {p_serv2} (veto)")
 check("El veto por NAICS de servicios sigue mandando",

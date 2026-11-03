@@ -39,6 +39,7 @@ que la empresa existe y vende eso antes de escribir a nadie.
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 DB = os.path.join(tempfile.gettempdir(), "kyo_test_ficha_exec.db")
 for s in ("", "-wal", "-shm"):
@@ -229,7 +230,11 @@ ANALISIS = {
     "solicitation": "N00019-26-R-0099",
     "agencia": "Department of the Navy",
     "set_aside": "Total Small Business Set-Aside",
-    "limite": "2026-11-04T17:00:00-04:00",
+    # Fecha RELATIVA (+10 dias): con una fija el test se podria con el paso
+    # del tiempo. Al acercarse el vencimiento _fecha_legible() deja de decir
+    # "Vence en" (pasa a "Vence mañana"/"VENCE HOY"/"VENCIÓ") y el assert de
+    # abajo, que busca esa cadena con h.index(), revienta con ValueError.
+    "limite": (datetime.now(timezone.utc) + timedelta(days=10)).isoformat(),
     "producto": "Kits de sellos mecanicos para bomba",
     "modelo_especifico": "NSN 5330-01-586-4931",
     "unidad_medida": "KIT", "cantidad_total": 50,

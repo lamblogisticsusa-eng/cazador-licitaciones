@@ -35,6 +35,7 @@ import io
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 DB = os.path.join(tempfile.gettempdir(), "kyo_test_ajustes.db")
 for s in ("", "-wal", "-shm"):
@@ -147,7 +148,11 @@ print("  El PSC suma, pero NO veta:")
 _caso = {
     "title": "43--PARTS KIT, ROTARY PUMP",
     "naicsCode": "332999", "classificationCode": "2915",
-    "typeOfSetAside": "", "responseDeadLine": "2026-11-04T17:00:00-04:00",
+    # Fecha RELATIVA (+10 dias): con una fija el test se podria con el paso
+    # del tiempo. Al vencer, filters.puntuar() devuelve -100 ("Fecha limite
+    # ya vencida") y los asserts de abajo (_p >= 1, _p > -100) revientan.
+    "typeOfSetAside": "",
+    "responseDeadLine": (datetime.now(timezone.utc) + timedelta(days=10)).isoformat(),
 }
 _p, _m = filters.puntuar(_caso, "")
 check("Un PSC valido suma al menos 1", _p >= 1, f"-> {_p}")
@@ -161,7 +166,12 @@ print("  Y la regla de mano de obra se come los puntos de un titulo de obra:")
 _obra = {
     "title": "MAINTENANCE OF GENERATOR 50KW",
     "naicsCode": "332999", "classificationCode": "2915",
-    "typeOfSetAside": "", "responseDeadLine": "2026-11-04T17:00:00-04:00",
+    # Fecha RELATIVA (+10 dias), igual que _caso: al vencer, el short-circuit
+    # de expiracion borraria la penalizacion de obra en sitio y los asserts
+    # de abajo (obra < piezas, "obra en sitio" en motivos) dejarian de
+    # comprobar lo que dicen. _obra_sa (mas abajo) hereda esta fecha.
+    "typeOfSetAside": "",
+    "responseDeadLine": (datetime.now(timezone.utc) + timedelta(days=10)).isoformat(),
 }
 _piezas, _ = filters.puntuar(_caso, "")
 _p_obra, _m_obra = filters.puntuar(_obra, "")
@@ -279,7 +289,6 @@ if _txt:
         ("Cabecera de precio unitario", "UNIT PRICE"),
         ("Cabecera de importe", "AMOUNT"),
         ("Cabecera de total", "TOTAL (USD)"),
-        ("Los dos contenedores", "INDUSTRIAL SUPPLY BLUEPRINT"),
         ("Despacho y cumplimiento", "LOGISTICS"),
         ("Firma", "Bastian Cordero"),
         ("Cargo", "CEO"),
@@ -287,6 +296,13 @@ if _txt:
     ]
     for etiqueta, busca in CONTENIDO:
         check(f"  {etiqueta:28}", busca in _txt, f"-> no sale {busca!r}")
+
+    # El contenedor de catalogo ("INDUSTRIAL SUPPLY BLUEPRINT") se retiro de
+    # la pagina 2: duplicaba con la 1 la identidad del producto, la
+    # especificacion y la cantidad. La pagina 2 arranca ahora directamente con
+    # el blueprint de logistica y cumplimiento.
+    check("  Sin blueprint de catalogo (retirado)",
+          "INDUSTRIAL SUPPLY BLUEPRINT" not in _txt)
 
     # --- Lo que tiene que ser legible, no ISO ----------------------------
     print()

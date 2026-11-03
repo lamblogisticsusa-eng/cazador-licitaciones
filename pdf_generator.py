@@ -516,7 +516,10 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
         # que preserva la unidad original del aviso (el BOM la normaliza y un
         # "KIT" se caeria a "EA"). En un aviso multi-CLIN lineas se construye
         # desde el propio BOM, asi que ambas vienen alineadas fila a fila.
-        f.append(KeepTogether([
+        # La seccion LINE ITEMS se ensambla en _blq y se envuelve ENTERA en un
+        # KeepTogether al final de la seccion (ver mas abajo): titulo, intro,
+        # tabla con su fila TOTAL y glosario van como un bloque atomico.
+        _blq = [
             Paragraph("LINE ITEMS / BILL OF MATERIALS (BOM)", e["h2"]),
             Spacer(1, 0.05 * inch),
             Paragraph(
@@ -527,7 +530,7 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
                 "reference the solicitation number shown above.",
                 e["nota"]),
             Spacer(1, 0.10 * inch),
-        ]))
+        ]
         # "PART NO. / NSN" y no "PART NUMBER / NSN" porque esta ultima se
         # partia en dos lineas en una columna de 1.32". "Part No." es como lo
         # escribe cualquier catalogo, y el glosario de siglas de abajo lo
@@ -626,11 +629,11 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             ("BACKGROUND", (0, -1), (-1, -1), GRIS_CLARO),
             ("LINEABOVE", (0, -1), (-1, -1), 0.9, AZUL),
         ]))
-        f.append(_t_bom)
-        f.append(Spacer(1, 0.08 * inch))
+        _blq.append(_t_bom)
+        _blq.append(Spacer(1, 0.08 * inch))
         # Definiciones de las siglas. Un distribuidor que no sabe que es UOI
         # no devuelve la cotizacion en el formato que se le pide.
-        f.append(Paragraph(
+        _blq.append(Paragraph(
             "<b>UOI</b> = Unit of Issue. <b>CLIN</b> = Contract Line Item "
             "Number. <b>NSN</b> = National Stock Number. "
             "<b>MFR</b> = Manufacturer. <b>CUI</b> = Central Unit "
@@ -638,41 +641,30 @@ def generar_po(datos: dict, db_path: str | None = None) -> bytes:
             f"code. Issued under UEI {UEI}, NCAGE {NCAGE}; quote on your "
             f"letterhead and reference both codes.",
             e["nota"]))
+        # KeepTogether sobre TODA la seccion (titulo + intro + tabla con su
+        # fila TOTAL + glosario), no solo sobre la tabla. Si la tabla se
+        # acercaba al pie de la pagina 1, la fila TOTAL se quedaba flotando o
+        # se cortaba. Envolver solo la tabla habria dejado el titulo suelto en
+        # la 1 cuando la tabla se movia a la 2. Asi el bloque entero es
+        # atomico: o cabe completo en la pagina 1 o baja completo, sin partir
+        # la tabla ni separar el glosario de la tabla que explica.
+        f.append(KeepTogether(_blq))
         f.append(Spacer(1, 0.12 * inch))
 
-        # PAGINA 2, REDISEÑADA.
+        # PAGINA 2.
         #
-        # Antes eran tres cajas de texto plano: destino, instrucciones y
-        # condiciones. El contenido estaba; la FORMA no. Un bloque corrido
-        # donde todo pesaba lo mismo, y una direccion que salia segun como
-        # venia el aviso, a veces como repr de un diccionario.
+        # Arranca DIRECTAMENTE con el blueprint de logistica y cumplimiento.
+        # El contenedor anterior ("INDUSTRIAL SUPPLY BLUEPRINT") se retiro:
+        # duplicaba con la pagina 1 la identidad del producto, la especificacion
+        # y la cantidad, que ya estan en la tabla unica LINE ITEMS / BOM. La
+        # pagina 2 queda estricta: como despachar y que papeles van dentro.
         #
-        # Ahora son dos contenedores con borde: el primero es lo que hay que
-        # buscar en el almacen, el segundo como mandarlo. Nada de lo que se
-        # decia ha desaparecido: el CoC, el packing list y las condiciones de
-        # pago siguen en el papel, dentro del bloque que les toca.
-        # Los dos contenedores van juntos a la pagina 2. Sin esto, el primero
-        # caia al final de la 1 y el segundo en la 2: dos recuadros partidos,
-        # que es justo lo contrario de "dos contenedores independientes".
-        # KeepTogether los mueve enteros si no caben, y el PageBreak los
-        # arranca en la 2 sin depender de donde haya quedado la tabla del BOM.
-        # KeepTogether POR CADA BLOQUE, y no sobre los dos juntos.
-        #
-        # Con los dos en un solo KeepTogether, si no caben se iban los dos a la
-        # pagina 3, dejando la 2 a medias. Con uno cada uno, el que no cabe
-        # baja entero y el otro se queda donde estaba. Es lo que se pidio: que
-        # el motor empuje el bloque largo completo en vez de partir sus lineas
-        # a la mitad.
-        _cat = _blueprint_catalogo(e, datos)
+        # KeepTogether sobre el bloque: si no cabe entero en el resto de la
+        # pagina, baja completo a la siguiente en vez de partirse por la mitad.
         _log = _blueprint_logistica(e, datos)
-        if _cat is not None or _log is not None:
+        if _log is not None:
             f.append(PageBreak())
-            if _cat is not None:
-                f.append(KeepTogether([_cat]))
-            if _cat is not None and _log is not None:
-                f.append(Spacer(1, 0.16 * inch))
-            if _log is not None:
-                f.append(KeepTogether([_log]))
+            f.append(KeepTogether([_log]))
 
         if datos.get("notas"):
             f.append(Spacer(1, 0.14 * inch))

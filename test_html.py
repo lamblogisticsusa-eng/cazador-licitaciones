@@ -119,7 +119,13 @@ import io
 _f = io.open("test_formato.py", encoding="utf-8").read()
 _i = _f.index("FICHA = {")
 _j = _f.index("\n}\n", _i) + 3
-_ns = {"float": float, "int": int}
+# datetime/timedelta/timezone: el bloque FICHA de test_formato.py calcula su
+# "limite" de forma dinamica (fecha relativa a hoy, para que el "Vence en" no
+# se podra con el paso del tiempo), y este exec necesita esos nombres en el
+# namespace para evaluar la expresion del dict.
+from datetime import datetime, timedelta, timezone
+_ns = {"float": float, "int": int,
+       "datetime": datetime, "timedelta": timedelta, "timezone": timezone}
 exec(compile(_f[_i:_j], "test_formato.py:FICHA", "exec"), _ns)
 FICHA = _ns["FICHA"]
 
