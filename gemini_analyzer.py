@@ -30,6 +30,7 @@ import time
 
 import config
 import filters
+import sensibilidad
 
 log = logging.getLogger("kyomoto.gemini")
 
@@ -866,6 +867,13 @@ def analizar(
         "ganancia_neta_usd": ganancia_neta,
         "margen_neto_porcentaje": margen_neto,
         "precio_oferta_sugerido_usd": oferta_final,
+        # Los tres escenarios tacticos (100% / 97% / 95% del presupuesto),
+        # ya con el factoring descontado y el margen contra el precio
+        # ofertado. Se calcula aqui, y no solo en el mensaje de Telegram,
+        # para que el dato viaje en el propio analisis: quien lo guarde, lo
+        # imprima en el PDF o lo reenvie no tiene que recomputarlo, y la
+        # cuenta no puede divergir entre el mensaje y el registro.
+        "escenarios_oferta": sensibilidad.escenarios(valor, costo_total),
         # Los dos campos de estrategia se SOBRESCRIBEN con la frase calculada
         # en Python. No es que se ignoren lo que dice el modelo: es que lo que
         # dice no puede ser correcto, porque sus cifras se corrigen mas arriba

@@ -567,6 +567,58 @@ def _bloque_financiero(a: dict) -> list[str]:
     return L
 
 
+def _bloque_escenarios(a: dict) -> list[str]:
+    """
+    Los tres escenarios tacticos (100% / 97% / 95% del presupuesto), con su
+    precio, su ganancia neta y su margen, ya con el factoring descontado.
+
+    Va en su PROPIO <pre>, justo DESPUES del resumen financiero. No se funde
+    con el de arriba porque son dos preguntas distintas: el resumen dice lo
+    que hay, la tabla dice lo que se puede hacer con ello. Mezclarlas en una
+    sola tabla obligaria a leer dos cosas como si fueran la misma, y el
+    lector tiene diez segundos.
+
+    Se pone despues (nunca antes) a proposito: test_formato mide el primer
+    <pre> del mensaje para comprobar que las columnas del resumen cuadran,
+    y si este bloque se adelantara, esa medida se estaria haciendo sobre la
+    tabla equivocada.
+
+    Sin datos no hay bloque. Una tabla con "N/E" en cada celda no ayuda a
+    decidir: estorba.
+    """
+    import sensibilidad
+
+    filas = a.get("escenarios_oferta") or sensibilidad.escenarios(
+        a.get("valor_contrato_usd"), a.get("costo_total_usd"))
+    pintadas: list[str] = []
+    for f in filas or []:
+        try:
+            pintadas.append(
+                f"{f['pct']:g}%".ljust(9)
+                + _usd_texto(f["precio"]).rjust(12)
+                + _usd_texto(f["ganancia_neta"]).rjust(13)
+                + f"{f['margen']:.1f}%".rjust(8))
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            # Una fila mal formada no tira el bloque entero: se salta.
+            continue
+    if not pintadas:
+        return []
+
+    L: list[str] = ["📊 <b>Escenarios de oferta (sensibilidad)</b>", "<pre>",
+                    f"{'Escenario':<9}{'Precio':>12}"
+                    f"{'Ganancia':>13}{'Margen':>8}"]
+    L.extend(pintadas)
+    L.append("</pre>")
+    # El tipo de factoring se escribe AQUI en vez de hardcodear 3.5%: sale de
+    # config, que lo lee del entorno. Si el operador cambia FACTORING_PCT,
+    # la nota cambia con el y no se queda mintiendo en la ficha.
+    L.append(
+        f"<i>Factoring dinámico {config.FACTORING_PCT * 100:g}% descontado "
+        "en cada escenario · ganancia neta sobre el precio ofertado · "
+        "base: presupuesto govt.</i>")
+    return L
+
+
 def _bloque_distribuidores(d: dict) -> list[str]:
     """
     Los 3 distribuidores candidatos, cada uno con su busqueda de verificacion.
@@ -582,6 +634,20 @@ def _bloque_distribuidores(d: dict) -> list[str]:
     es lo que hay. Nunca se muestra un bullet vacio.
     """
     L = ["🏭 <b>Distribuidores a verificar (USA)</b>"]
+    # El Ship-To, para que se vea DE DONDE sale el orden de la lista. Sin
+    # esta linea el lector ve unos nombres antes que otros y no sabe si es
+    # una recomendacion o una casualidad; con ella, sabe que es por region.
+    _dest = d.get("destino") or {}
+    _sitio = ", ".join(x for x in (_dest.get("ciudad"), _dest.get("estado"))
+                       if x)
+    if _sitio:
+        _linea = f"📍 Ship-To: {_esc(_sitio)}"
+        if _dest.get("region"):
+            _linea += f" · Región: {_esc(_dest['region'])}"
+        L.append(_linea)
+        if d.get("ordenado_por_cercania"):
+            L.append("<i>Ordenados por cercanía a la región del destino "
+                     "(FOB Destination).</i>")
     candidatos = d.get("candidatos") or []
     if not candidatos:
         etiqueta, url = d["principal"]
@@ -687,6 +753,14 @@ def formatear_analisis(a: dict) -> str:
 
     # --- Analisis financiero ---
     L.extend(_bloque_financiero(a))
+    # Los escenarios van justo detras del resumen, sin separador propio:
+    # son la continuacion natural de las mismas cifras (mismo presupuesto,
+    # mismo costo), y un separador entre los dos los presentaria como dos
+    # temas distintos cuando son la misma pregunta vista desde otro angulo.
+    _escenarios = _bloque_escenarios(a)
+    if _escenarios:
+        L.append("")
+        L.extend(_escenarios)
     L.append("")
     L.append(_SEPARADOR)
     L.append("")

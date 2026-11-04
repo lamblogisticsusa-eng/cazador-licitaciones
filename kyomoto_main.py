@@ -417,6 +417,12 @@ def normalizar_adjudicacion(crudo: dict) -> dict:
 
     contract_id, agency_name, award_amount, description_summary y
     sam_gov_url. Si un campo opcional viene vacio, se usa "N/A".
+
+    Fase 3: se anaden tres campos de seguimiento sin tocar los cinco
+    originales, que siguen con el mismo nombre y el mismo significado:
+    uei_en_registro (que distingue un UEI verificado de uno asumido por el
+    filtro de la consulta) y notice_id (el vinculo con la solicitud que se
+    seguia, el que convierte un aviso suelto en seguimiento post-licitacion).
     """
     contract_id = _campo(crudo, "contractId", "contract_id", "awardIdPIID",
                          "piid", "contractAwardUniqueKey", "id")
@@ -435,33 +441,87 @@ def normalizar_adjudicacion(crudo: dict) -> dict:
         # numero de contrato. No es el registro directo, pero si es un enlace
         # real que lleva al usuario al expediente.
         sam_gov_url = f"https://sam.gov/search/?index=awards&q={contract_id}"
+    uei_cruda = _campo(crudo, "uei", "awardeeUEI", "recipientUEI",
+                       "recipientUniqueIdentifier", por_defecto="")
     return {
         "contract_id": contract_id,
         "agency_name": agency_name,
         "award_amount": _usd(monto) if monto is not None else "N/A",
         "description_summary": description_summary,
         "sam_gov_url": sam_gov_url,
-        "uei": _campo(crudo, "uei", "awardeeUEI", "recipientUEI", por_defecto=UEI),
+        # Si el registro no trae UEI se pone el NUESTRO: la consulta ya va
+        # filtrada por el, y es el mismo criterio que hasta ahora. Lo que
+        # cambia es que ahora queda dicho si vino verificado o asumido.
+        "uei": uei_cruda or UEI,
+        "uei_en_registro": bool(uei_cruda)
+        and uei_cruda.strip().upper() == UEI.upper(),
+        # Notice of Award vinculado a la solicitud que se seguia. Si el
+        # registro no lo trae: "N/A", y la linea no se pinta. Un numero de
+        # solicitud no se inventa nunca: sin el, no hay vinculo y se dice.
+        "notice_id": _campo(crudo, "noticeId", "notice_id",
+                            "solicitationNumber", "solicitation"),
     }
+
+
+def es_nuestra_adjudicacion(a: dict) -> bool:
+    """
+    True si el premio esta vinculado a L.A.M.B. Logistics (UEI NEXGNXGF5E38).
+
+    Tres casos, y ninguno inventa:
+      * UEI distinto en el registro -> NO es nuestra. Pasa cuando el
+        endpoint ignora el parametro de filtro y devuelve premios ajenos;
+        sin esta comprobacion la ficha celebraria un contrato que no es,
+        que es el error mas caro que puede cometer un rastreador.
+      * UEI igual -> es nuestra, verificada en el propio registro.
+      * Registro sin UEI -> no hay datos para descartarlo. La consulta ya
+        va filtrada por el UEI, asi que se acepta; la alerta dice que la
+        vinculacion es del filtro y no del registro.
+    """
+    if not isinstance(a, dict):
+        return False
+    uei = str(a.get("uei") or "").strip().upper()
+    if not uei:
+        return True
+    return uei == UEI.upper()
 
 
 def texto_adjudicacion(a: dict) -> str:
     """
     Alerta estructurada. El formato es EXACTO el que se pidio, con "N/A" en
     los campos opcionales vacios.
+
+    Fase 3: se anaden tres lineas de seguimiento (prioridad, UEI con su
+    origen, y Notice ID cuando el registro lo trae) SIN tocar ninguna de
+    las existentes: el encabezado, el separador y los cinco campos siguen
+    identicos, letra por letra.
     """
-    return (
-        "🏆 ¡CONTRATO ADJUDICADO A L.A.M.B LOGISTICS!\n"
-        "------------------------------------------\n"
-        f"• 📄 ID Contrato: `{_escapar_md(a['contract_id'])}`\n"
-        f"• 🏛️ Agencia: {_escapar_md(a['agency_name'])}\n"
-        f"• 💰 Monto Total: `${_escapar_md(a['award_amount'])} USD`\n"
-        f"• 📦 Objeto / SOW: {_escapar_md(a['description_summary'])}\n"
-        "\n"
-        f"🔗 [Ver Contrato Oficial en SAM.gov]({a['sam_gov_url']})\n"
-        "\n"
-        "⚡ *Paso Siguiente:* Iniciar Orden de Compra y Factoring."
-    )
+    lineas = [
+        "🏆 ¡CONTRATO ADJUDICADO A L.A.M.B LOGISTICS!",
+        "------------------------------------------",
+        "• 🚨 Prioridad: ALTA (adjudicación ganada)",
+        f"• 📄 ID Contrato: `{_escapar_md(a['contract_id'])}`",
+        f"• 🏛️ Agencia: {_escapar_md(a['agency_name'])}",
+        f"• 💰 Monto Total: `${_escapar_md(a['award_amount'])} USD`",
+        f"• 📦 Objeto / SOW: {_escapar_md(a['description_summary'])}",
+    ]
+    # La UEI, con decir de donde sale: verificada en el registro, o asumida
+    # por el filtro de la consulta. Las dos son legitimas; no decirlo es
+    # dejar al usuario sin saber en cuantos casos confiar.
+    uei = str(a.get("uei") or "").strip()
+    if uei:
+        origen = ("verificada en el registro" if a.get("uei_en_registro")
+                  else "no venía en el registro; la consulta va por UEI")
+        lineas.append(f"• 🔑 UEI: `{_escapar_md(uei)}` · {origen}")
+    notice = str(a.get("notice_id") or "").strip()
+    if notice and notice.upper() != "N/A":
+        lineas.append(f"• 📋 Notice ID: `{_escapar_md(notice)}`")
+    lineas += [
+        "",
+        f"🔗 [Ver Contrato Oficial en SAM.gov]({a['sam_gov_url']})",
+        "",
+        "⚡ *Paso Siguiente:* Iniciar Orden de Compra y Factoring.",
+    ]
+    return "\n".join(lineas)
 
 
 async def consultar_adjudicaciones(session: aiohttp.ClientSession) -> list[dict]:
@@ -636,6 +696,12 @@ async def ciclo_adjudicaciones(session: aiohttp.ClientSession,
     for a in adjudicaciones:
         clave = a["contract_id"]
         if clave in vistas or clave == "N/A":
+            continue
+        # Vinculo con la UEI ANTES de celebrar: si el endpoint ignora el
+        # parametro de filtro, aqui es donde se cuela el premio ajeno.
+        if not es_nuestra_adjudicacion(a):
+            log.info("Adjudicacion %s descartada: el registro trae el UEI %s, "
+                     "no el de la entidad.", clave, a.get("uei") or "(vacío)")
             continue
         texto = texto_adjudicacion(a)
         if await enviar_telegram(session, texto):

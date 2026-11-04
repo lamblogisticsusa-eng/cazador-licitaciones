@@ -18,6 +18,13 @@ directorios de distribuidores estadounidenses. Esos enlaces:
 Comprobado: los sitios de distribuidores bloquean peticiones automaticas con
 403, asi que no se puede verificar uno por uno. Google si responde 200, por eso
 es el vehiculo.
+
+Fase 3: a los enlaces se les anadio ORDEN GEOGRAFICO. Un enlace es util, pero
+un enlace al distribuidor que esta en la otra punta del pais lo es menos: de
+donde sale el material decide el coste del flete FOB Destination y los dias
+de transito. El modulo lee el Ship-To (ciudad, estado y region del Censo) y
+con el reordena los enlaces por proximidad. Ordena, no filtra: nadie se
+descarta por region, y sin destino el orden es el de siempre.
 """
 from __future__ import annotations
 
@@ -54,6 +61,174 @@ FABRICANTES = [
     ("Made-in-USA index", "made-in-usa.com"),
     ("USA Industry Search", "usaindustrysearch.com"),
 ]
+
+
+# =====================================================================
+# GEO-MATCHING: EL SHIP-TO ORDENA, NUNCA FILTRA
+# =====================================================================
+# De donde va el material salen el coste del flete FOB Destination y los dias
+# de transito, asi que el orden de los distribuidores tiene que mirar el
+# destino. Regla de este bloque, y no es negociable: ORDENAR SIEMPRE,
+# DESCARTAR NUNCA. Un distribuidor de otra region sigue siendo valido (a veces
+# es el unico que tiene el articulo); lo que no se puede es fingir que la
+# region del Ship-To no importa.
+
+# Los 50 estados + DC, en las dos formas que trae SAM.gov: codigo ("PA") y
+# nombre ("Pennsylvania"). filters.lugar_de_entrega() publica el nombre y
+# placeOfPerformance.state trae a veces el codigo, y distinguirlos a ciegas es
+# lo que hace falta para no acabar inventando un estado que no esta.
+_ESTADOS_LISTA = [
+    ("AL", "Alabama"), ("AK", "Alaska"), ("AZ", "Arizona"), ("AR", "Arkansas"),
+    ("CA", "California"), ("CO", "Colorado"), ("CT", "Connecticut"),
+    ("DC", "District of Columbia"), ("DE", "Delaware"), ("FL", "Florida"),
+    ("GA", "Georgia"), ("HI", "Hawaii"), ("IA", "Iowa"), ("ID", "Idaho"),
+    ("IL", "Illinois"), ("IN", "Indiana"), ("KS", "Kansas"), ("KY", "Kentucky"),
+    ("LA", "Louisiana"), ("MA", "Massachusetts"), ("MD", "Maryland"),
+    ("ME", "Maine"), ("MI", "Michigan"), ("MN", "Minnesota"),
+    ("MO", "Missouri"), ("MS", "Mississippi"), ("MT", "Montana"),
+    ("NC", "North Carolina"), ("ND", "North Dakota"), ("NE", "Nebraska"),
+    ("NH", "New Hampshire"), ("NJ", "New Jersey"), ("NM", "New Mexico"),
+    ("NV", "Nevada"), ("NY", "New York"), ("OH", "Ohio"), ("OK", "Oklahoma"),
+    ("OR", "Oregon"), ("PA", "Pennsylvania"), ("RI", "Rhode Island"),
+    ("SC", "South Carolina"), ("SD", "South Dakota"), ("TN", "Tennessee"),
+    ("TX", "Texas"), ("UT", "Utah"), ("VA", "Virginia"),
+    ("VT", "Vermont"), ("WA", "Washington"), ("WI", "Wisconsin"),
+    ("WV", "West Virginia"), ("WY", "Wyoming"),
+]
+
+# Indice bidireccional, y ambos lados apuntan al CODIGO: es lo que enlaza con
+# _CODIGO_REGION. El valor canonico es el codigo ("PA") porque es lo que
+# enlaza con las regiones; el que se imprime siempre es el token tal cual
+# llego, para no cambiar al usuario la forma que trajo el aviso.
+_ESTADOS_USA = {c.lower(): c for c, _ in _ESTADOS_LISTA}
+_ESTADOS_USA.update({n.lower(): c for c, n in _ESTADOS_LISTA})
+
+# Region del Censo por codigo. Es la division oficial de4 (Northeast, Midwest,
+# South, West): una clasificacion publica y estable, no una opinion nuestra.
+_REGIONES_CENSO = {
+    "Northeast": set("CT ME MA NH RI VT NJ NY PA".split()),
+    "Midwest": set("IL IN MI OH WI IA KS MN MO NE ND SD".split()),
+    "South": set("DE FL GA MD NC SC VA WV DC AL KY MS TN AR LA OK TX".split()),
+    "West": set("AZ CO ID MT NV NM UT WY AK CA HI OR WA".split()),
+}
+_CODIGO_REGION = {c: r for r, cs in _REGIONES_CENSO.items() for c in cs}
+
+# Lo que NO es un destino: el pais, en cualquier idioma, y los marcadores de
+# "sin dato" que deja el analisis. Se quitan antes de mirar ciudad y estado
+# para que un "Norfolk / VA / USA" no se lea como tres datos de entrega.
+_NO_DESTINO = frozenset({
+    "usa", "u.s.a.", "us", "u.s.", "united states",
+    "united states of america", "estados unidos", "america",
+    "no especificado", "not specified", "n/a", "na", "none", "tbd",
+})
+
+# El ZIP va pegado al estado en algunos avisos ("Illinois 61299"). Se quita
+# aqui porque un "Illinois 61299" no es un estado y no entraria en el indice.
+_RE_ZIP_PEGADO = re.compile(r"\s+\d{5}(?:-\d{4})?$")
+
+
+def region_de_estado(estado: str) -> str:
+    """La region del Censo del estado, o "" si no es un estado conocido."""
+    if not estado:
+        return ""
+    canonico = _ESTADOS_USA.get(str(estado).strip().lower())
+    if not canonico:
+        return ""
+    return _CODIGO_REGION.get(canonico.upper(), "")
+
+
+def destino_de(lugar) -> dict:
+    """
+    El Ship-To como {ciudad, estado, region}, sin inventar nada.
+
+    Acepta los dos formatos que llegan a este modulo:
+        "Ciudad / Estado / PAIS"   el del barrido (filters.lugar_de_entrega)
+        "Ciudad, Estado, PAIS"     el del aviso en vivo (desde_aviso)
+    y tambien un dict de direccion de pdf_generator (claves ciudad/estado).
+
+    Si no se reconoce un estado, no se inventa: la region queda vacia y el
+    orden de los distribuidores se conserva el de siempre. Un "UNITED STATES"
+    solo o un "No especificado" devuelven las tres claves vacias, que es la
+    honesta: no hay destino, y el orden no puede depender de uno inexistente.
+    """
+    ciudad = estado = ""
+    if isinstance(lugar, dict):
+        ciudad = str(lugar.get("ciudad") or "").strip()
+        estado = str(lugar.get("estado") or "").strip()
+    else:
+        texto = str(lugar or "").strip()
+        if not texto or "{" in texto:
+            return {"ciudad": "", "estado": "", "region": ""}
+        trozos = []
+        for trozo in re.split(r"[/,]", texto):
+            t = _RE_ZIP_PEGADO.sub("", trozo).strip()
+            if not t or t.lower().rstrip(".") in _NO_DESTINO:
+                continue
+            trozos.append(t)
+        if len(trozos) >= 2:
+            # Ciudad y estado, en ese orden (asi los escribe SAM.gov). Con mas
+            # de dos se quedan los DOS ULTIMOS, que es donde estan: lo que va
+            # delante suele ser el nombre de la instalacion
+            # ("Naval Station Norfolk, Virginia").
+            ciudad, estado = trozos[-2], trozos[-1]
+        elif len(trozos) == 1:
+            # Un solo dato: puede ser estado ("Illinois") o ciudad.
+            if _ESTADOS_USA.get(trozos[0].lower()):
+                estado = trozos[0]
+            else:
+                ciudad = trozos[0]
+    ciudad = _RE_ZIP_PEGADO.sub("", ciudad).strip()
+    estado = _RE_ZIP_PEGADO.sub("", estado).strip()
+    if estado and not _ESTADOS_USA.get(estado.lower()):
+        # Lo que parecia estado no lo es: no se fuerza. Un estado inventado
+        # clasificaria el envio en la region equivocada.
+        estado = ""
+    return {"ciudad": ciudad, "estado": estado,
+            "region": region_de_estado(estado)}
+
+
+def proximidad(region_destino: str, region_base) -> int:
+    """
+    Que tan cerca esta un distribuidor del Ship-To. Tres rangos:
+        1 = su base esta en la MISMA region que el destino (flete mas corto)
+        2 = sin base conocida: conserva el orden que traia
+        3 = base en otra region
+    El 2 en medio no es un fallo: es lo honesto cuando no se sabe de donde
+    envia, y ademas evita que un desconocido se hunda hasta el final solo
+    por ser desconocido.
+    """
+    if not region_destino or not region_base:
+        return 2
+    return 1 if region_base == region_destino else 3
+
+
+# Sede publica conocida de cada directorio de la lista, usada SOLO para
+# ordenar. No afirma cobertura, ni disponibilidad, ni plazos: afirma de donde
+# opera la empresa, que es lo que se puede comprobar. Los marketplaces y
+# directorios puros no envian ellos: presentan proveedores de todo el pais,
+# y por eso no tienen base.
+_BASE_CONOCIDA = {
+    "grainger.com": "Midwest",
+    "zoro.com": "Midwest",
+    "platt.com": "West",
+    "wesco.com": "Northeast",
+    "radwell.com": "Northeast",
+    "mroelectric.com": "South",
+}
+
+
+def _region_de_candidato(nombre: str) -> str:
+    """
+    La region base de un candidato de Gemini, SOLO si su nombre coincide con
+    un distribuidor de la lista. Un nombre que no esta ahi no se le atribuye
+    base ninguna: no hay forma de saberlo, y inventarla seria exactamente lo
+    que este modulo se niega a hacer.
+    """
+    bajo = str(nombre or "").lower()
+    for dominio, region in _BASE_CONOCIDA.items():
+        if dominio.split(".")[0] in bajo:
+            return region
+    return ""
 
 
 # Palabras que piden informacion en vez de dar productos. Si el usuario
@@ -162,11 +337,21 @@ def para_oportunidad(terminos: list[str], producto: str = "",
     Devuelve:
         {
           "principal": (etiqueta, url),          # busqueda general, siempre 200
+          "candidatos": [...],                   # Gemini, max 3
           "sitios":    [(etiqueta, url, nota)],  # site: a directorios de USA
           "terminos":  [...],                    # para copiar y pegar
           "fabricantes": [...],
+          "consultas": [...],
           "consulta_gemini": str,                # el termino que se uso, o ""
+
+          # Fase 3 (geo-matching): las dos claves nuevas, sin mover ninguna
+          # de las de arriba.
+          "destino": {"ciudad", "estado", "region"},   # el Ship-To, o vacio
+          "ordenado_por_cercania": bool,       # True solo si hay region
         }
+
+    El orden de "sitios" y "candidatos" lo pone la region del Ship-To cuando
+    la hay; si no la hay, es el de siempre, literal.
     """
     limpio = [_limpiar(t) for t in (terminos or []) if _limpiar(t)]
     producto_limpio = _limpiar(producto)
@@ -182,18 +367,18 @@ def para_oportunidad(terminos: list[str], producto: str = "",
         "", especifico, flags=re.IGNORECASE,
     ).strip() or producto_limpio or base
 
-    ciudad = ""
-    if pais_destino and "/" in pais_destino:
-        partes = [p.strip() for p in pais_destino.split("/") if p.strip()]
-        if len(partes) >= 2 and partes[-1].upper() in ("USA", "US", "UNITED STATES"):
-            ciudad = partes[1]
-        elif len(partes) >= 1:
-            ciudad = partes[0]
+    # El Ship-To, leido en sus dos formatos. De aqui sale el orden de abajo:
+    # si hay region de destino, los mas cercanos suben; si no, no se ordena
+    # nada y queda el de siempre.
+    destino = destino_de(pais_destino)
+    _sitio = ", ".join(x for x in (destino["ciudad"], destino["estado"]) if x)
 
     consultas = [f'"{especifico}" wholesale distributor usa',
                  f'{especifico} supplier "United States" price']
-    if ciudad:
-        consultas.append(f'{especifico} distributor {ciudad}')
+    if _sitio:
+        # La ciudad y el estado juntos: con la ciudad sola Google devuelve
+        # "distribuidores de Norfolk" y hay decenas de Norfolk.
+        consultas.append(f'{especifico} distributor {_sitio}')
 
     # El termino de Gemini tiene prioridad sobre la consulta armada aqui.
     # Se limpia con el MISMO criterio que el resto, porque si no el enlace se
@@ -211,10 +396,25 @@ def para_oportunidad(terminos: list[str], producto: str = "",
     principal = ("🔎 Buscar en Google (siempre funciona)",
                  google(consulta_principal))
 
-    sitios = []
-    for nombre, dominio, nota in DIRECTORIOS[:5]:
+    # Los diez se ordenan por proximidad y se quedan LOS CINCO PRIMEROS,
+    # que es lo que cabe en la ficha. No es un corte arbitrario: con destino
+    # desconocido todos empatan y salen los cinco de siempre (el orden previo
+    # a la Fase 3, literal); con destino conocido, los que tienen base en la
+    # region del Ship-To entran y los de otra region ceden su hueco. Es
+    # aqui donde el geo-matching optimiza el flete FOB Destination: en la
+    # lista que el usuario realmente abre.
+    sitios_bruto = []
+    for nombre, dominio, nota in DIRECTORIOS:
         consulta = f'"{especifico}" site:{dominio}' if " " in especifico else f"{especifico} site:{dominio}"
-        sitios.append((nombre, google(consulta), nota))
+        sitios_bruto.append((proximidad(destino["region"],
+                                        _BASE_CONOCIDA.get(dominio)),
+                             nombre, google(consulta), nota))
+    # Sort ESTABLE: con destino desconocido (o bases empatadas) el orden es
+    # el de siempre. La region solo manda cuando HAY region; nunca mueve a
+    # nadie hacia atras por ser de otra region, solo coloca a los de la
+    # primera.
+    sitios_bruto.sort(key=lambda x: x[0])
+    sitios = [(n, u, nota) for _, n, u, nota in sitios_bruto[:5]]
 
     fabricantes = [
         (nombre, busqueda_sitio(dominio, f'"{especifico}" manufacturer usa'))
@@ -230,6 +430,16 @@ def para_oportunidad(terminos: list[str], producto: str = "",
         if limpio:
             validos.append(limpio)
 
+    # Clasificacion por cercania al Ship-To. Se marca la region base de
+    # cada uno (vacia si no se conoce) y se ordena SOLO cuando hay region
+    # de destino: sin destino, el orden es el que trajo Gemini, que es el
+    # de antes de la Fase 3.
+    for c in validos:
+        c["region_base"] = _region_de_candidato(c["nombre"])
+    if destino["region"]:
+        validos.sort(key=lambda c: proximidad(destino["region"],
+                                              c["region_base"] or None))
+
     return {
         "principal": principal,
         "candidatos": validos[:3],
@@ -241,6 +451,11 @@ def para_oportunidad(terminos: list[str], producto: str = "",
         # optimizado llego o no. Sin esto, un aviso con el campo vacio y otro
         # con el campo puesto darian un enlace identico y no se distinguirian.
         "consulta_gemini": consulta_gemini,
+        # Fase 3: el Ship-To analizado y si el orden de arriba salio de la
+        # region. La ficha usa los dos para decir de donde viene el orden,
+        # y las pruebas para comprobarlo sin abrir el navegador.
+        "destino": destino,
+        "ordenado_por_cercania": bool(destino["region"]),
     }
 
 
