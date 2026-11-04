@@ -407,6 +407,159 @@ check("  desde_analisis sigue con su firma",
       list(inspect.signature(pdfg.desde_analisis).parameters)
       == ["analisis", "proveedor", "db_path"])
 
+print()
+print("=" * 76)
+print("10) REGLA ESTRICTA: EL PAIS NUNCA ES LA DIRECCION DE ENTREGA")
+print("=" * 76)
+# El caso que hizo falta: un analisis guardado traia lugar_entrega con el
+# pais y el Ship-To lo pintaba como si fuera la direccion. Ahora el pais
+# (en cualquier idioma) no vale, y si no hay calle ni ciudad+estado, el
+# campo muestra el respaldo honesto.
+
+print("  Predicados sobre direccion ESTRUCTURADA:")
+for etiqueta, d, esperado in (
+        ("calle sola", {"calle": "1500 E Rock Island Arsenal Rd"}, True),
+        ("ciudad y estado", {"ciudad": "Norfolk", "estado": "Virginia"}, True),
+        ("calle con ciudad", {"calle": "1 Main St", "ciudad": "X"}, True),
+        ("ciudad, estado y pais", {"ciudad": "Norfolk", "estado": "Virginia",
+                                   "pais": "UNITED STATES"}, True),
+        ("solo el pais", {"pais": "UNITED STATES"}, False),
+        ("ciudad SIN estado", {"ciudad": "Norfolk",
+                               "pais": "UNITED STATES"}, False),
+        ("estado sin ciudad", {"estado": "Virginia"}, False),
+        ("solo el nombre", {"nombre": "Rock Island Arsenal"}, False),
+        ("vacio", {}, False)):
+    got = pdfg._destino_minimo(d)
+    check("  _destino_minimo(%s) -> %s" % (etiqueta, esperado),
+          got == esperado, "-> %r" % got)
+
+print()
+print("  Predicados sobre TEXTO libre (lugar_entrega / award):")
+for etiqueta, t, sirve in (
+        ("UNITED STATES", "UNITED STATES", False),
+        ("USA", "USA", False),
+        ("Estados Unidos", "Estados Unidos", False),
+        ("ciudad sola con pais", "Norfolk, UNITED STATES", False),
+        ("ciudad y estado", "Norfolk, Virginia, UNITED STATES", True),
+        ("formato de casa con barras", "Norfolk / VA / USA", True),
+        ("calle sola", "1500 E Rock Island Arsenal Rd", True),
+        ("vacio", "", False)):
+    salida = pdfg._destino_texto(t)
+    check("  _destino_texto(%r) sirve=%s" % (etiqueta, sirve),
+          bool(salida) == sirve, "-> %r" % salida)
+
+if PdfReader:
+
+    def _ship_to(txt):
+        """El bloque Ship-To, desde su etiqueta hasta Delivery Window."""
+        lineas = [l.strip() for l in txt.splitlines()]
+        for i, l in enumerate(lineas):
+            if "DELIVERY DESTINATION" in l.upper():
+                trozo = []
+                for j in range(i, len(lineas)):
+                    if "DELIVERY WINDOW" in lineas[j].upper():
+                        break
+                    if lineas[j]:
+                        trozo.append(lineas[j])
+                return " | ".join(trozo)
+        return "(sin bloque)"
+
+    def _pdf_ship_to(analisis, premio=None):
+        d = pdfg.desde_analisis(analisis, {"nombre": "Radwell International"})
+        if premio is not None:
+            d["award"] = dict(premio)
+        b = pdfg.generar_po(d)
+        t = "\n".join(p.extract_text() or ""
+                      for p in PdfReader(io.BytesIO(b)).pages)
+        return _ship_to(t), d
+
+    _RES = "Exact delivery facility address to be confirmed upon award assignment"
+    _PAISES = ("UNITED STATES", "USA", "Estados Unidos", "United States")
+
+    print()
+    print("  El aviso INCOMPLETO (solo pais en SAM.gov):")
+    an_pais = pdfg.desde_aviso(dict(AVISO, placeOfPerformance={
+        "country": {"code": "USA", "name": "UNITED STATES"}}))
+    bloque, _ = _pdf_ship_to(an_pais)
+    print("   ", bloque[:110])
+    check("  el PDF muestra el respaldo honesto", _RES in bloque,
+          "-> %r" % bloque)
+    check("  y NINGUN pais en el campo", not any(
+        p in bloque for p in _PAISES), "-> %r" % bloque)
+
+    print()
+    print("  El caso reportado: analisis guardado con 'Estados Unidos':")
+    an_es = {
+        "notice_id": "fase3-reporte-001",
+        "solicitation": "W912DY-26-R-0042",
+        "title": "BEARING, INSERT, S-1 SERIES",
+        "agencia": "DEPT OF DEFENSE.ARMY",
+        "producto": "BEARING, INSERT, S-1 SERIES",
+        "lugar_entrega": "Estados Unidos",
+        "direccion_entrega": {},
+        "limite": "2026-11-30T17:00:00-05:00",
+        "cantidad_total": 100,
+        "unidad_medida": "EA",
+        "bom_lineas": [{"clin": "0001", "parte": "3110-01-586-4931",
+                        "cantidad": 100, "unidad": "EA"}],
+    }
+    bloque, datos_es = _pdf_ship_to(an_es)
+    print("   ", bloque[:110])
+    check("  el PDF muestra el respaldo honesto", _RES in bloque,
+          "-> %r" % bloque)
+    check("  y NO 'Estados Unidos'", "Estados Unidos" not in bloque,
+          "-> %r" % bloque)
+    check("  datos['lugar_entrega'] queda limpio",
+          datos_es.get("lugar_entrega") == "",
+          "-> %r" % datos_es.get("lugar_entrega"))
+
+    print()
+    print("  Y con 'UNITED STATES' en ingles:")
+    bloque, _ = _pdf_ship_to(dict(an_es, lugar_entrega="UNITED STATES"))
+    print("   ", bloque[:110])
+    check("  el PDF muestra el respaldo honesto", _RES in bloque,
+          "-> %r" % bloque)
+    check("  y NINGUN pais en el campo", not any(
+        p in bloque for p in _PAISES), "-> %r" % bloque)
+
+    print()
+    print("  Ciudad SIN estado (la regla exige calle o ciudad+estado):")
+    an_ciudad = pdfg.desde_aviso(dict(AVISO, placeOfPerformance={
+        "city": {"name": "Norfolk"},
+        "country": {"code": "USA", "name": "UNITED STATES"}}))
+    bloque, _ = _pdf_ship_to(an_ciudad)
+    print("   ", bloque[:110])
+    check("  el PDF muestra el respaldo honesto", _RES in bloque,
+          "-> %r" % bloque)
+    check("  ni la ciudad suelta en el campo",
+          "Norfolk" not in bloque, "-> %r" % bloque)
+
+    print()
+    print("  CONTROL: ciudad Y estado sigue saliendo SIEMPRE:")
+    an_ok = pdfg.desde_aviso(dict(AVISO, placeOfPerformance={
+        "city": {"name": "Philadelphia"},
+        "state": {"code": "PA", "name": "Pennsylvania"},
+        "country": {"code": "USA", "name": "UNITED STATES"}}))
+    bloque, _ = _pdf_ship_to(an_ok)
+    print("   ", bloque[:130])
+    check("  la direccion real sale entera",
+          "Philadelphia, Pennsylvania, UNITED STATES" in bloque,
+          "-> %r" % bloque)
+
+    print()
+    print("  El override award tampoco exime de la regla:")
+    bloque, _ = _pdf_ship_to(an_ok,
+                             premio={"shipping_destination": "Estados Unidos"})
+    print("   ", bloque[:130])
+    check("  se ignora el pais y manda la direccion real",
+          "Philadelphia, Pennsylvania, UNITED STATES" in bloque
+          and "Estados Unidos" not in bloque, "-> %r" % bloque)
+
+    bloque, _ = _pdf_ship_to(an_pais,
+                             premio={"shipping_destination": "USA"})
+    check("  y sin direccion, cae al respaldo honesto",
+          _RES in bloque and "USA" not in bloque, "-> %r" % bloque)
+
 sam_api.obtener_descripcion = _real_desc
 for _s in ("", "-wal", "-shm"):
     try:

@@ -846,6 +846,75 @@ def _dato_plano(v):
     return str(v).strip()
 
 
+# Lo que NUNCA vale como direccion de entrega: el pais, solo, en cualquier
+# idioma y en cualquier forma. Aqui estan tambien los marcadores de "sin dato"
+# que deja el analisis, porque pintar "No especificado" en el Ship-To tiene el
+# mismo efecto que pintar el pais: el transportista no sabe donde ir.
+_PAISES_GENERICOS = frozenset({
+    "usa", "u.s.a.", "u.s.a", "us", "u.s.", "u.s", "united states",
+    "united states of america", "estados unidos", "estados unidos de america",
+    "america", "north america", "no especificado", "not specified",
+    "n/a", "na", "none", "a confirmar", "pending", "tbd",
+})
+
+
+def _destino_minimo(dir_: dict) -> bool:
+    """
+    True si una direccion ESTRUCTURADA sirve para entregar material.
+
+    REGLA ESTRICTA DE DIRECCION MINIMA
+    O hay calle, o hay ciudad Y estado. Pais solo no vale, ciudad sola no
+    vale, ni el nombre de la instalacion sin nada detras: eso no es una
+    direccion, es la ausencia de una.
+
+    Por que tan exigente: un Ship-To que dice "UNITED STATES" hace que el
+    transportista pare en la puerta equivocada, y en una orden federal eso es
+    material perdido y un aviso que vuelve. Un hueco con instruccion dice la
+    verdad: que hay que confirmarlo.
+    """
+    if not isinstance(dir_, dict):
+        return False
+    calle = str(dir_.get("calle") or "").strip()
+    ciudad = str(dir_.get("ciudad") or "").strip()
+    estado = str(dir_.get("estado") or "").strip()
+    return bool(calle) or bool(ciudad and estado)
+
+
+# Una calle lleva numero o lleva sufijo via. Es la unica forma de distinguir
+# "1500 E Rock Island Arsenal Rd" de "Norfolk" en texto libre, que es lo que
+# hace falta para aplicar la misma regla a las entradas de texto.
+_RE_CALLE = re.compile(
+    r"\b\d{1,6}\s+\S"
+    r"|\b(?:street|st|road|rd|drive|dr|avenue|ave|boulevard|blvd|way|lane|ln|"
+    r"parkway|pkwy|court|ct|place|pl|highway|hwy|suite|ste)\b",
+    re.I)
+
+
+def _destino_texto(texto) -> str:
+    """
+    La linea de destino si sirve para entregar, o "" si no.
+
+    Version de _destino_minimo() para TEXTO LIBRE (lugar_entrega,
+    award.shipping_destination): se limpia la linea y se cuentan los trozos
+    que NO son el pais. Hacen falta dos ("Norfolk, Virginia"), que es lo
+    minimo para que la linea diga ciudad y estado; o una que parezca calle.
+
+    Un "UNITED STATES", un "USA" o un "Estados Unidos" no llega ni a uno, y
+    se descarta: el campo mostrara el respaldo honesto en vez del pais.
+    """
+    plano = _dir_limpio(texto)
+    if not plano:
+        return ""
+    trozos = [t.strip() for t in re.split(r"[,/]", plano) if t.strip()]
+    reales = [t for t in trozos
+              if t.lower().rstrip(".") not in _PAISES_GENERICOS]
+    if len(reales) >= 2:
+        return plano
+    if reales and _RE_CALLE.search(reales[0]):
+        return plano
+    return ""
+
+
 # La direccion de SAM.gov, en el orden en que se escribe una direccion postal.
 # El orden NO es el del diccionario: es nombre, calle, ciudad, estado, ZIP.
 _CLAVES_DIRECCION = (
@@ -897,20 +966,22 @@ def _direccion_entrega_disponible(analisis: dict) -> dict:
     propio analisis conserva las claves de NASA: si trae "shipToAddress" o
     "deliveryLocation", la direccion esta ahi y no hay motivo para perderla.
 
-    Que se pinte solo el pais NO es opcion: si al final solo se ha resuelto eso,
-    se devuelve vacio y el bloque avisa por el log. Un papel con "UNITED STATES"
-    en el Ship-To es peor que uno sin destino, porque parece que si lo tiene.
+    Que se pinte solo el pais NO es opcion, ni la ciudad sin estado: si al
+    final no se ha resuelto una direccion minima (calle, o ciudad y estado),
+    se devuelve vacio y el bloque avisa por el log. Un papel con "UNITED
+    STATES" en el Ship-To es peor que uno sin destino, porque parece que si
+    lo tiene.
     """
     if not isinstance(analisis, dict):
         return {}
     directa = dict(analisis.get("direccion_entrega") or {})
-    if set(directa) - {"pais"}:
+    if _destino_minimo(directa):
         return directa
     try:
         desde_bruto = _direccion_completa(analisis)
     except Exception:
         desde_bruto = {}
-    if set(desde_bruto) - {"pais"}:
+    if _destino_minimo(desde_bruto):
         return desde_bruto
     return {}
 
@@ -961,12 +1032,17 @@ def _direccion_completa(aviso: dict) -> dict:
             if destino in salida:
                 break
 
-    # REGLA DURA: si lo unico que se ha resuelto es el pais, NO vale.
+    # REGLA DURA DE DIRECCION MINIMA: o hay calle, o hay ciudad Y estado.
     #
     # Un Ship-To que dice "UNITED STATES" no es una direccion, es decir que no
-    # se sabe. Se descarta para que el lector siga mirando en las claves
-    # secundarias, que es donde la NASA publica la direccion de verdad.
-    return {} if set(salida) <= {"pais"} else salida
+    # se sabe. Tampoco lo es una ciudad sola ("Norfolk, UNITED STATES"), que
+    # es ambigua: hay decenas de Norfolk. Antes solo se descartaba el caso
+    # exactamente-pais, y una ciudad sin estado se colaba.
+    #
+    # Se descarta para que el lector siga mirando en las claves secundarias,
+    # que es donde la NASA publica la direccion de verdad; y si no hay, el
+    # campo se queda con SIN_DESTINO_CONFIRMADO.
+    return salida if _destino_minimo(salida) else {}
 
 
 _RE_ZIP = re.compile(r"^\d{5}(?:-\d{4})?$")
@@ -1322,16 +1398,31 @@ def _blueprint_logistica(e, datos):
     # --- Destino de envio ---
     # Con award se usa la direccion exacta de la base/agencia; sin award, la
     # resolucion normal del aviso (placeOfPerformance / shipToAddress).
+    #
+    # NI EL OVERRIDE A MANO ES EXCEPTUADO: award.shipping_destination puede
+    # traer el pais solo, y el pais no es direccion ni viniendo de donde
+    # venga. Si no pasa la regla minima, se ignora y se resuelve la
+    # direccion normal en vez de pintar un destino falso.
     _aw_dest = _aw.get("shipping_destination")
+    lineas_dir = []
     if _aw_dest:
         if isinstance(_aw_dest, (list, tuple)):
             lineas_dir = [str(x).strip() for x in _aw_dest if str(x).strip()]
         else:
             _t = str(_aw_dest).strip()
             lineas_dir = [_t] if _t else []
-    else:
+        if lineas_dir and not _destino_texto(", ".join(lineas_dir)):
+            log.warning(
+                "PDF: award.shipping_destination del aviso %s solo aporta el "
+                "pais; no vale como direccion de entrega. Se ignora y se "
+                "resuelve la direccion normal.",
+                datos.get("referencia_sam") or "(sin numero)")
+            lineas_dir = []
+    if not lineas_dir:
         dir_ = dict(datos.get("direccion_entrega") or {})
-        lineas_dir = lineas_direccion(dir_)
+        # _destino_minimo y no truthy: una direccion con la ciudad sola
+        # tampoco sirve para entregar material a un sitio concreto.
+        lineas_dir = lineas_direccion(dir_) if _destino_minimo(dir_) else []
         if not lineas_dir:
             # Sin direccion fisica no se inventa una. Se avisa en el log para
             # que quede constancia en Render de lo que falto, y el papel dice
@@ -1341,8 +1432,12 @@ def _blueprint_logistica(e, datos):
                 "placeOfPerformance, shipToAddress ni deliveryLocation. Se "
                 "deja el hueco con instruccion. REVISAR A MANO el pliego.",
                 datos.get("referencia_sam") or "(sin numero)")
-            # Respaldo SOLO si viene de una fuente de entrega.
-            plano = _dir_limpio(datos.get("lugar_entrega"))
+            # Respaldo SOLO si viene de una fuente de entrega y pasa la regla
+            # minima. Este es el hueco por el que se colaba el pais: un
+            # analisis guardado con lugar_entrega="Estados Unidos" (o
+            # "UNITED STATES") pintaba eso en el Ship-To. _destino_texto lo
+            # descarta, y el campo se queda con el respaldo honesto.
+            plano = _destino_texto(datos.get("lugar_entrega"))
             if plano:
                 lineas_dir = [plano]
     # Si no se ha resuelto una direccion REAL, la fila NO se dibuja con una
@@ -3354,7 +3449,11 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
     # papel redactado en ingles no sabe aplicar las condiciones de pago, y esa
     # es exactamente la linea que no puede quedar sin entender.
     inst = [
-        f"Delivery to: {analisis.get('lugar_entrega') or 'the installation designated by the Government'}",
+        # _destino_texto, no el valor en crudo: una instruccion que dice
+        # "Delivery to: Estados Unidos" no le dice al distribuidor a donde
+        # va el material, y es el mismo error que en el Ship-To. Si el lugar
+        # no pasa la regla minima, se cae a la frase honesta.
+        f"Delivery to: {_destino_texto(lugar) or 'the installation designated by the Government'}",
         "Packaging suitable for transportation: the supplier shall pack the "
         "material so that it is preserved in the condition required for "
         "delivery.",
@@ -3462,7 +3561,10 @@ def desde_analisis(analisis: dict, proveedor: dict | None = None,
         # El lugar va como campo propio para el bloque de logistica. Antes solo
         # existia dentro del texto de instrucciones, ya compuesto, y de ahi no
         # se podia sacar una direccion limpia sin desarmar una frase entera.
-        "lugar_entrega": _dir_limpio(lugar),
+        # _destino_texto, no _dir_limpio: si el lugar no pasa la regla
+        # minima (calle, o ciudad y estado) el campo queda vacio, y el
+        # bloque de logistica pinta el respaldo honesto en vez del pais.
+        "lugar_entrega": _destino_texto(lugar),
         # La direccion fisica completa, campo por campo. Aqui es donde sale el
         # ZIP, y sale SOLO si el aviso lo trae: inventarlo manda el material al
         # estado equivocado.
