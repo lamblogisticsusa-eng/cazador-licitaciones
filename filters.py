@@ -237,6 +237,26 @@ def set_aside_permitido(opp: dict) -> tuple[bool, str]:
     return False, valor
 
 
+def _bypass_aprendido(texto: str) -> str:
+    """
+    El token de bypass aprendido que aparece en el texto, o "" si ninguno.
+
+    Fase 4: dynamic_whitelist_tokens lo aprende el meta-analisis de cada
+    barrido (autocalibracion.py) y marca los articulos COTS legitimos cuya
+    palabra ambigua los estaba hundiendo. Se compara con limites de palabra,
+    no por subcadena: un token "kit" no tiene por que dispararse dentro de
+    "kitchen". El mas largo va primero, para que gane el mas especifico.
+    """
+    tokens = config.excepciones_dinamicas()
+    if not tokens:
+        return ""
+    bajo = texto.lower()
+    for token in sorted(tokens, key=len, reverse=True):
+        if re.search(r"(?<!\w)%s(?!\w)" % re.escape(token), bajo):
+            return token
+    return ""
+
+
 def penalizaciones_patron(texto: str) -> tuple[int, list[str]]:
     """
     Penalizacion por coincidencia de patron sobre el texto del aviso.
@@ -246,25 +266,42 @@ def penalizaciones_patron(texto: str) -> tuple[int, list[str]]:
     Una palabra que YA esta en TRABAJO_EN_SITIO no se penaliza dos veces: el
     mismo "repair" seria restar 20 aqui y hasta 8 alla, y un "REPAIR PARTS KIT"
     -que es justamente material que se vende- se hundiria por doble.
+
+    Fase 4: los dos pesos salen de config.peso(), que devuelve el valor
+    aprendido por la autocalibracion si hay y el estatico si no, y al final
+    un token aprendido puede relajar el castigo completo. La firma no se
+    mueve y sin calibracion el comportamiento es identico al de siempre.
     """
     texto = _texto(texto)
     if not texto:
         return 0, []
     puntos, motivos = 0, []
+    w_mantenimiento = config.peso("PENALIZACION_MANTENIMIENTO")
+    w_armamento = config.peso("PENALIZACION_ARMAMENTO")
 
     hallados = {m.group(1).lower() for m in _RE_MANTENIMIENTO.finditer(texto)}
     nuevos = sorted(hallados - config.PALABRAS_YA_PENALIZADAS)
     if nuevos:
-        puntos += config.PENALIZACION_MANTENIMIENTO
+        puntos += w_mantenimiento
         motivos.append("mantenimiento/taller (%s) %+d"
-                       % (", ".join(nuevos[:3]),
-                          config.PENALIZACION_MANTENIMIENTO))
+                       % (", ".join(nuevos[:3]), w_mantenimiento))
 
     armas = sorted({m.group(0).lower() for m in _RE_ARMAMENTO.finditer(texto)})
     if armas:
-        puntos += config.PENALIZACION_ARMAMENTO
+        puntos += w_armamento
         motivos.append("armamento/aeroespacial (%s) %+d"
-                       % (", ".join(armas[:3]), config.PENALIZACION_ARMAMENTO))
+                       % (", ".join(armas[:3]), w_armamento))
+
+    # --- Bypass por calibracion (Fase 4) ---
+    # Si el meta-analisis reconocio el aviso como articulo COTS legitimo
+    # penalizado por una palabra ambigua, aqui se relaja el castigo y SOLO
+    # aqui. Los vetos de puntuar() (-100) y el resto del motor quedan
+    # intactos: la IA aprende a suavizar, no a dejar pasar defensa.
+    if puntos:
+        token = _bypass_aprendido(texto)
+        if token:
+            return 0, ["bypass COTS aprendido (%s): penalizacion por patron "
+                       "relajada" % token]
     return puntos, motivos
 
 
@@ -316,9 +353,10 @@ def penalizacion_urgencia(opp: dict, texto: str = "",
         return 0, []
     bajo = _texto(texto).lower()
     if any(p in bajo for p in config.COTIZACION_INDUSTRIAL_PALABRAS):
-        return (config.PENALIZACION_URGENCIA,
+        w_urgencia = config.peso("PENALIZACION_URGENCIA")
+        return (w_urgencia,
                 ["cotizacion a medida con %s dias de margen %+d"
-                 % (dias, config.PENALIZACION_URGENCIA)])
+                 % (dias, w_urgencia)])
     return 0, []
 
 
@@ -348,7 +386,12 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
 
     # --- CAPA TACTICA: penalizacion por patron ---
     p_patron, m_patron = penalizaciones_patron(combo)
-    if p_patron:
+    # El `or m_patron` es de la Fase 4: cuando un token aprendido relaja el
+    # castigo, los puntos bajan a 0 pero el MOTIVO sigue siendo informativo
+    # -/debug tiene que poder ver por que desaparecio-, y con los valores
+    # estaticos penalizaciones_patron devuelve (0, []) igual que siempre,
+    # asi que esta condicion no cambia nada de lo actual.
+    if p_patron or m_patron:
         puntos += p_patron
         motivos.extend(m_patron)
 
@@ -448,9 +491,10 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     # test_ajustes.py fija) y esto no la revierte.
     _psc = str(opp.get("classificationCode") or "").strip()
     if _psc in config.PSC_COTS:
-        puntos += config.COTS_PUNTOS
+        w_cots = config.peso("COTS_PUNTOS")
+        puntos += w_cots
         motivos.append(f"PSC {_psc} = producto COTS con distribuidor "
-                       f"comercial en USA (+{config.COTS_PUNTOS})")
+                       f"comercial en USA (+{w_cots})")
 
     # --- Base de trabajo ---
     if "supplies" in titulo or "materials" in titulo or "equipment" in titulo:
@@ -505,17 +549,18 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
         _sa_texto = " " + re.sub(r"[^A-Z0-9]+", " ", set_aside) + " "
         if any(t in config.SET_ASIDE_PYME for t in _sa_tokens) or \
                 any(p in _sa_texto for p in ("TOTAL SMALL", "SMALL BUSINESS", "SBA")):
-            puntos += config.SET_ASIDE_PYME_PUNTOS
+            w_pyme = config.peso("SET_ASIDE_PYME_PUNTOS")
+            puntos += w_pyme
             _cert = [t for t in _sa_tokens
                      if t in config.SET_ASIDE_CON_CERTIFICACION]
             if _cert:
                 motivos.append(
-                    f"Set-aside {set_aside} (+{config.SET_ASIDE_PYME_PUNTOS}, "
+                    f"Set-aside {set_aside} (+{w_pyme}, "
                     f"exige certificacion de propiedad)"
                 )
             else:
                 motivos.append(
-                    f"Set-aside {set_aside} (+{config.SET_ASIDE_PYME_PUNTOS}, "
+                    f"Set-aside {set_aside} (+{w_pyme}, "
                     f"total small business: puede presentarse)"
                 )
 
@@ -532,9 +577,10 @@ def puntuar(opp: dict, descripcion: str = "") -> tuple[int, list[str]]:
     _obra = any(w in _titulo_low for w in config.TRABAJO_EN_SITIO)
     _piezas = any(p in _titulo_low for p in config.VENTA_DE_PIEZAS)
     if _pesado and _obra and not _piezas:
-        puntos -= config.PENALIZACION_OBRA_PUNTOS
+        w_obra = config.peso("PENALIZACION_OBRA_PUNTOS")
+        puntos -= w_obra
         motivos.append(
-            f"-{config.PENALIZACION_OBRA_PUNTOS} parece obra en sitio "
+            f"-{w_obra} parece obra en sitio "
             f"(equipo pesado + trabajo en sitio)"
         )
 

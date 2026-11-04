@@ -3,6 +3,9 @@
 *.db
 *.db-wal
 *.db-shm
+# Estado aprendido por la autocalibracion (Fase 4): es dato local, no codigo.
+*.autocalibracion.json
+*.autocalibracion.json.tmp
 etiquetas/
 __pycache__/
 *.pyc

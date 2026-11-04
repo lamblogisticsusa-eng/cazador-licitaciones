@@ -987,3 +987,108 @@ PALABRAS_SERVICIO = {
     "document destruction", "records management", "travel services", "tour services",
     "vehicle maintenance", "fleet maintenance", "road maintenance", "street sweeping",
 }
+
+# ==========================================================================
+#  FASE 4 - AUTOCALIBRACION: PESOS Y EXCEPCIONES DEJAN DE SER ESTATICOS
+#
+#  Todo lo de arriba sigue siendo cierto, pero deja de ser lo UNICO: ahora es
+#  el valor POR DEFECTO. Por encima va una calibracion que el propio bot
+#  aprende de cada barrido (autocalibracion.py) y que este motor lee en cada
+#  ciclo. Nadie tiene que tocar este archivo a mano para cambiar un peso.
+#
+#  Dos lecturas y nada mas:
+#      config.peso("PENALIZACION_MANTENIMIENTO")  -> peso efectivo
+#      config.excepciones_dinamicas()             -> tokens de bypass
+#
+#  Las constantes de arriba NUNCA se reescriben: siguen siendo el default y
+#  la referencia con la que se valida lo aprendido. Si el aprendizaje se
+#  rompe o se apaga, el motor cae exactamente en el comportamiento actual.
+# ==========================================================================
+
+# El fichero sigue el camino de la base de datos (DB_PATH). No se inventa un
+# directorio aparte por dos razones: (1) es donde ya vive el estado del bot,
+# y (2) si una prueba redirige DB_PATH a un temporal -como hacen casi todas
+# aqui- la calibracion va a el tambien, y por eso una prueba nunca puede
+# leer la calibracion aprendida en otra corrida.
+AUTOCALIBRACION_FICHERO = os.getenv(
+    "AUTOCALIBRACION_FICHERO",
+    os.path.splitext(DB_PATH)[0] + ".autocalibracion.json",
+)
+
+# Apagable sin tocar codigo: con AUTOCALIBRACION_HABILITADA=0 el motor vuelve
+# a los estaticos de siempre, que es la via de escape si un aprendizaje
+# estuviera molestando en produccion.
+AUTOCALIBRACION_HABILITADA = _bool("AUTOCALIBRACION_HABILITADA", True)
+
+# Version del esquema. Un fichero de otra version se IGNORA en vez de leerse
+# a medias: es mejor volver a los estaticos que aplicar claves que este
+# codigo no entiende.
+AUTOCALIBRACION_VERSION = 1
+
+
+def calibracion() -> dict:
+    """
+    La calibracion persistida, ya validada. {} si no hay.
+
+    autocalibracion se importa DENTRO de la funcion: ese modulo importa
+    config a su vez, y un import en frio aqui daria una vuelta circular. En
+    el momento de llamar, config ya esta entero en sys.modules.
+
+    Nunca lanza: una calibracion ilegible tiene que costar cero, no tumbar un
+    barrido.
+    """
+    if not AUTOCALIBRACION_HABILITADA:
+        return {}
+    try:
+        import autocalibracion
+        return autocalibracion.cargar()
+    except Exception:
+        return {}
+
+
+def peso(nombre: str):
+    """
+    El valor EFECTIVO de un peso de la matriz de scoring.
+
+    Si la calibracion trae ese peso se usa el aprendido; si no, la constante
+    estatica de arriba, que sigue intacta. La lectura es en cada llamada, con
+    la cache de mtime de autocalibracion, asi que la primera puntuacion de
+    cada barrido recoge lo que se aprendio en el anterior.
+
+    `nombre` tiene que ser una constante de pesos que exista aqui. Cualquier
+    otra cosa devuelve None, y quien la use trata None como "sin peso".
+    """
+    if not AUTOCALIBRACION_HABILITADA:
+        return globals().get(nombre)
+    aprendido = None
+    try:
+        import autocalibracion
+        aprendido = autocalibracion.peso_aprendido(nombre)
+    except Exception:
+        aprendido = None
+    if isinstance(aprendido, (int, float)) and not isinstance(aprendido, bool):
+        return aprendido
+    return globals().get(nombre)
+
+
+def excepciones_dinamicas() -> set:
+    """
+    Los tokens de bypass aprendidos, en minusculas. Vacio si no hay.
+
+    filters los usa para relajar la penalizacion por patron cuando el aviso
+    es un articulo COTS legitimo con una palabra ambigua ("REPAIR PARTS KIT"
+    se hundia por el "repair"). Es la linea de falsos positivos que detecto
+    el meta-analisis.
+
+    Lo que NO hacen: vetar ni desvetar. Un veto (-100, defensa severa,
+    NAICS, fecha) no es negociable por mucho que aprenda la IA; el bypass
+    solo relaja un castigo, que es exactamente donde estan los falsos
+    positivos.
+    """
+    if not AUTOCALIBRACION_HABILITADA:
+        return set()
+    try:
+        import autocalibracion
+        return autocalibracion.tokens_bypass()
+    except Exception:
+        return set()

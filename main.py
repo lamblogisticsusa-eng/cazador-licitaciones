@@ -30,6 +30,7 @@ from telegram.ext import (
     filters,
 )
 
+import autocalibracion
 import config
 import gemini_analyzer
 import label as etiqueta
@@ -51,6 +52,33 @@ log = logging.getLogger("kyomoto")
 ESTADO = {"activo": True, "escaneando": False, "ultimo_resumen": None}
 ANALISIS: dict[str, dict] = {}  # notice_id -> ficha (para /etiqueta)
 ULTIMO_ESCANEO: dict = {}
+
+# Tareas de fondo de la Fase 4. asyncio NO retiene las tareas creadas con
+# create_task: sin esta referencia, el meta-analisis podria morir a mitad de
+# camino por un recolector de basura, y lo haria justamente cuando nadie
+# esta mirando el resultado. Aqui se guardan mientras viven y se sueltan solas
+# al terminar.
+TAREAS_FOND: set = set()
+
+
+def lanzar_autocalibracion(resumen: dict) -> None:
+    """
+    Lanza la tarea asincrona post-barrido (Fase 4) sin esperarla.
+
+    El usuario ya tiene su escaneo en pantalla; el empaquetado y el
+    meta-analisis corren en segundo plano y no pueden bloquear ni retrasar
+    nada. Todo va envuelto: una tarea que ni siquiera se crea no tiene por
+    que romperle un barrido que ya salio bien.
+    """
+    try:
+        tarea = asyncio.get_running_loop().create_task(
+            autocalibracion.ciclo_post_barrido(resumen)
+        )
+    except Exception:
+        log.debug("No se pudo lanzar la autocalibracion", exc_info=True)
+        return
+    TAREAS_FOND.add(tarea)
+    tarea.add_done_callback(TAREAS_FOND.discard)
 
 
 # ==========================================================================
@@ -448,6 +476,11 @@ async def _lanzar_escaneo(chat_id: str, dias: int, menu_msg=None) -> None:
     for a in resumen.get("analisis", []):
         if a.get("notice_id"):
             ANALISIS[a["notice_id"]] = a
+
+    # Fase 4: el paquete de aprendizaje sale hacia el pipeline secundario
+    # YA, sin esperar a que el usuario lea su escaneo. Es el fin de ciclo
+    # del barrido manual y del boton "Buscar ahora".
+    lanzar_autocalibracion(resumen)
 
     import kyo
 
@@ -1015,6 +1048,10 @@ async def _tarea_periodica(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Barrido automatico: %s viables de %s analizadas",
             resumen["viables"], resumen["analizadas"],
         )
+        # Fase 4: mismo canal que /escaneo y igual de asincrono. El barrido
+        # programado es el que mas datos junta, asi que es donde el
+        # meta-analisis mas tiene que aprender.
+        lanzar_autocalibracion(resumen)
     except Exception:
         log.exception("Fallo el barrido automatico")
         telegram_notify.aviso_error(

@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+import autocalibracion
 import config
 import filters
 import gemini_analyzer
@@ -29,6 +30,20 @@ FALLOS_IGNORADOS = ()
 # cero siempre, porque los vetados nunca llegan a puntuadas.
 DESCARTE_POR_MOTIVO: dict[str, int] = {}
 
+# Log de detalle de los descartes de ESTE barrido (Fase 4).
+#
+# DESCARTE_POR_MOTIVO solo cuenta, y con eso alcanza para el resumen, pero no
+# para saber QUE se cayo ni POR QUE, que es lo que el meta-analisis necesita
+# para distinguir un veto justo de un castigo por palabra ambigua en un
+# articulo COTS legitimo.
+#
+# Acotado a MAX_DESCARTE_LOG: un barrido con 800 descartes no arrastra 800
+# lineas al pipeline de IA, y las primeras -las del pre-puntaje- son las que
+# mas interesan, porque van sin descripcion y por eso son las mas propensas
+# al falso positivo.
+DESCARTE_LOG: list[dict] = []
+MAX_DESCARTE_LOG = 120
+
 # Avisos ya contados en ESTE barrido.
 #
 # Hace falta porque cada aviso se puntua DOS veces: el pre-puntaje por titulo,
@@ -44,17 +59,39 @@ DESCARTE_POR_MOTIVO: dict[str, int] = {}
 _DESCARTE_VISTOS: set[str] = set()
 
 
+def _naics_seguro(opp: dict) -> str:
+    """
+    Prefijo NAICS de 3 digitos del aviso, "" si no viene.
+
+    Existe para que el detalle del barrido -y con el, el paquete de la
+    Fase 4- no pueda tumbarse por un campo raro. naics_de ya no lanza, pero
+    aqui se envuelve igual porque esto corre dentro de una comprension de
+    lista, donde una excepcion se llevaria el resumen entero por delante.
+    """
+    try:
+        return str(filters.naics_de(opp) or "").strip()[:3]
+    except Exception:
+        return ""
+
+
 def limpiar_descarte() -> None:
     """Empieza un barrido nuevo con la cuenta a cero."""
     DESCARTE_POR_MOTIVO.clear()
+    DESCARTE_LOG.clear()
     _DESCARTE_VISTOS.clear()
 
 
-def _contar_descarte(motivos: list, notice_id: str = "") -> None:
+def _contar_descarte(motivos: list, notice_id: str = "",
+                     opp: dict | None = None) -> None:
     """
     Suma una unidad al motivo de veto que corresponda, UNA vez por aviso.
 
     Idempotente: llamarla dos veces con el mismo notice_id no suma la segunda.
+
+    Fase 4: si ademas llega `opp`, se guarda titulo, PSC, NAICS y motivo en
+    DESCARTE_LOG, que es lo que luego se empaqueta para el meta-analisis. El
+    parametro nuevo es opcional y las llamadas antiguas siguen haciendo
+    exactamente lo mismo de siempre.
     """
     nid = str(notice_id or "").strip()
     if nid and nid in _DESCARTE_VISTOS:
@@ -68,6 +105,18 @@ def _contar_descarte(motivos: list, notice_id: str = "") -> None:
                     or "Fecha limite" in m or "NAICS" in m:
                 DESCARTE_POR_MOTIVO[_clave] = \
                     DESCARTE_POR_MOTIVO.get(_clave, 0) + 1
+                if isinstance(opp, dict) and len(DESCARTE_LOG) < MAX_DESCARTE_LOG:
+                    try:
+                        naics = filters.naics_de(opp)
+                    except Exception:
+                        naics = ""
+                    DESCARTE_LOG.append({
+                        "notice_id": nid,
+                        "titulo": str(opp.get("title") or "").strip()[:120],
+                        "psc": str(opp.get("classificationCode") or "").strip()[:10],
+                        "naics": str(naics or "").strip()[:12],
+                        "motivo": str(m)[:90],
+                    })
             return
 
 
@@ -221,6 +270,12 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     'errores' para que main.py pueda avisarle al usuario.
     """
     limpiar_descarte()
+    # Fase 4: al inicio de cada ciclo se relee la calibracion que aprendio el
+    # barrido anterior (autocalibracion.refrescar). La lectura se cachea por
+    # mtime, asi que aqui es un stat(); de paso fija una foto unica, de modo
+    # que la primera y la ultima puntuacion de este barrido ven los mismos
+    # pesos aunque alguien escriba el fichero a mitad de camino.
+    autocalibracion.refrescar()
     dias = dias or config.DIAS_DE_VENTANA
     # Si alguien usa el scanner sin pasar por main(), las tablas pueden no
     # existir. Es idempotente y barato, asi que se asegura aqui.
@@ -236,6 +291,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         "notificadas": 0,
         "errores": [],
         "detalle_puntajes": [],
+        "descartes": [],
         "analisis": [],
         "cuota": {},
         "descarte_motivo": {},
@@ -275,7 +331,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         if p >= config.PUNTAJE_MINIMO:
             provisionales.append((p, opp))
         else:
-            _contar_descarte(_m, opp.get("noticeId", ""))
+            _contar_descarte(_m, opp.get("noticeId", ""), opp)
     provisionales.sort(key=lambda x: x[0], reverse=True)
 
     # Cuantas descripciones bajar. Antes era MAX_DESCRIPCIONES (40) en cada
@@ -327,7 +383,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         desc = descripciones.get(opp["noticeId"], "")
         puntos, motivos = filters.puntuar(opp, desc)
         if puntos < config.PUNTAJE_MINIMO:
-            _contar_descarte(motivos, opp.get("noticeId", ""))
+            _contar_descarte(motivos, opp.get("noticeId", ""), opp)
             continue
 
         # v5.2.0: resiliencia ante la caida del endpoint de descripciones.
@@ -347,7 +403,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
                 degradado = True
                 puntos, motivos = filters.puntuar(opp, desc)
                 if puntos < config.PUNTAJE_MINIMO_DEGRADADO:
-                    _contar_descarte(motivos, opp.get("noticeId", ""))
+                    _contar_descarte(motivos, opp.get("noticeId", ""), opp)
                     continue
 
         # El tope de USD se aplica AQUI, con los datos que ya tenemos, para no
@@ -393,10 +449,21 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     puntuadas = sin_repetir
 
     resumen["puntuales"] = len(puntuadas)
+    # PSC y NAICS viajan en el detalle: el meta-analisis de la Fase 4
+    # distingue un falso positivo COTS de un descarte justo mirando la
+    # CLASIFICACION, no solo el titulo, y sin esto no podria hacerlo.
     resumen["detalle_puntajes"] = [
-        {"puntaje": p, "titulo": o.get("title", "")[:70], "motivos": m[:4]}
+        {"puntaje": p, "titulo": o.get("title", "")[:70], "motivos": m[:4],
+         "psc": str(o.get("classificationCode") or "").strip(),
+         "naics": _naics_seguro(o)}
         for p, o, _, m, _d in puntuadas[:12]
     ]
+    # El log de descartes se publica aqui, despues de los dos bucles de
+    # puntuacion, que son los unicos sitios donde se descarta. Los retornos
+    # tempranos (sin candidatos, SAM caido) se quedan con la lista vacia,
+    # igual que hoy se quedan con descarte_motivo vacio: no hay nada que
+    # contar en esos caminos.
+    resumen["descartes"] = list(DESCARTE_LOG)
     _log(f"Pasan el filtro: {len(puntuadas)} (de {len(candidatas)})")
     for p, o, _, _, _d in puntuadas[:8]:
         _log(f"   [{p:>3}] {o.get('title', '')[:78]}")
