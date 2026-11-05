@@ -31,6 +31,30 @@ Confundirlos produce el fallo clasico: tres reintentos contra un modelo sin
 cuota, 2+4+8 = 14 segundos de espera, y luego el mismo 429. Catorce segundos por
 aviso, en un barrido que va por la lista de Telegram.
 
+Y DENTRO DEL 429 HAY DOS TOPES DISTINTOS, QUE ES LO ULTIMO QUE NO SE SEPARABA.
+
+El repo ya lo sabia en otra parte: cual_es_el_limite.py pregunta al mensaje de
+Google si dice "per minute" o si dice "per day", y el diagnostico que imprime
+es literal:
+
+    "es un tope POR MINUTO -> se arregla bajando el ritmo, no cambiando de plan"
+    "es un tope POR DIA    -> ninguna optimizacion de codigo lo quita"
+
+Esa misma division es la que aqui decide si se duerme o no (ver
+es_limite_por_minuto):
+
+    por minuto -> ES RITMO. Bajar el ritmo un rato es justamente la cura, y
+                  esperar 2/4/8 ES bajar el ritmo. Este es el UNICO 429 que se
+                  reintenta, con la misma escala y los mismos tres intentos
+                  que el 503.
+    por dia    -> ES CUOTA. La espera solo retrasa el mismo 429, asi que se
+                  cambia de modelo sin dormir, como siempre y con razon.
+
+Sin senal explicita en el mensaje el caso por defecto es el DE SIEMPRE:
+cambiar de modelo sin dormir. No es una omision, es el comportamiento que
+midieron y fijaron las pruebas de este repo, y el que cuesta cero segundos
+el dia que la cuota diaria se acaba de verdad.
+
 LA ESPERA
 
 2s, 4s, 8s. Es la escala del encargo y coincide con la que ya usa SAM.gov, que
@@ -63,6 +87,7 @@ depender de una configuracion que otro dia alguien cambia y nadie comprueba.
 """
 import logging
 import os
+import re
 import time
 
 import config
@@ -159,12 +184,75 @@ def clasificar(exc: BaseException) -> str:
     return "otro"
 
 
+# ------------------------------------------------------- TIPO DE TOPE DEL 429
+# Dos 429 distintos, una sola pregunta, y la respuesta cambia la politica de
+# reintentos. Ver la cabecera del modulo.
+#
+# Se mira el texto del error porque es donde Google escribe el nombre del
+# limite: GenerateContentRequestsPerMinute, GenerateContentTokensPerMinute,
+# o bien "per day" / "current quota" cuando el tope es diario.
+#
+# La tolerancia a CamelCase y a sin-espacios no es capricho: Google escribe el
+# nombre del limite pegado ("...RequestsPerMinute"), y pasado a minusculas
+# queda "generatecontentrequestsperminute", que contiene "perminute" sin
+# separador. Por eso los separadores son opcionales ([\s_\-]* con asterisco):
+# cubre "per minute", "per_minute", "per-minute" y "PerMinute" a la vez.
+_RE_429_RITMO = re.compile(
+    r"per[\s_\-]*minute"
+    r"|requests[\s_\-]*per[\s_\-]*minute"
+    r"|tokens[\s_\-]*per[\s_\-]*minute"
+    r"|rate[\s_\-]*limit"
+    r"|too[\s_\-]*many[\s_\-]*requests"
+    r"|\brpm\b|\btpm\b",
+    re.IGNORECASE)
+
+
+def es_limite_por_minuto(exc: BaseException) -> bool:
+    """
+    True si el 429 es de RITMO (tope por minuto) y no de cuota diaria.
+
+    Es la misma distincion que ya usa cual_es_el_limite.py, que es la
+    herramienta de este repo para saber por que se cayo la cuota, y con el
+    mismo criterio: si el mensaje habla de minutos, esperar arregla; si no,
+    esperar solo retrasa.
+
+    False tambien cuando no hay mensaje (o no se puede leer), que es el caso
+    por defecto: sin evidencia de que sea ritmo, se mantiene el de siempre,
+    cambiar de modelo sin dormir. Un falso negativo cuesta un salto de
+    modelo; un falso positivo cuesta 14 segundos por aviso.
+    """
+    try:
+        texto = str(exc)
+    except Exception:
+        return False
+    if not texto:
+        return False
+    return bool(_RE_429_RITMO.search(texto))
+
+
 # ------------------------------------------------------------------ LOGS
 def _log_reintento(contrato: str, intento: int, espera: float) -> None:
     log.warning(
         "%s [WARNING] Error 503 detectado en Solicitud [%s]. Aplicando "
         "backoff exponencial. Intento %s/%s.", _marca(), contrato, intento,
         MAX_INTENTOS)
+
+
+def _log_reintento_429(contrato: str, intento: int, espera: float,
+                        max_intentos: int) -> None:
+    """
+    El mismo escalon de backoff, pero para el 429 de tope POR MINUTO.
+
+    Va en una funcion aparte y no se reutiliza _log_reintento porque ese
+    mensaje dice "Error 503", y aqui no hay 503. Quien lee el log tiene que
+    distinguir si se espero por saturacion o por ritmo, que son dos problemas
+    con dos soluciones distintas: una se cura cambiando de modelo y la otra
+    bajandole el ritmo.
+    """
+    log.warning(
+        "%s [WARNING] Error 429 (tope por minuto) detectado en Solicitud [%s]. "
+        "Aplicando backoff exponencial. Intento %s/%s.", _marca(), contrato,
+        intento, max_intentos)
 
 
 def _log_respaldo(contrato: str, modelo: str) -> None:
@@ -227,11 +315,15 @@ def llamar(prompt: str, contrato: str = "", *,
     503 y "red" se reintentan con 2/4/8, porque son transitorios y el mismo
     modelo puede responder un momento despues.
 
-    429, 400 y 404 NO se reintentan. Un 429 es cuota de ese modelo para ese dia:
-    repetirlo no puede funcionar. Un 404 es que el modelo no existe. Un 400 es
-    que la peticion esta mal y da igual cuantas veces se mande.
+    Un 429 se reintenta SOLO si el mensaje dice que el tope es por minuto
+    (es_limite_por_minuto): ahi esperar es bajar el ritmo, que es la cura.
+    Si el tope es diario, o el mensaje no lo dice, NO se reintenta: la cuota
+    es de ese modelo para ese dia, repetirlo no puede funcionar.
 
-    En los tres casos se va al de respaldo de inmediato, que es lo que evita
+    Un 404 es que el modelo no existe. Un 400 es que la peticion esta mal y da
+    igual cuantas veces se mande.
+
+    En esos casos se va al de respaldo de inmediato, que es lo que evita
     perder catorce segundos por aviso.
     """
     dormir = dormir or time.sleep
@@ -266,6 +358,9 @@ def llamar(prompt: str, contrato: str = "", *,
         cola.insert(0, principal)
 
     ultima = None
+    # Igual que en consultar_gemini_con_fallback: un SOLO bloque de backoff por
+    # llamada, en el primer modelo que aguante el 429 de ritmo. Ver ahi.
+    indice_dormido_429 = None
     for indice, modelo_prueba in enumerate(cola):
         etapa = "principal" if modelo_prueba == principal else "cadena"
         if etapa == "cadena" and modelo_prueba == suplente:
@@ -288,8 +383,34 @@ def llamar(prompt: str, contrato: str = "", *,
             except Exception as e:
                 ultima = e
                 clase = clasificar(e)
-                # Cuota, peticion invalida o modelo inexistente: insistir es
-                # perder el tiempo. Se registra y se pasa al respaldo.
+                # El UNICO 429 que si tiene remedio: tope por minuto. Esperar
+                # 2/4/8 ES bajar el ritmo, que es lo que pide el problema, y
+                # se insiste con el MISMO modelo. Ver es_limite_por_minuto.
+                if (clase == "429" and es_limite_por_minuto(e)
+                        and indice_dormido_429 in (None, indice)
+                        and intento < max_intentos):
+                    if indice_dormido_429 is None:
+                        indice_dormido_429 = indice
+                    espera = espera_base * (2 ** (intento - 1))
+                    _log_reintento_429(contrato, intento, espera,
+                                       max_intentos)
+                    try:
+                        dormir(espera)
+                    except Exception:
+                        pass
+                    continue
+                if clase == "429" and es_limite_por_minuto(e):
+                    # Se agoto el backoff de este modelo, o ya se duerme en
+                    # otro. En cualquiera de los dos hace falta pasar al
+                    # siguiente, y "intento" es lo que de verdad ocurrio aqui:
+                    # tres en el que durmio y uno en el que no.
+                    log.warning(
+                        "%s [WARNING] Solicitud [%s]: 429 (tope por minuto) "
+                        "en [%s] tras %s intento(s). Cambio de modelo.",
+                        _marca(), contrato, modelo_prueba, intento)
+                    break
+                # Cuota diaria, peticion invalida o modelo inexistente: insistir
+                # es perder el tiempo. Se registra y se pasa al respaldo.
                 if clase in ("429", "400", "404", "401"):
                     log.warning(
                         "%s [WARNING] Solicitud [%s]: %s en [%s] (intento "
@@ -394,8 +515,11 @@ def consultar_gemini_con_fallback(prompt: str, contrato: str = "", *,
     Aqui vive toda la politica y en ningun otro sitio:
 
       · 503 y red -> reintento con backoff 2/4/8, y luego al siguiente modelo
-      · 429       -> sin reintentos, directo al siguiente. La cuota es por
-                    modelo y por dia; insistir no puede funcionar
+      · 429       -> dos casos. Tope POR MINUTO: backoff 2/4/8 sobre el MISMO
+                    modelo, hasta max_intentos, porque bajar el ritmo lo
+                    arregla. Tope DIARIO o sin senal: directo al siguiente,
+                    sin dormir, que es como siempre: la cuota es por modelo y
+                    por dia e insistir no puede funcionar
       · 400       -> un reintento del MISMO modelo sin thinking_budget, que es el
                     fallo mas frecuente y el mas facil de arreglar. UNA vez
                     sola, o seria un bucle infinito
@@ -429,6 +553,13 @@ def consultar_gemini_con_fallback(prompt: str, contrato: str = "", *,
 
     ultimo = None
     indice = 0
+    # Un SOLO bloque de backoff por llamada, y en el primero que aguanta el 429
+    # de ritmo. El encargo pide tres intentos con 2/4/8 "antes de ceder" y
+    # despues "una pasada rapida con un modelo secundario": aplicar catorce
+    # segundos a cada uno de los seis modelos de la cadena darian 84s y no una
+    # pasada rapida. Si el tope es de cuenta, los demas modelos veran el mismo
+    # 429 al instante.
+    indice_dormido_429 = None
     while indice < len(cola):
         modelo = cola[indice]
         sin_pensar = False
@@ -480,6 +611,40 @@ def consultar_gemini_con_fallback(prompt: str, contrato: str = "", *,
                         and not sin_pensar and thinking_budget is None:
                     sin_pensar = True
                     continue
+                # 429 de tope POR MINUTO: el unico 429 que una espera puede
+                # arreglar, porque el tope se mide por llamadas y no por dia.
+                # Mismo escalon 2/4/8, mismos intentos y el MISMO modelo. Ver
+                # es_limite_por_minuto antes de tocar esto.
+                if clase == "429" and es_limite_por_minuto(e):
+                    # (None, indice) significa: todavia no se ha dormido por
+                    # 429 en esta llamada, o se esta dormiendo en el mismo
+                    # modelo. En cuanto se pasa al siguiente, cede.
+                    if (indice_dormido_429 in (None, indice)
+                            and intento < max_intentos):
+                        if indice_dormido_429 is None:
+                            indice_dormido_429 = indice
+                        # El cortacircuito se mira ANTES de dormir, igual que
+                        # en el 503: si otro aviso ya confirmo la cuota, este
+                        # no gasta ni un segundo mas durmiendo.
+                        if continuar is not None and not continuar():
+                            raise ErrorDeCadena(
+                                "cortacircuito antes de la espera del 429",
+                                eventos, ultimo)
+                        espera = ESPERA_BASE * (2 ** (intento - 1))
+                        _log_reintento_429(contrato, intento, espera,
+                                           max_intentos)
+                        try:
+                            esperar(espera)
+                        except Exception:
+                            pass
+                        continue
+                    if indice + 1 < len(cola):
+                        log.warning(
+                            "%s [WARNING] Solicitud [%s]: 429 (tope por "
+                            "minuto) en [%s] tras %s intento(s). Cambio a [%s].",
+                            _marca(), contrato, modelo, intento,
+                            cola[indice + 1])
+                    break
                 if clase in ("429", "400", "404"):
                     if indice + 1 < len(cola):
                         log.warning(
