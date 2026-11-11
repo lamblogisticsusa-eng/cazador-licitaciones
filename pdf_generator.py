@@ -7,7 +7,8 @@ Una orden de compra que emite L.A.M.B. Logistics LLC a un distribuidor. Es
 el documento que se le manda al proveedor para pedirle la mercancia que
 despues se revende al gobierno de EE.UU.
 
-Lo emite la empresa, lo firma su CEO, y va con los datos de L.A.M.B. No
+Lo emite la empresa, lo firma su Managing Member, y va con los datos de
+L.A.M.B. No
 pretende ser ningun documento oficial: no lleva sello, ni emblema, ni membrete
 gubernamental, ni numeracion de agencia. El numero de PO lo genera L.A.M.B.
 con su propio prefijo (LAMB-). Es una orden de compra privada, que es
@@ -23,7 +24,7 @@ REQUISITOS QUE PIDIO EL USUARIO
   Cuerpo                      : numero de PO, referencia SAM.gov, tabla con
                                 descripcion tecnica, cantidades,
                                 especificaciones e instrucciones de despacho
-  Pie de pagina                : Bastian Cordero, CEO
+  Pie de pagina                : Bastian Cordero, Managing Member
 
 SOBRE EL LOGO
 
@@ -81,7 +82,11 @@ log = logging.getLogger("kyomoto.pdf")
 EMPRESA = "L.A.M.B. Logistics LLC"
 DIRECCION = ["1209 Mountain Rd. PL. NE, Ste. H", "Albuquerque, NM 87110"]
 FIRMANTE = "Bastian Cordero"
-CARGO_FIRMANTE = "CEO"
+# Un LLC no tiene CEO: legalmente quien representa a la empresa es su
+# Managing Member. El cargo sale en el pie de todos los PDF y tiene que
+# coincidir con el de los RFQ que salen por Telegram, o el proveedor ve dos
+# cargos distintos detras del mismo nombre.
+CARGO_FIRMANTE = "Managing Member"
 EMAIL = "lamblogisticsusa@gmail.com"
 TELEFONO = "+1 (702) 516-6086"
 

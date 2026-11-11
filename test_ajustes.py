@@ -201,7 +201,7 @@ check("Con la direccion pedida",
                          "Albuquerque, NM 87110"],
       f"-> {pdfg.DIRECCION}")
 check("Y el firmante", pdfg.FIRMANTE == "Bastian Cordero"
-      and pdfg.CARGO_FIRMANTE == "CEO")
+      and pdfg.CARGO_FIRMANTE == "Managing Member")
 
 # --- El numero de PO: correlativo y persistente -------------------------
 print()
@@ -291,7 +291,7 @@ if _txt:
         ("Cabecera de total", "TOTAL (USD)"),
         ("Despacho y cumplimiento", "LOGISTICS"),
         ("Firma", "Bastian Cordero"),
-        ("Cargo", "CEO"),
+        ("Cargo", "Managing Member"),
         ("Modelo en la descripcion", "MIL-STD-1660"),
     ]
     for etiqueta, busca in CONTENIDO:
