@@ -142,6 +142,27 @@ check("El PRIMER <pre> sigue siendo el resumen financiero",
 check("El de escenarios sigue en el medio",
       "Escenario" in pres[1], "-> %r" % pres[1][:60])
 
+print()
+print("  Aislamiento total del bot dentro del <pre>:")
+
+check("El </pre> cierra justo detras de la firma corporativa",
+      "EIN: 32-0868469\n</pre>" in h, "-> no cierra ahi")
+check("El rotulo de la seccion queda FUERA del <pre>",
+      h.index("RFQ Listo para Enviar") < h.index("<pre>\nSubject:"),
+      "-> esta dentro")
+for frase_bot in ("Kyomoto", "Amo, oportunidad", "(˶", "antes de escribir",
+                  "Dirigido al distribuidor", "pasandote la info",
+                  "Distribuidores a verificar"):
+    check("No se cuela dentro del <pre>: %r" % frase_bot,
+          frase_bot not in pres[-1], "-> se colo")
+check("Dentro solo hay texto de correo, plano y sin etiquetas",
+      all(x not in pres[-1] for x in ("<b>", "<i>", "<a href", "<code>")),
+      "-> hay etiqueta dentro")
+check("Y el bloque empieza en Subject y acaba en el EIN",
+      pres[-1].lstrip("\n").startswith("Subject:")
+      and pres[-1].rstrip().endswith("EIN: 32-0868469"),
+      "-> %r ... %r" % (pres[-1][:30], pres[-1][-30:]))
+
 
 # =====================================================================
 # 2) EL CORREO TIENE LO QUE SE PIDIÓ
@@ -174,24 +195,37 @@ check("Modelo exacto en Part / Model",
       "  Part / Model: S0594DU0500-S1" in cuerpo, "-> no esta")
 
 print()
-print("  Los cinco pedidos:")
-check("1) Precio unitario y total mayorista",
-      "Unit price and total wholesale price for the required quantity."
-      in cuerpo, "-> no esta")
-check("2) Disponibilidad y lead time",
-      "Stock availability and estimated lead time." in cuerpo,
+print("  Los cinco pedidos, en viñetas y en ingles comercial:")
+check("1) Costo unitario y total mayorista, con descuentos por volumen",
+      "Unit and total wholesale pricing for the quantity above" in plano
+      and "volume or contract discounts that may apply" in plano,
       "-> no esta")
-check("3) Flete terrestre FOB Destination al estado de entrega",
-      "Ground shipping cost, FOB Destination, to Norfolk, VA (South)."
-      in cuerpo, "-> no esta")
+check("2) Disponibilidad en stock y lead time hasta el envio",
+      "Current stock availability and the estimated lead time from order "
+      "confirmation to shipment" in plano, "-> no esta")
+check("3) Flete terrestre detallado bajo FOB Destination al destino",
+      "Itemized ground freight charges under FOB Destination to "
+      "Norfolk, VA (South)" in plano, "-> no esta")
 check("   Y pidiendo el envio sin costo por volumen",
-      "if freight is waived at this volume." in cuerpo, "-> no esta")
+      "if freight is waived at this volume" in plano, "-> no esta")
 check("4) CoC o trazabilidad OEM para pieza tecnica o militar",
       "Certificate of Conformity (CoC)" in plano
       and "OEM traceability" in plano, "-> no esta")
 check("5) Los dos dias antes del cierre para presentar la oferta federal",
       "at least two (2) days before the closing date above" in plano
       and "federal offer on time" in plano, "-> no esta")
+
+check("La carta de apertura explica el encargo con tono formal",
+      "We are requesting a formal quotation for the item detailed below "
+      "in support of a U.S. federal solicitation" in plano, "-> no esta")
+check("La lista de requerimientos va en viñetas, no numerada",
+      "  • Unit and total wholesale pricing" in cuerpo
+      and not re.search(r"^\s*1\. Unit", cuerpo, re.M), "-> no esta")
+check("Y con sangria en las lineas que siguen",
+      "\n    any volume or contract discounts" in cuerpo, "-> no esta")
+check("Despedida formal antes de la firma",
+      "Thank you for your consideration." in cuerpo
+      and "Respectfully," in cuerpo, "-> no esta")
 
 print()
 print("  La firma, tal cual la pidio el cliente:")
@@ -256,7 +290,8 @@ check("Ni una palabra en espanol dentro del correo", not malas,
 check("Los rotulos son ingleses",
       all(x in plano for x in ("Subject:", "Solicitation:", "Item:",
                                "Quantity:", "Closing:", "Ship-To:",
-                               "Please quote:", "Thank you,")))
+                               "please provide the following:",
+                               "Thank you for your consideration.")))
 check("La nota en espanol queda FUERA del <pre>",
       "confirma que vende el producto antes de escribir" not in cuerpo)
 
@@ -382,9 +417,49 @@ check("Sin candidatos, sin fecha y sin destino no se inventa nada",
       "-> se invento algo")
 
 print()
-print("  Troceo: si un dia crece, se parte y no se pierde.")
-trozos = tn._trocear(h)
-check("Se trocea sin romper el <pre> del RFQ",
+print("  Troceo: si un dia crece, el bloque viaja ENTERO.")
+
+# Mensaje sintetico afinado para que el corte de 4064 caiga JUSTO dentro
+# del <pre>: sin la regla de _trocear, el primer trozo se quedaria con el
+# bloque abierto y el segundo llegaria con un </pre> huerfano que
+# _sanear_html escapa como texto literal "&lt;/pre&gt;", que es el correo
+# impreso con las dos barras a la vista.
+sintetico = ("relleno para pasar el limite de troceo " * 70).strip()
+sintetico += "\n<pre>\n"
+sintetico += "\n".join(
+    "  linea %02d del correo que no se debe partir" % n for n in range(40))
+sintetico += "\n</pre>"
+check("El sintetico pasa de 4096 (si no, no prueba nada)",
+      len(sintetico) > 4096, "-> %d" % len(sintetico))
+trozos_s = tn._trocear(sintetico)
+con_bloque = [t for t in trozos_s if "<pre>" in t]
+check("El corte caeria dentro del bloque y aun asi no se parte",
+      len(con_bloque) == 1 and con_bloque[0].count("<pre>") == 1
+      and con_bloque[0].count("</pre>") == 1
+      and "<pre>\n  linea 00" in con_bloque[0]
+      and con_bloque[0].rstrip().endswith("</pre>"),
+      "-> %d trozos con <pre>" % len(con_bloque))
+check("Ningun trozo escapa un cierre de etiqueta al saneado",
+      not any("&lt;/" in tn._sanear_html(t) for t in trozos_s),
+      "-> algun trozo sale roto")
+check("Y todos siguen cabiendo",
+      all(len(t) <= 4096 for t in trozos_s),
+      "-> %s" % [len(t) for t in trozos_s])
+
+print()
+print("  Y con la ficha entera, rellenada hasta pasarse:")
+relleno = ("Relleno para pasar el limite de Telegram. " * 120).strip()
+check("El relleno pasa de 4096", len(relleno) > 4096, "-> %d" % len(relleno))
+trozos = tn._trocear(relleno + "\n" + h)
+con_rfq = [t for t in trozos if "Subject: RFQ" in t]
+check("El RFQ viaja en UN solo trozo", len(con_rfq) == 1,
+      "-> %d trozos con el correo" % len(con_rfq))
+if con_rfq:
+    check("Con el </pre> justo detras del EIN",
+          "EIN: 32-0868469\n</pre>" in con_rfq[0], "-> no cierra ahi")
+    check("Y el rotulo de la seccion no se queda huerfano dentro",
+          "RFQ Listo para Enviar" not in con_rfq[0], "-> se colo")
+check("Se trocea sin romper ningun <pre> del mensaje",
       sum(t.count("<pre>") for t in trozos) == h.count("<pre>")
       and sum(t.count("</pre>") for t in trozos) == h.count("</pre>"),
       "-> se perdio un bloque")

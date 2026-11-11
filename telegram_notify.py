@@ -89,6 +89,21 @@ def _trocear(texto: str, limite: int = LIMITE_TELEGRAM - RESERVA) -> list[str]:
         return [texto]
     trozos, actual = [], ""
     for linea in texto.split("\n"):
+        # Un bloque <pre>...</pre> se mueve ENTERO. Si se parte por la mitad,
+        # el primer trozo se cierra con un </pre> sintetizado por
+        # _sanear_html, el segundo arranca con las ultimas lineas del bloque
+        # y el </pre> de cierre llega escapado como texto literal
+        # "&lt;/pre&gt;": dentro va el correo del RFQ, que se imprimiria con
+        # las dos barras a la vista. Por eso, cuando la linea abre un <pre>
+        # y el trozo actual esta cerrado, se vacia ANTES de acumular: el
+        # bloque arranca entero en el trozo siguiente.
+        #
+        # Solo se adelanta el corte, nunca se retrasa, asi que ningun trozo
+        # crece por encima del limite.
+        if "<pre>" in linea and actual and \
+                actual.count("<pre>") == actual.count("</pre>"):
+            trozos.append(actual)
+            actual = ""
         while len(linea) > limite:
             corte = linea.rfind(" ", 0, limite)
             if corte <= 0:
@@ -805,8 +820,14 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     hay ninguna llamada a Gemini por detras, y por eso la firma, el EIN y las
     cantidades no pueden salir inventados por un modelo.
 
-    Todo el cuerpo va dentro de <pre> y como texto plano, para que lo que se
-    copia sea el correo entero y no un monton de etiquetas HTML pegadas.
+    Todo el correo, desde "Subject:" hasta "EIN: 32-0868469", va DENTRO de
+    <pre> y como texto plano, para que lo que se copia sea el correo entero
+    y no un monton de etiquetas HTML pegadas. FUERA del <pre> solo puede
+    haber cosas del bot: el rotulo de la seccion y la nota de verificacion.
+    Ni el cierre de Kyomoto, ni la mascota, ni ninguna advertencia se
+    cuelan dentro, y el </pre> cierra justo detras de la firma. _trocear
+    mueve el bloque entero, asi que eso se cumple aunque el mensaje pase de
+    4096 y haya que trocearlo.
 
     Nunca se pinta un campo vacio ni una linea de relleno: si falta la fecha
     se omite el cierre, si falta el destino no se nombra destino ninguno, y
@@ -855,7 +876,13 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     cuerpo.append("")
     cuerpo.append(saludo)
     cuerpo.append("")
-    cuerpo.append("Requesting a quotation for a U.S. federal solicitation:")
+    # La carta. Un "Requesting a quotation" a secas no distingue a una
+    # empresa de otra, y el distribuidor recibe decenas: el parrafo de
+    # apertura dice que es, para que y contra que licitacion, en el tono
+    # con el que se escribe un RFQ entre empresas en EE.UU.
+    cuerpo.extend(textwrap.wrap(
+        "We are requesting a formal quotation for the item detailed below "
+        "in support of a U.S. federal solicitation.", width=72))
     cuerpo.append("")
 
     # --- Los datos, en columna --------------------------------------------
@@ -877,40 +904,56 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     campo("Closing:", fecha)
     campo("Ship-To:", ship_to)
 
-    # --- Lo que se pide ----------------------------------------------------
+    # --- Los requerimientos, en viñetas ------------------------------------
+    # Viñetas y no numeracion: el proveedor tiene que poder responder punto
+    # por punto, y una lista numerada se lee como un orden de ejecucion.
+    # El texto va envuelto a 72 columnas con la sangria puesta por
+    # textwrap, porque dentro de <pre> no hay wrap y una linea de 130
+    # caracteres obliga a desplazar en movil para leerla entera.
     if sitio:
         destino_txt = ship_to
     else:
         destino_txt = "the delivery location stated in the solicitation"
     cuerpo.append("")
-    cuerpo.append("Please quote:")
-    cuerpo.append("1. Unit price and total wholesale price for the required "
-                  "quantity.")
-    cuerpo.append("2. Stock availability and estimated lead time.")
     cuerpo.extend(textwrap.wrap(
-        f"3. Ground shipping cost, FOB Destination, to {destino_txt}. "
-        "Please advise if freight is waived at this volume.",
-        width=72, subsequent_indent="   "))
-    cuerpo.extend(textwrap.wrap(
-        "4. Technical compliance, with a Certificate of Conformity (CoC) or "
-        "OEM traceability if this is a technical or military spare part.",
-        width=72, subsequent_indent="   "))
+        "To help us prepare our offer, please provide the following:",
+        width=72))
+    cuerpo.append("")
+    for punto in (
+            "Unit and total wholesale pricing for the quantity above, "
+            "including any volume or contract discounts that may apply.",
+            "Current stock availability and the estimated lead time from "
+            "order confirmation to shipment.",
+            "Itemized ground freight charges under FOB Destination to "
+            f"{destino_txt}. Please advise if freight is waived at this "
+            "volume.",
+            "Confirmation of technical compliance, supported by a "
+            "Certificate of Conformity (CoC) or OEM traceability for "
+            "technical or military spare parts."):
+        cuerpo.extend(textwrap.wrap(punto, width=72,
+                                    initial_indent="  • ",
+                                    subsequent_indent="    "))
     cuerpo.append("")
     # La frase de los dos dias: con la fecha si la hay (apunta a la linea de
     # arriba), sin ella si no, porque decir "la fecha de cierre" sin poder
     # decirla deja al distribuidor sin el dato que le piden.
     if fecha:
-        frase = ("Please send your quotation at least two (2) days before "
-                 "the closing date above, so we can submit our federal "
-                 "offer on time.")
-    else:
-        frase = ("Please send your quotation at least two (2) days before "
-                 "the solicitation closing date, so we can submit our "
+        frase = ("Please submit your quotation at least two (2) days before "
+                 "the closing date above so that we may finalize our "
                  "federal offer on time.")
+    else:
+        frase = ("Please submit your quotation at least two (2) days before "
+                 "the solicitation closing date so that we may finalize "
+                 "our federal offer on time.")
     cuerpo.extend(textwrap.wrap(frase, width=72))
     cuerpo.append("")
-    cuerpo.append("Thank you,")
+    cuerpo.append("Thank you for your consideration.")
     cuerpo.append("")
+    cuerpo.append("Respectfully,")
+    cuerpo.append("")
+    # La firma va la ULTIMA: el </pre> cierra justo detras del EIN, que es
+    # lo que hace que el bloque sea un recorte limpio y no arrastre nada
+    # del bot al pegarlo.
     cuerpo.extend(FIRMA_RFQ.split("\n"))
 
     # --- Se pinta ----------------------------------------------------------
