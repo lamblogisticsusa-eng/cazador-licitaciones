@@ -906,6 +906,11 @@ def analizar(
         "contacto": _contacto(opp),
         "ui_link": opp.get("uiLink", ""),
         "title": opp.get("title", ""),
+        # Los anexos, por su nombre exacto. resourceLinks viene ya en la
+        # respuesta del search, asi que esto no cuesta una llamada, y es lo
+        # que le permite al RFQ apuntar al documento por el nombre con el
+        # que figura en SAM.gov en vez de hablar de "el adjunto".
+        "anexos": _anexos(opp),
     }
 
 
@@ -1130,3 +1135,43 @@ def _contacto(opp: dict) -> str:
                 partes.append(p["phone"])
             return " | ".join(str(x) for x in partes if x)
     return "N/A"
+
+
+def _anexos(opp: dict) -> list[str]:
+    """
+    Los nombres de los documentos anexos, tal cual figuran en SAM.gov.
+
+    resourceLinks es "Direct URL to download attachments in the
+    opportunity", segun la spec oficial de GSA, y viaja YA en la respuesta
+    del search que se pide para el barrido: leerlo no cuesta ni una llamada
+    de red. Lo que no cuesta nada es precisamente lo que faltaba, y sin el
+    nombre del anexo no hay manera de apuntar a el, que es justamente donde
+    va el desglose de un lote consolidado.
+
+    Se delega en adjuntos.resource_links, que es quien ya sabe que
+    resourceLinks ha venido como lista de cadenas o como lista de objetos
+    con "href" o "rel", y que a veces trae rutas relativas. Duplicar esa
+    lectura aqui seria tener dos versiones de la misma logica.
+
+    Devuelve el nombre del fichero y no la URL entera: lo que se pinta es
+    una referencia que el distribuidor va a buscar, y una URL firmada deja
+    de servir en cuanto se manda el correo.
+
+    Nunca lanza: si adjuntos no se puede importar o el aviso viene sin
+    anexos, no hay nada que nombrar, y eso no puede tumbar un analisis que
+    de todas formas ha salido bien.
+    """
+    try:
+        import adjuntos
+        urls = adjuntos.resource_links(opp)
+    except Exception:
+        return []
+    nombres: list[str] = []
+    for url in urls or []:
+        nombre = str(url or "").split("?")[0].rsplit("/", 1)[-1].strip()
+        if nombre and nombre not in nombres:
+            nombres.append(nombre)
+    # Diez es un tope de cortesia, no un limite de negocio: ningun RFQ pinta
+    # mas de dos, pero el analisis se guarda entero y un aviso con cuarenta
+    # adjuntos no tiene por que meter cuarenta rutas en el JSON.
+    return nombres[:10]

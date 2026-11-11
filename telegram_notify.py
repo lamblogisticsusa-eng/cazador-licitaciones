@@ -717,6 +717,55 @@ _RE_PARTE = re.compile(
     r"\b(?:P\s*/\s*N|PN|Part\s*(?:No\.?|Number))\s*(?:[:#]\s*|\s+)"
     r"([A-Za-z0-9][A-Za-z0-9._/-]{2,})", re.IGNORECASE)
 
+# Referencias a documentos anexos: "Attachment 0002", "Attachment IV",
+# "Annex B", "Exhibit 3", "Schedule A", "Addendum 2", "Statement of Work".
+# Exige SIEMPRE el numero, el numero romano o la letra: sin eso, un
+# "attachments are included" de camino legal en cualquier aviso de SAM.gov
+# pintaria una linea de anexo en un aviso que no tiene ninguno.
+_RE_ANEXO = re.compile(
+    r"\b(?:Attachment\s*(?:No\.?|#|:)?\s*(?:\d{1,4}|[IVXLC]{1,7})"
+    r"|Annex\s+[A-Z0-9]"
+    r"|Exhibit\s+[A-Z0-9]"
+    r"|Schedule\s+[A-Z0-9]"
+    r"|Addendum\s+\d{1,2}"
+    r"|Statement\s+of\s+Work)\b", re.IGNORECASE)
+
+# "SOW" aparte y SENSIBLE A MAYUSCULAS: en minusculas "sow" es el verbo
+# sembrar, y una licitacion de repuestos puede hablar de semillas.
+_RE_SOW = re.compile(r"\bSOW\b")
+
+# Palabras que delatan texto en castellano en un campo que debia venir en
+# ingles de SAM.gov. Es la MISMA guarda que pdf_generator.texto_en_espanol y
+# con el mismo umbral de DOS aciertos distintos: un texto ingles de material
+# industrial puede traer una palabra de paso, y tirar por castellano un
+# campo que es ingles seria peor que el problema que se arregla.
+#
+# NO se importa pdf_generator: arrastra reportlab a un aviso de Telegram que
+# tiene que salir rapido. Igual que con _RE_NSN, se replica el patron aqui.
+#
+# Las voces tecnicas de la segunda mitad no estan de adorno. El prompt le
+# pide a Gemini "producto en espanol claro" y de la especificacion tecnica
+# no dice nada, asi que esa sale a veces en castellano, y los fixtures de
+# este propio repo lo demuestran:
+#
+#   "Acero fundido, sellos mecanicos"     -> con la lista corta, 0 aciertos
+#   "Dureza 60 HRC, acero <b>inox</b>"    -> y pasaban al correo
+_RE_ESPANOL = re.compile(
+    r"\b(de|del|la|el|los|las|un|una|y|o|para|que|como|"
+    r"cantidad|descripci[oó]n|especificaci[oó]n|suministro|entrega|"
+    r"pedido|requisitos?|pliegos?|lote|lotes|unidades?|env[ií]o|"
+    r"embalaje|garant[ií]a|cl[aá]usula|n[uú]mero|"
+    r"solicitud|cotizaci[oó]n|rodamientos?|expediente|licitaci[oó]n|"
+    r"adquisici[oó]n|protecci[oó]n|suministros?|"
+    r"acero|fundidos?|sellos?|mec[aá]nicos?|dureza|norma|empaque|militar|"
+    r"bater[ií]as?|arranque|v[aá]lvulas?|mangueras?|torniller[ií]a|"
+    r"soldadura|poleas?|engranajes?|frenos?|radiadores?|"
+    r"fabricantes?|certificados?|certificaci[oó]n|conformidad|calidad|"
+    r"inspecci[oó]n|dise[nñ]os?|clase|clases|"
+    r"productos?|piezas?|precios?|costos?|"
+    r"remisi[oó]n|expedici[oó]n|transporte|etiquetado|facturaci[oó]n|"
+    r"aceptaci[oó]n|compra)\b", re.IGNORECASE)
+
 # Firma del RFQ, tal cual la pidio el cliente. El EIN no es un secreto (va
 # en SAM.gov y en toda factura) y sin el el correo no identifica a la
 # empresa ante el distribuidor.
@@ -793,6 +842,145 @@ def _identificador_tecnico(a: dict) -> str:
     return str(a.get("modelo_especifico") or "").strip()
 
 
+def _en_espanol(bruto) -> bool:
+    """
+    True si el texto parece estar en castellano.
+
+    No es un traductor, es una puerta. El RFQ es un documento en ingles
+    comercial que va a un distribuidor de EE.UU.: si el campo que hay que
+    inyectar llega en espanol, NO se inyecta y el hueco se queda vacio,
+    igual que ya se hace con la fecha que no se pudo leer. Meter una
+    traduccion inventada seria peor que no meter nada, porque el mayorista
+    cotizaria contra un texto que nadie en L.A.M.B. escribio.
+
+    Umbral de DOS aciertos distintos, el mismo de
+    pdf_generator.texto_en_espanol y por el mismo motivo: un texto ingles
+    sobre material industrial trae palabras de paso ("Revision C", "Plan
+    A"), y con un solo acierto tirar un campo ingles seria peor que dejar
+    pasar un castellano.
+    """
+    limpio = " ".join(re.sub(r"<[^>]+>", " ", str(bruto or "")).split())
+    if not limpio:
+        return False
+    return len(set(m.group(0).lower()
+                   for m in _RE_ESPANOL.finditer(limpio))) >= 2
+
+
+# Cuantos entran en una sola linea del correo. Tres, y no mas: un lote de
+# veinte numeros de parte no se cotiza por un mensaje de Telegram, se
+# cotiza contra su anexo, y si quedan mas de tres es justamente porque hay
+# un anexo que mostrar en la linea de al lado.
+_MAX_IDENTIFICADORES = 3
+_MAX_ANEXOS = 2
+
+
+def _identificadores_tecnicos(a: dict) -> list[str]:
+    """
+    TODOS los NSN y numeros de parte escritos en el aviso, no solo el primero.
+
+    _identificador_tecnico devuelve el mejor UNO. Un aviso de consumibles o
+    de repuestos trae una LISTA: un NSN y un P/N por linea, a veces tres o
+    cuatro en la misma especificacion, y quedarse con el primero hace que
+    el mayorista cotice la pieza A sin enterarse de que se piden B y C.
+
+    Orden y reglas, iguales que en la version singular:
+
+      - NSN antes que P/N. El NSN es el identificador que el proveedor
+        busca sin preguntar nada, y por eso se recorre primero.
+      - Cada codigo aparece UNA vez aunque este escrito en dos campos: el
+        mismo "P/N AB-12345" en la especificacion y en el titulo es la
+        misma pieza, y repetirlo no informa nada.
+      - Si no hay ni NSN ni P/N, el modelo tal cual. Sin etiqueta
+        inventada.
+      - NUNCA se mira "contacto". Ese campo trae el correo del oficial de
+        contratacion: de ahi saldria un "@" que tira los tests de la ficha
+        y, sobre todo, un destinatario que no es el distribuidor.
+
+    Se quita la puntuacion FINAL del codigo, que _RE_PARTE se come porque su
+    clase de caracteres incluye el punto: "P/N AB-12345." escrito a final
+    de frase entra entero, y en el correo eso se lee "P/N AB-12345., P/N
+    CD-67890.", que es una referencia que el mayorista no puede buscar tal
+    cual. Solo se tocan los ultimos caracteres: un punto interno sigue
+    siendo parte del codigo ("MIL-PRF-8171." pierde el punto, "AB.12345"
+    lo conserva).
+
+    INVARIANTE, congelado por test: el primer elemento que devuelve esta
+    funcion es lo que devuelve _identificador_tecnico, visto desde el mismo
+    lado de la puntuacion.
+    """
+    textos = [str(a.get(c) or "")
+              for c in ("especificacion_tecnica_clave", "modelo_especifico",
+                        "title")]
+    salida: list[str] = []
+    vistos: set[str] = set()
+
+    for patron, etiqueta in ((_RE_NSN, "NSN"), (_RE_PARTE, "P/N")):
+        for texto in textos:
+            for m in patron.finditer(texto):
+                token = f"{etiqueta} {m.group(1)}".rstrip(" .,;:")
+                if token and token.lower() not in vistos:
+                    vistos.add(token.lower())
+                    salida.append(token)
+
+    if not salida:
+        modelo = str(a.get("modelo_especifico") or "").strip()
+        if modelo:
+            salida.append(modelo)
+    return salida
+
+
+def _referencias_anexo(a: dict) -> list[str]:
+    """
+    Las referencias EXACTAS a los documentos anexos de la licitacion.
+
+    Un lote consolidado no se describe en la tabla: la tabla dice "1 LOT" y
+    el desglose entero esta en el anexo. Lo que el mayorista necesita no es
+    una parrafada sobre "el documento adjunto", es el nombre con el que
+    figura en SAM.gov para pedirlo o para buscarlo. Por eso se devuelve el
+    texto tal cual, sin traducir y sin reinterpretar: "Attachment 0002",
+    "Attachment IV", "SOW", "W519TC27QA012_Attachment0002.pdf".
+
+    Dos fuentes, y ninguna cuesta una llamada de red:
+
+      1. a["anexos"], los nombres de resourceLinks tal como los pone
+         gemini_analyzer en el propio analisis. resourceLinks viaja ya en
+         la respuesta del search, que se pide para el barrido.
+      2. Las referencias escritas en los campos oficiales del aviso, que
+         es por donde llegan las licitaciones que hablan del "Attachment IV"
+         en el titulo.
+
+    Los nombres de fichero NO se pasan por _en_espanol: son identificadores,
+    igual que un NSN o un P/N. "Descripcion_del_servicio.pdf" traducido deja
+    de ser el nombre del fichero, y un anexo al que no se puede llamar por
+    su nombre no sirve de nada.
+    """
+    salida: list[str] = []
+    vistos: set[str] = set()
+
+    def _meter(texto: str) -> None:
+        limpio = " ".join(str(texto or "").split())
+        if limpio and limpio.lower() not in vistos:
+            vistos.add(limpio.lower())
+            salida.append(limpio)
+
+    for crudo in (a.get("anexos") or []):
+        if isinstance(crudo, str):
+            _meter(crudo)
+        elif isinstance(crudo, dict):
+            _meter(crudo.get("nombre") or crudo.get("name")
+                   or crudo.get("filename") or "")
+
+    for campo in ("especificacion_tecnica_clave", "title",
+                  "modelo_especifico"):
+        texto = str(a.get(campo) or "")
+        if not texto:
+            continue
+        for patron in (_RE_ANEXO, _RE_SOW):
+            for m in patron.finditer(texto):
+                _meter(m.group(0))
+    return salida
+
+
 def _cortar_palabra(texto: str, limite: int) -> str:
     """
     Corta en un limite, pero en el borde de una palabra.
@@ -829,6 +1017,14 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     mueve el bloque entero, asi que eso se cumple aunque el mensaje pase de
     4096 y haya que trocearlo.
 
+    Los campos tecnicos salen de datos OFICIALES y en ingles: Item del
+    titulo de SAM.gov, Part / Model de los NSN y numeros de parte escritos
+    en el aviso (TODOS ellos, no solo el primero) y Attachment de los
+    anexos. El unico campo que puede llegar en castellano es
+    especificacion_tecnica_clave, porque el prompt no le fija idioma, y si
+    lo trae NO se inyecta: el hueco se queda vacio, igual que con una
+    fecha ilegible.
+
     Nunca se pinta un campo vacio ni una linea de relleno: si falta la fecha
     se omite el cierre, si falta el destino no se nombra destino ninguno, y
     si no hay candidatos el saludo es generico. Un RFQ con datos de relleno
@@ -841,11 +1037,48 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     saludo = f"Dear {nombre} Sales Team," if nombre else "Dear Sales Team,"
 
     # --- Que se cotiza -----------------------------------------------------
+    # Los cuatro campos tecnicos salen de los datos OFICIALES y en ingles.
+    # El titulo lo pone SAM.gov; los identificadores y las referencias a
+    # anexos son codigos, que no tienen idioma; la especificacion tecnica es
+    # la UNA que puede traer castellano, porque el prompt le pide a Gemini
+    # "producto en espanol claro" y de la especificacion no fija idioma. Si
+    # la trae en espanol NO se inyecta: un correo en ingles con una linea en
+    # castellano no lo lee el mayorista, y traducirla seria inventar el dato
+    # tecnico que despues se cotiza.
+    #
+    # Y el corte es por borde de PALABRA y no a la letra: un [:140] deja
+    # "MIL-PRF-" a media referencia, y una referencia a media no sirve para
+    # buscar nada.
     sol = str(a.get("solicitation") or "").strip()
-    titulo = str(a.get("title") or "").strip()[:120]
-    ident = _identificador_tecnico(a)
-    spec = str(a.get("especificacion_tecnica_clave") or "").strip()[:140]
+    titulo = str(a.get("title") or "").strip()
+    if _en_espanol(titulo):
+        titulo = ""
+    titulo = _cortar_palabra(titulo, 120)
+    identidades = [x for x in _identificadores_tecnicos(a)
+                   if not _en_espanol(x)]
+    anexos = _referencias_anexo(a)
+    spec = str(a.get("especificacion_tecnica_clave") or "").strip()
+    if _en_espanol(spec):
+        spec = ""
+    spec = _cortar_palabra(spec, 140)
     fecha = _fecha_ingles(a.get("limite"))
+
+    # El campo de identificacion: hasta tres codigos, y si quedan mas se
+    # dice. Callarselos al mayorista es lo que hace que cotice una pieza de
+    # un lote de tres; "and 2 more" deja claro que hay mas y apunta a la
+    # linea de al lado, que es justo la que nombra el anexo.
+    ident = ""
+    if identidades:
+        ident = ", ".join(identidades[:_MAX_IDENTIFICADORES])
+        resto = len(identidades) - _MAX_IDENTIFICADORES
+        if resto > 0:
+            ident += f", and {resto} more"
+
+    # Las referencias a anexos, tal cual estan escritas.
+    anexo_txt = ", ".join(anexos[:_MAX_ANEXOS])
+    resto_anexos = len(anexos) - min(len(anexos), _MAX_ANEXOS)
+    if resto_anexos > 0:
+        anexo_txt += f", and {resto_anexos} more"
 
     cantidad = a.get("cantidad_total")
     unidad = str(a.get("unidad_medida") or "").strip()
@@ -893,12 +1126,24 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
         if not valor:
             return
         linea = f"  {etiqueta.ljust(14)}{valor}"
+        # break_on_hyphens=False: con el valor por defecto, textwrap parte un
+        # codigo con guion justo en la columna de corte y el mayorista
+        # recibe "MIL-" a final de linea y "PRF-8171" en la siguiente, que
+        # es una referencia que no se puede buscar tal cual. Sin eso el
+        # corte ocurre siempre en un espacio. Si un token no cabe entero en
+        # la linea, textwrap lo parte igual: no cabe de otra manera.
         cuerpo.extend(textwrap.wrap(linea, width=72,
-                                    subsequent_indent=" " * 16) or [linea])
+                                    subsequent_indent=" " * 16,
+                                    break_on_hyphens=False) or [linea])
 
     campo("Solicitation:", sol)
     campo("Item:", titulo)
     campo("Part / Model:", ident)
+    # Justo detras de los codigos: el lector ve que se piden tres piezas y
+    # a renglon seguido donde esta la lista entera. Solo se pinta si el
+    # aviso trae alguna: una linea de anexo inventada haria pedir al
+    # distribuidor un documento que no existe.
+    campo("Attachment:", anexo_txt)
     campo("Specs:", spec)
     campo("Quantity:", cantidad_txt)
     campo("Closing:", fecha)
