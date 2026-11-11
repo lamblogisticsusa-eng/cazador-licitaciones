@@ -1,0 +1,434 @@
+# -*- coding: utf-8 -*-
+"""
+test_rfq.py - El bloque de RFQ listo para enviar (copy-paste).
+
+QUE SE COMPRUEBA
+
+1) EL BLOQUE SALE EN LA FICHA: cabecera nueva, dentro de <pre>, como ultimo
+   bloque de contenido (detras del enlace y delante del cierre de Kyomoto),
+   sin mover el orden de las secciones que ya estaban.
+2) EL CORREO TIENE LO QUE SE PIDIÓ: asunto con la solicitud, distribuidor #1
+   en el saludo, solicitud, descripcion tecnica, NSN o Part Number, cantidad,
+   cierre en ingles, Ship-To con ciudad/estado/region, y los cinco pedidos
+   (precio unitario y total mayorista, stock y lead time, flete FOB
+   Destination con envio sin costo por volumen, CoC o trazabilidad OEM, y la
+   frase de los dos dias antes del cierre para presentar la oferta federal).
+3) EL DISTRIBUIDOR #1 ES EL GEO-MATCHED: el saludo usa el primero de la
+   lista que devuelve distribuidores.para_oportunidad, no el primero que
+   trajo el aviso.
+4) CERO ESPAÑOL EN EL CORREO: el cuerpo del <pre> va en ingles comercial
+   estadounidense; el espanol del mensaje es solo de la interfaz, que es
+   donde toca.
+5) NUNCA INVENTA: ni un "@" en el mensaje entero, ni un telefono, ni un
+   numero de parte fabricado, ni un destino que no se pudo leer (pais solo
+   = frase honesta), ni una fecha que no se pudo interpretar.
+6) FORMATO Y TAMAÑO: el correo va como texto plano dentro del <pre> (nada
+   de etiquetas que se peguen al copiar), lineas legibles, HTML balanceado
+   y la ficha entera por debajo del limite duro de 4096 de Telegram.
+7) RETROCOMPATIBILIDAD: firmas intactas, FIRMA_RFQ tal cual la pidio el
+   cliente, y ni un secreto en el modulo.
+
+Este test NO toca la red: no hay ninguna llamada a Gemini en el bloque, que
+es justamente una de las cosas que se comprueban.
+"""
+import inspect
+import os
+import re
+import sys
+import tempfile
+
+FALLA = 0
+
+
+def check(nombre, cond, extra=""):
+    global FALLA
+    if cond:
+        print("  OK    %s" % nombre)
+    else:
+        FALLA += 1
+        print("  FALLA %s %s" % (nombre, extra))
+
+
+DB = os.path.join(tempfile.gettempdir(), "kyo_test_rfq.db")
+for _s in ("", "-wal", "-shm"):
+    try:
+        os.remove(DB + _s)
+    except OSError:
+        pass
+
+os.environ["DB_PATH"] = DB
+os.environ["SAM_API_KEY"] = "CLAVE-DE-PRUEBA"
+os.environ["GEMINI_API_KEY"] = "x"
+os.environ["TELEGRAM_BOT_TOKEN"] = "x"
+os.environ["TELEGRAM_CHAT_ID"] = "123456789"
+
+import distribuidores
+import kyo
+import telegram_notify as tn
+
+
+# =====================================================================
+# 1) EL BLOQUE SALE EN LA FICHA
+# =====================================================================
+print("=" * 76)
+print("1) EL BLOQUE SALE EN LA FICHA, AL FINAL")
+print("=" * 76)
+
+FICHA = {
+    "title": "Batteries, Lead-Acid, 12 Volt, Group 31, Heavy Duty",
+    "solicitation": "36C24526Q0123",
+    "agencia": "Department of the Air Force",
+    "naics": "335911", "psc": "6135",
+    "set_aside": "Total Small Business",
+    "producto": "Baterias 12V Grupo 31",
+    "lugar_entrega": "Norfolk / VA / USA",
+    "limite": "2026-11-04T17:00:00-04:00",
+    "sin_descripcion": False,
+    "valor_contrato_usd": 85000.0,
+    "modelo_especifico": "S0594DU0500-S1",
+    "unidad_medida": "EA", "cantidad_total": 500,
+    "especificacion_tecnica_clave": "12V, Group 31, 1000 CCA, 200 min reserve",
+    "precio_unitario_costo": 104.0,
+    "precio_unitario_mercado": 139.0,
+    "precio_unitario_oferta": 149.0,
+    "ganancia_por_unidad": 45.0,
+    "costo_total_usd": 52000.0,
+    "ganancia_total_usd": 22500.0,
+    "margen_bruto_porcentaje": 30.2,
+    "costo_factoring_usd": 1820.0,
+    "ganancia_neta_usd": 20680.0,
+    "margen_neto_porcentaje": 24.3,
+    "precio_oferta_sugerido_usd": 74500.0,
+    "razonamiento_oferta": "Ofertar 12% bajo el presupuesto del gobierno.",
+    "estrategia_oferta": "", "busquedas_distribuidores": ["baterias 12V"],
+    "nivel_riesgo": "medio", "preguntas_criticas": [], "observaciones": "",
+    "contacto": "john.smith@af.mil",
+    "ui_link": "https://sam.gov/workspace/contract/opp/60aa8e3f/view",
+    "distribuidores_candidatos": [
+        {"nombre": "Grainger", "tipo": "mayorista industrial",
+         "porque": "stock de NSN", "verificar": "Grainger batteries"},
+        {"nombre": "McMaster-Carr", "tipo": "casa de suministros",
+         "porque": "stock", "verificar": "McMaster batteries"},
+        {"nombre": "Radwell", "tipo": "mayorista MRO",
+         "porque": "stock", "verificar": "Radwell batteries"},
+    ],
+}
+
+h = tn.formatear_analisis(FICHA)
+
+check("La cabecera nueva esta en la ficha",
+      "✉️ <b>RFQ Listo para Enviar (Copy-Paste)</b>" in h, "-> no esta")
+
+pos_rfq = h.find("RFQ Listo para Enviar")
+pos_enlace = h.find("Ver ficha en SAM.gov")
+pos_cierre = h.find(kyo.CIERRE)
+check("Va detras del enlace a SAM.gov", pos_rfq > pos_enlace,
+      "-> rfq=%d enlace=%d" % (pos_rfq, pos_enlace))
+check("Y delante del cierre de Kyomoto", 0 < pos_rfq < pos_cierre,
+      "-> rfq=%d cierre=%d" % (pos_rfq, pos_cierre))
+check("El cierre sigue siendo lo ultimo",
+      h.rstrip().endswith("<i>%s</i>" % tn._esc(kyo.CIERRE)), "-> %r" % h[-60:])
+check("Las secciones de antes siguen ahi",
+      all(x in h for x in ("💰 <b>Resumen financiero</b>",
+                           "Escenarios de oferta (sensibilidad)",
+                           "🏭 <b>Distribuidores a verificar (USA)</b>",
+                           "Ver ficha en SAM.gov")))
+
+pres = re.findall(r"<pre>(.*?)</pre>", h, re.S)
+check("El correo va dentro de un <pre>", len(pres) >= 2
+      and "Subject: RFQ" in pres[-1], "-> %d bloques" % len(pres))
+check("El PRIMER <pre> sigue siendo el resumen financiero",
+      "Presupuesto govt." in pres[0], "-> %r" % pres[0][:60])
+check("El de escenarios sigue en el medio",
+      "Escenario" in pres[1], "-> %r" % pres[1][:60])
+
+
+# =====================================================================
+# 2) EL CORREO TIENE LO QUE SE PIDIÓ
+# =====================================================================
+print()
+print("=" * 76)
+print("2) EL CORREO TIENE LO QUE SE PIDIÓ")
+print("=" * 76)
+
+cuerpo = pres[-1]
+# textwrap parte las frases largas en varias lineas: para comprobar una
+# frase hay que mirarla con los espacios normalizados, o "closing date
+# above" nunca se encontraria aunque este escrito completo.
+plano = " ".join(cuerpo.split())
+
+check("Asunto con el numero de solicitud",
+      plano.startswith("Subject: RFQ - 36C24526Q0123"), "-> %r"
+      % plano[:60])
+check("Linea de solicitud", "  Solicitation: 36C24526Q0123" in cuerpo)
+check("Descripcion tecnica del producto (Item)",
+      "  Item:         Batteries, Lead-Acid" in cuerpo, "-> no esta")
+check("Cantidad con su unidad", "  Quantity:     500 EA" in cuerpo,
+      "-> no esta")
+check("Fecha de cierre en ingles, con anio y hora",
+      "  Closing:      November 4, 2026, 17:00 UTC-04" in cuerpo,
+      "-> no esta")
+check("Ship-To con ciudad, estado y region",
+      "  Ship-To:      Norfolk, VA (South)" in cuerpo, "-> no esta")
+check("Modelo exacto en Part / Model",
+      "  Part / Model: S0594DU0500-S1" in cuerpo, "-> no esta")
+
+print()
+print("  Los cinco pedidos:")
+check("1) Precio unitario y total mayorista",
+      "Unit price and total wholesale price for the required quantity."
+      in cuerpo, "-> no esta")
+check("2) Disponibilidad y lead time",
+      "Stock availability and estimated lead time." in cuerpo,
+      "-> no esta")
+check("3) Flete terrestre FOB Destination al estado de entrega",
+      "Ground shipping cost, FOB Destination, to Norfolk, VA (South)."
+      in cuerpo, "-> no esta")
+check("   Y pidiendo el envio sin costo por volumen",
+      "if freight is waived at this volume." in cuerpo, "-> no esta")
+check("4) CoC o trazabilidad OEM para pieza tecnica o militar",
+      "Certificate of Conformity (CoC)" in plano
+      and "OEM traceability" in plano, "-> no esta")
+check("5) Los dos dias antes del cierre para presentar la oferta federal",
+      "at least two (2) days before the closing date above" in plano
+      and "federal offer on time" in plano, "-> no esta")
+
+print()
+print("  La firma, tal cual la pidio el cliente:")
+for linea in ("Bastian Cordero",
+              "Managing Member | L.A.M.B Logistics LLC",
+              "Albuquerque, NM 87110 | EIN: 32-0868469"):
+    check("  %s" % linea, cuerpo.rstrip().endswith(linea)
+          or ("\n" + linea) in cuerpo, "-> no esta")
+
+
+# =====================================================================
+# 3) EL DISTRIBUIDOR #1 ES EL GEO-MATCHED
+# =====================================================================
+print()
+print("=" * 76)
+print("3) EL DISTRIBUIDOR #1 ES EL PRIMERO DE LA LISTA GEO-MATCHED")
+print("=" * 76)
+
+d = distribuidores.para_oportunidad(
+    FICHA["busquedas_distribuidores"], FICHA["producto"],
+    FICHA["lugar_entrega"], FICHA.get("query_google_proveedores", ""),
+    FICHA["distribuidores_candidatos"])
+
+primero = (d.get("candidatos") or [{}])[0].get("nombre")
+print("  Orden geo-matched:", [c["nombre"] for c in d.get("candidatos") or []])
+check("La lista esta ordenada por cercania", d.get("ordenado_por_cercania"),
+      "-> no")
+check("Hay candidatos", bool(primero), "-> la lista salio vacia")
+check("El saludo usa al #1 de ESA lista",
+      "\nDear %s Sales Team,\n" % primero in cuerpo, "-> no usa %r" % primero)
+
+otros = [c["nombre"] for c in (d.get("candidatos") or [])[1:]]
+for nombre in otros:
+    check("Y no saluda al que viene despues (%s)" % nombre,
+          "\nDear %s Sales Team," % nombre not in cuerpo, "-> se colo")
+
+# Sin candidatos, el saludo degrada a generico: nunca un nombre inventado.
+h_vacio = tn.formatear_analisis(dict(FICHA, distribuidores_candidatos=[],
+                                     query_google_proveedores=""))
+check("Sin candidatos, el saludo es generico",
+      "\nDear Sales Team,\n" in h_vacio, "-> no degrada")
+check("Y el RFQ sigue saliendo igual",
+      "Subject: RFQ" in h_vacio, "-> desaparece el bloque")
+
+
+# =====================================================================
+# 4) CERO ESPAÑOL EN EL CORREO
+# =====================================================================
+print()
+print("=" * 76)
+print("4) CERO ESPAÑOL EN EL CUERPO DEL CORREO")
+print("=" * 76)
+
+# El espanol del mensaje es de la INTERFAZ (Telegram, comentarios, notas),
+# que es donde toca. Lo que no puede llevar espanol es el correo, porque
+# eso es un documento que llega a un proveedor de EE.UU.
+palabras = (" de ", " la ", " el ", " los ", " las ", " que ", " para ",
+            " por ", " con ", " una ", " un ", " del ", " al ", " en ")
+malas = [p.strip() for p in palabras if p in plano.lower()]
+check("Ni una palabra en espanol dentro del correo", not malas,
+      "-> %s" % malas)
+check("Los rotulos son ingleses",
+      all(x in plano for x in ("Subject:", "Solicitation:", "Item:",
+                               "Quantity:", "Closing:", "Ship-To:",
+                               "Please quote:", "Thank you,")))
+check("La nota en espanol queda FUERA del <pre>",
+      "confirma que vende el producto antes de escribir" not in cuerpo)
+
+
+# =====================================================================
+# 5) NUNCA INVENTA
+# =====================================================================
+print()
+print("=" * 76)
+print("5) NUNCA INVENTA: NI CORREO, NI NUMERO, NI DESTINO, NI FECHA")
+print("=" * 76)
+
+check("Ningun '@' en el mensaje entero", "@" not in h, "-> hay un @")
+check("Ningun telefono", "+1 " not in h, "-> hay un telefono")
+check("Ningun correo dentro del RFQ", "@" not in cuerpo, "-> hay un @")
+check("El contacto del oficial NO se cuela en el correo",
+      "john.smith" not in cuerpo, "-> se colo el contacto")
+
+# El contacto con '@' del fixture es trampa a proposito: el analisis lo
+# trae, pero el RFQ no lo lee jamas.
+check("Se comprueba con un aviso que si trae '@'",
+      "@" in str(FICHA["contacto"]))
+
+print()
+print("  Un NSN escrito en el aviso se muestra; uno que no esta, no:")
+con_nsn = tn._identificador_tecnico(
+    {"especificacion_tecnica_clave": "NSN 6140-01-234-5678, 1000 CCA"})
+check("Lee el NSN", con_nsn == "NSN 6140-01-234-5678", "-> %r" % con_nsn)
+con_pn = tn._identificador_tecnico(
+    {"especificacion_tecnica_clave": "P/N AB-12345, 12V"})
+check("Lee el Part Number", con_pn == "P/N AB-12345", "-> %r" % con_pn)
+sin_nada = tn._identificador_tecnico(
+    {"especificacion_tecnica_clave": "12V, Group 31, 1000 CCA",
+     "modelo_especifico": ""})
+check("Sin NSN ni PN no inventa ninguno", sin_nada == "",
+      "-> %r" % sin_nada)
+modelo = tn._identificador_tecnico(
+    {"especificacion_tecnica_clave": "12V", "modelo_especifico": "XYZ-1"})
+check("Si hay modelo lo pone tal cual, sin etiqueta inventada",
+      modelo == "XYZ-1", "-> %r" % modelo)
+check("El campo 'contacto' jamas se mira (ahi vive el '@')",
+      tn._identificador_tecnico(
+          {"contacto": "a@b.mil", "especificacion_tecnica_clave": ""}) == "",
+      "-> se colo el contacto")
+
+print()
+print("  Pais solo nunca es destino de entrega:")
+h_pais = tn.formatear_analisis(dict(FICHA, lugar_entrega="UNITED STATES"))
+pre_pais = re.findall(r"<pre>(.*?)</pre>", h_pais, re.S)[-1]
+plano_pais = " ".join(pre_pais.split())
+check("Usa la frase honesta en vez del pais",
+      "to the delivery location stated in the solicitation" in plano_pais,
+      "-> no degrada")
+check("Y no pinta 'UNITED STATES' como Ship-To",
+      "Ship-To:      UNITED STATES" not in pre_pais, "-> se colo el pais")
+
+print()
+print("  Sin fecha leida no se pinta ninguna:")
+h_sin_fecha = tn.formatear_analisis(dict(FICHA, limite="no es una fecha"))
+pre_sf = re.findall(r"<pre>(.*?)</pre>", h_sin_fecha, re.S)[-1]
+plano_sf = " ".join(pre_sf.split())
+check("No aparece la linea Closing", "  Closing:" not in pre_sf,
+      "-> se colo una fecha")
+check("No aparece 'Vence'", "Vence" not in h_sin_fecha, "-> se colo")
+check("La frase de los dos dias sigue, sin apuntar a una fecha inventada",
+      "at least two (2) days before the solicitation closing date"
+      in plano_sf, "-> no esta")
+
+print()
+print("  Fechas en ingles:")
+for bruto, esperado in (("2026-11-04T17:00:00-04:00",
+                         "November 4, 2026, 17:00 UTC-04"),
+                        ("2026-11-04", "November 4, 2026"),
+                        ("", ""), ("no es una fecha", "")):
+    got = tn._fecha_ingles(bruto)
+    check("  %-26s -> %r" % (bruto, esperado), got == esperado,
+          "-> %r" % got)
+
+check("El corte del asunto corta en borde de palabra",
+      tn._cortar_palabra("Batteries, Lead-Acid, 12 Volt, Group 31, "
+                         "Heavy Duty", 40)
+      == "Batteries, Lead-Acid, 12 Volt, Group...",
+      "-> %r" % tn._cortar_palabra("Batteries, Lead-Acid, 12 Volt, "
+                                   "Group 31, Heavy Duty", 40))
+check("Un texto corto no se toca",
+      tn._cortar_palabra("Corto", 40) == "Corto")
+
+
+# =====================================================================
+# 6) FORMATO Y TAMAÑO
+# =====================================================================
+print()
+print("=" * 76)
+print("6) FORMATO: TEXTO PLANO DENTRO DEL <pre> Y CABE EN 4096")
+print("=" * 76)
+
+check("El correo va como texto plano (nada de etiquetas que se peguen al "
+      "copiar)", "<b>" not in cuerpo and "<i>" not in cuerpo
+      and "<code>" not in cuerpo, "-> hay etiquetas dentro")
+mas_larga = max((len(l) for l in cuerpo.split("\n")), default=0)
+check("Ninguna linea se pasa de 90 columnas (dentro de <pre> no hay wrap)",
+      mas_larga <= 90, "-> %d chars" % mas_larga)
+check("El HTML del mensaje entero sigue balanceado",
+      h.count("<b>") == h.count("</b>") and h.count("<i>") == h.count("</i>")
+      and h.count("<pre>") == h.count("</pre>"),
+      "-> b=%d/%d i=%d/%d pre=%d/%d" % (h.count("<b>"), h.count("</b>"),
+                                        h.count("<i>"), h.count("</i>"),
+                                        h.count("<pre>"), h.count("</pre>")))
+check("Cabe en un solo mensaje", len(h) < 4096, "-> %d" % len(h))
+
+# El peor caso que se llega a construir en la suite: sin descripcion, sin
+# candidatos, sin fecha y con el aviso de estimaciones encima.
+flojo = tn.formatear_analisis(dict(
+    FICHA, sin_descripcion=True, distribuidores_candidatos=[],
+    query_google_proveedores="", set_aside="sin set-aside", limite="",
+    lugar_entrega=""))
+check("El peor caso tambien cabe", len(flojo) < 4096, "-> %d" % len(flojo))
+check("Y en ese peor caso el RFQ sigue saliendo",
+      "Subject: RFQ" in flojo, "-> desaparece")
+check("Sin candidatos, sin fecha y sin destino no se inventa nada",
+      "Dear Sales Team," in flojo and "  Closing:" not in flojo
+      and "  Ship-To:" not in flojo and "@" not in flojo,
+      "-> se invento algo")
+
+print()
+print("  Troceo: si un dia crece, se parte y no se pierde.")
+trozos = tn._trocear(h)
+check("Se trocea sin romper el <pre> del RFQ",
+      sum(t.count("<pre>") for t in trozos) == h.count("<pre>")
+      and sum(t.count("</pre>") for t in trozos) == h.count("</pre>"),
+      "-> se perdio un bloque")
+check("Ningun trozo pasa de 4096", all(len(t) <= 4096 for t in trozos),
+      "-> %s" % [len(t) for t in trozos])
+
+
+# =====================================================================
+# 7) RETROCOMPATIBILIDAD
+# =====================================================================
+print()
+print("=" * 76)
+print("7) RETROCOMPATIBILIDAD Y QUE NO HAYA SECRETOS")
+print("=" * 76)
+
+check("formatear_analisis conserva su firma",
+      list(inspect.signature(tn.formatear_analisis).parameters) == ["a"])
+check("_bloque_rfq(a, d) es el del bloque",
+      list(inspect.signature(tn._bloque_rfq).parameters) == ["a", "d"])
+check("devuelve una lista de lineas, como el resto de los bloques",
+      isinstance(tn._bloque_rfq(FICHA, d), list))
+check("_fecha_ingles(bruto) devuelve str",
+      isinstance(tn._fecha_ingles(FICHA["limite"]), str))
+check("_identificador_tecnico(a) devuelve str",
+      isinstance(tn._identificador_tecnico(FICHA), str))
+
+check("La firma es exactamente la que pidio el cliente",
+      tn.FIRMA_RFQ == ("Bastian Cordero\n"
+                       "Managing Member | L.A.M.B Logistics LLC\n"
+                       "Albuquerque, NM 87110 | EIN: 32-0868469"),
+      "-> %r" % (tn.FIRMA_RFQ,))
+
+with open(tn.__file__, encoding="utf-8") as _f:
+    _fuente = _f.read()
+check("Ningun secreto en el modulo",
+      all(x not in _fuente for x in ("AIza", "sk-")),
+      "-> se colo una clave")
+check("El bloque por si solo no trae ningun '@'",
+      "@" not in "\n".join(tn._bloque_rfq(FICHA, d)), "-> hay un @")
+
+print()
+print("=" * 76)
+if FALLA:
+    print("RESULTADO: %d fallo(s)" % FALLA)
+    sys.exit(1)
+print("RESULTADO: el RFQ sale listo para copiar y pegar, en verde")
+print("=" * 76)

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import html
 import re
+import textwrap
 import logging
 
 import requests
@@ -672,6 +673,258 @@ def _bloque_distribuidores(d: dict) -> list[str]:
     return L
 
 
+# =====================================================================
+# RFQ LISTO PARA ENVIAR (COPY-PASTE)
+# =====================================================================
+#
+# El correo va dentro de <pre>: en Telegram eso ES el bloque de codigo, se
+# copia de un toque y lo que sale es texto plano. Por eso dentro del <pre>
+# no se pone ni un <b> ni un <i>: si fuera asi, al pegar el correo en el
+# gestor de correo llegarian las etiquetas pegadas al texto.
+#
+# Va dirigido al distribuidor #1 de la lista (el geo-matched de la Fase 3),
+# pero sin linea "To:": Kyomoto no inventa correos, y la razon esta escrita
+# en _bloque_distribuidores. Quien recibe la ficha pega la direccion que el
+# mismo verifico en la web del distribuidor. Por eso no hay ni un "@" en el
+# mensaje entero, que es ademas lo que comprueban test_fase3 y
+# test_cadena_distribuidores.
+_MESES_EN = ("January", "February", "March", "April", "May", "June",
+             "July", "August", "September", "October", "November", "December")
+
+# Mismo patron que pdf_generator._RE_NSN. No se importa ese modulo porque
+# arrastra reportlab a un aviso de Telegram que tiene que salir rapido.
+_RE_NSN = re.compile(r"\b(\d{4}-\d{2}-\d{3}-\d{4})\b")
+
+# "P/N 6140-01", "PN: 12345", "Part No. AB-12". Exige un separador (":" o
+# "#" o un espacio) detras de la abreviatura: sin eso, "PN" se engancharia a
+# cualquier palabra que simplemente empiece por esas dos letras.
+_RE_PARTE = re.compile(
+    r"\b(?:P\s*/\s*N|PN|Part\s*(?:No\.?|Number))\s*(?:[:#]\s*|\s+)"
+    r"([A-Za-z0-9][A-Za-z0-9._/-]{2,})", re.IGNORECASE)
+
+# Firma del RFQ, tal cual la pidio el cliente. El EIN no es un secreto (va
+# en SAM.gov y en toda factura) y sin el el correo no identifica a la
+# empresa ante el distribuidor.
+FIRMA_RFQ = ("Bastian Cordero\n"
+             "Managing Member | L.A.M.B Logistics LLC\n"
+             "Albuquerque, NM 87110 | EIN: 32-0868469")
+
+
+def _fecha_ingles(bruto) -> str:
+    """
+    La fecha de cierre como va en un correo: "November 4, 2026, 17:00 UTC-04".
+
+    No se puede reutilizar _fecha_legible, que devuelve "4 nov 2026": el RFQ
+    esta en ingles comercial y una fecha en espanol en medio de un correo en
+    ingles es justo lo que la politica de cero espanol no permite.
+
+    Si la fecha no se lee, devuelve vacio y el bloque omite la linea entera.
+    Una fecha mal leida es peor que ninguna, porque contra ella cotiza el
+    distribuidor.
+    """
+    if not bruto:
+        return ""
+    from datetime import datetime, timezone
+
+    texto = str(bruto).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(texto)
+    except (ValueError, TypeError):
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    cuando = f"{_MESES_EN[dt.month - 1]} {dt.day}, {dt.year}"
+    if dt.hour or dt.minute:
+        # La hora solo si la trae el aviso. Una fecha de solo dia pinta
+        # "00:00 UTC+00" y eso es ruido que el distribuidor lee como un
+        # cierre a medianoche que no existe.
+        zona = ""
+        if dt.utcoffset() is not None:
+            total = int(dt.utcoffset().total_seconds() // 60)
+            signo = "+" if total >= 0 else "-"
+            zona = f" UTC{signo}{abs(total) // 60:02d}"
+        cuando += f", {dt.hour:02d}:{dt.minute:02d}{zona}"
+    return cuando
+
+
+def _identificador_tecnico(a: dict) -> str:
+    """
+    NSN o numero de parte escrito en el aviso, o el modelo exacto si no hay.
+
+    Nada de esto se inventa: un numero de parte fabricado hace que el
+    distribuidor cotice una pieza que no es, y el que pierde el tiempo es el
+    cliente. Se recorre todo buscando un NSN antes que un PN, porque el NSN
+    es el identificador que el proveedor puede buscar sin preguntar nada.
+
+    OJO: NO se mira "contacto". Ese campo trae el correo del oficial de
+    contratacion, y de ahi saldria un "@" que tira los tests de la ficha y,
+    sobre todo, un destinatario que no es el distribuidor.
+    """
+    textos = [str(a.get(c) or "")
+              for c in ("especificacion_tecnica_clave", "modelo_especifico",
+                        "title")]
+
+    for texto in textos:
+        m = _RE_NSN.search(texto)
+        if m:
+            return f"NSN {m.group(1)}"
+    for texto in textos:
+        m = _RE_PARTE.search(texto)
+        if m:
+            return f"P/N {m.group(1)}"
+    # El modelo tal cual, sin etiqueta inventada: es lo unico que queda y
+    # sigue identificando la pieza ante el distribuidor.
+    return str(a.get("modelo_especifico") or "").strip()
+
+
+def _cortar_palabra(texto: str, limite: int) -> str:
+    """
+    Corta en un limite, pero en el borde de una palabra.
+
+    "Batteries, Lead-Acid, 12 Volt, Group 31," cortado a 40 a secas deja el
+    asunto del correo a media frase con la coma colgando, y eso se lee como
+    un error de copia. Aqui corta en el ultimo espacio y cierra con puntos.
+    """
+    if len(texto) <= limite:
+        return texto
+    corte = texto[:limite]
+    espacio = corte.rfind(" ", 15)
+    if espacio > 15:
+        corte = corte[:espacio]
+    return corte.rstrip(" ,;-.") + "..."
+
+
+def _bloque_rfq(a: dict, d: dict) -> list[str]:
+    """
+    El RFQ en ingles comercial estadounidense, listo para copiar y pegar,
+    con el distribuidor #1 de la lista.
+
+    Se arma SOLO con datos que ya estan en la ficha: solicitud, especificacion
+    tecnica, cantidad, cierre, Ship-To y el primer candidato geo-matched. No
+    hay ninguna llamada a Gemini por detras, y por eso la firma, el EIN y las
+    cantidades no pueden salir inventados por un modelo.
+
+    Todo el cuerpo va dentro de <pre> y como texto plano, para que lo que se
+    copia sea el correo entero y no un monton de etiquetas HTML pegadas.
+
+    Nunca se pinta un campo vacio ni una linea de relleno: si falta la fecha
+    se omite el cierre, si falta el destino no se nombra destino ninguno, y
+    si no hay candidatos el saludo es generico. Un RFQ con datos de relleno
+    hace que el distribuidor responda mal una vez y no responda a la segunda.
+    """
+    # --- Con quien se habla -----------------------------------------------
+    candidatos = d.get("candidatos") or []
+    nombre = str((candidatos[0] if candidatos else {}).get("nombre")
+                 or "").strip()[:40]
+    saludo = f"Dear {nombre} Sales Team," if nombre else "Dear Sales Team,"
+
+    # --- Que se cotiza -----------------------------------------------------
+    sol = str(a.get("solicitation") or "").strip()
+    titulo = str(a.get("title") or "").strip()[:120]
+    ident = _identificador_tecnico(a)
+    spec = str(a.get("especificacion_tecnica_clave") or "").strip()[:140]
+    fecha = _fecha_ingles(a.get("limite"))
+
+    cantidad = a.get("cantidad_total")
+    unidad = str(a.get("unidad_medida") or "").strip()
+    cantidad_txt = f"{_cantidad(cantidad)} {unidad}".strip() if cantidad else ""
+
+    # --- A donde llega -----------------------------------------------------
+    # Solo lo que la Fase 3 pudo leer del Ship-To. Sin ciudad ni estado no
+    # se nombra destino: una direccion a medias hace cotizar un flete que
+    # despues no se usa, y el pais solo jamas sirve de destino.
+    destino = d.get("destino") or {}
+    sitio = ", ".join(x for x in (destino.get("ciudad"), destino.get("estado"))
+                      if x)
+    region = str(destino.get("region") or "").strip()
+    # La region entre parentesis DETRAS de la ciudad/estado, nunca separada
+    # por coma: "Norfolk, VA, (South)" se lee como un error de tipeo y
+    # "Norfolk, VA (South)" es como se escribe de verdad.
+    ship_to = f"{sitio} ({region})" if (sitio and region) else sitio
+
+    cuerpo: list[str] = []
+
+    # --- Asunto ------------------------------------------------------------
+    asunto = "RFQ"
+    if sol:
+        asunto += f" - {sol}"
+    if titulo:
+        asunto += f" - {_cortar_palabra(titulo, 40)}"
+    cuerpo.append(f"Subject: {asunto}")
+    cuerpo.append("")
+    cuerpo.append(saludo)
+    cuerpo.append("")
+    cuerpo.append("Requesting a quotation for a U.S. federal solicitation:")
+    cuerpo.append("")
+
+    # --- Los datos, en columna --------------------------------------------
+    # Se trocea la linea COMPLETA, con el etiquetado ya puesto: si se
+    # troceara solo el valor, la primera linea saldria con 16 caracteres de
+    # mas y se saldria de las 72 columnas del bloque.
+    def campo(etiqueta: str, valor: str) -> None:
+        if not valor:
+            return
+        linea = f"  {etiqueta.ljust(14)}{valor}"
+        cuerpo.extend(textwrap.wrap(linea, width=72,
+                                    subsequent_indent=" " * 16) or [linea])
+
+    campo("Solicitation:", sol)
+    campo("Item:", titulo)
+    campo("Part / Model:", ident)
+    campo("Specs:", spec)
+    campo("Quantity:", cantidad_txt)
+    campo("Closing:", fecha)
+    campo("Ship-To:", ship_to)
+
+    # --- Lo que se pide ----------------------------------------------------
+    if sitio:
+        destino_txt = ship_to
+    else:
+        destino_txt = "the delivery location stated in the solicitation"
+    cuerpo.append("")
+    cuerpo.append("Please quote:")
+    cuerpo.append("1. Unit price and total wholesale price for the required "
+                  "quantity.")
+    cuerpo.append("2. Stock availability and estimated lead time.")
+    cuerpo.extend(textwrap.wrap(
+        f"3. Ground shipping cost, FOB Destination, to {destino_txt}. "
+        "Please advise if freight is waived at this volume.",
+        width=72, subsequent_indent="   "))
+    cuerpo.extend(textwrap.wrap(
+        "4. Technical compliance, with a Certificate of Conformity (CoC) or "
+        "OEM traceability if this is a technical or military spare part.",
+        width=72, subsequent_indent="   "))
+    cuerpo.append("")
+    # La frase de los dos dias: con la fecha si la hay (apunta a la linea de
+    # arriba), sin ella si no, porque decir "la fecha de cierre" sin poder
+    # decirla deja al distribuidor sin el dato que le piden.
+    if fecha:
+        frase = ("Please send your quotation at least two (2) days before "
+                 "the closing date above, so we can submit our federal "
+                 "offer on time.")
+    else:
+        frase = ("Please send your quotation at least two (2) days before "
+                 "the solicitation closing date, so we can submit our "
+                 "federal offer on time.")
+    cuerpo.extend(textwrap.wrap(frase, width=72))
+    cuerpo.append("")
+    cuerpo.append("Thank you,")
+    cuerpo.append("")
+    cuerpo.extend(FIRMA_RFQ.split("\n"))
+
+    # --- Se pinta ----------------------------------------------------------
+    # Se escapa linea a linea DESPUES de trocear: si se escapara antes,
+    # textwrap partiria un "&amp;" por la mitad y Telegram mostraria el
+    # trozo roto.
+    L: list[str] = ["✉️ <b>RFQ Listo para Enviar (Copy-Paste)</b>", "<pre>"]
+    L.extend(_esc(linea) for linea in cuerpo)
+    L.append("</pre>")
+    L.append("<i>Dirigido al distribuidor #1 de la lista: confirma que vende "
+             "el producto antes de escribir.</i>")
+    return L
+
+
 def formatear_analisis(a: dict) -> str:
     """
     La ficha, en formato ejecutivo.
@@ -814,6 +1067,15 @@ def formatear_analisis(a: dict) -> str:
         L.append(f'🔗 <a href="{_esc(a["ui_link"])}"><b>Ver ficha en SAM.gov</b></a>')
     else:
         L.append("🔗 Ver ficha en SAM.gov")
+
+    # --- RFQ listo para enviar (copy-paste) ---
+    # Va como ULTIMO bloque de contenido, detras del enlace: el enlace es la
+    # verificacion previa y el RFQ es la accion que se toma con la ficha en
+    # la mano. El cierre de Kyomoto sigue siendo lo ultimo del mensaje.
+    L.append("")
+    L.append(_SEPARADOR)
+    L.append("")
+    L.extend(_bloque_rfq(a, d))
 
     L.append("")
     L.append(f"<i>{kyo.CIERRE}</i>")
