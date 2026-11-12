@@ -39,10 +39,21 @@ Que se comprueba, y por que:
    no tira el aviso, y que si no hay codigo escrito en NINGUNA parte el
    campo se queda vacio en vez de inventarse.
 
-7) ESTRUCTURA: mensaje por debajo de 4096, <pre> equilibrado, ninguna linea
+7) EL CODIGO EN EL ASUNTO Y EL MODELO JUNTO AL NSN. Dos cambios de pintado
+   que solo afectan a cuando hay datos tecnicos de verdad:
+
+   - El NSN o el P/N detectados van en el asunto, DELANTE de la
+     solicitud, para que el equipo de ventas del mayorista clasifique el
+     RFQ en la lista de correos sin abrirlo. Las fichas sin codigo siguen
+     saliendo con el asunto de siempre, y el modelo no se cuela.
+   - Con NSN y modelo OEM, los dos: el NSN para buscarlo en el sistema del
+     distribuidor y el modelo para cruzarlo con el del fabricante. Con un
+     modelo que es una frase, mantiene la prioridad del NSN.
+
+8) ESTRUCTURA: mensaje por debajo de 4096, <pre> equilibrado, ninguna linea
    por encima de 90 columnas y ni un "@" en el correo.
 
-8) RETROCOMPATIBILIDAD: las firmas publicas no cambian de forma ni de
+9) RETROCOMPATIBILIDAD: las firmas publicas no cambian de forma ni de
    sentido.
 
 NO toca la red: la llamada de Gemini se sustituye SOLO en la seccion 5,
@@ -209,8 +220,11 @@ print("  Part / Model: %s" % part)
 check("Y SALEN EN EL CORREO, no solo en el parser",
       "NSN 6140-01-234-5678" in part and "P/N AB-12345" in part
       and "P/N CD-67890" in part, "-> %r" % part)
+# Cuatro codigos y ademas el modelo: cinco en total, y el tope de tres es
+# el de siempre. Los tres que entran siguen estando, y "and 2 more" avisa
+# de que quedan dos en vez de callarselos.
 check("A los que no caben se les dice, no se les calla",
-      "and 1 more" in part, "-> %r" % part)
+      "and 2 more" in part, "-> %r" % part)
 
 # El mismo codigo escrito en dos campos es la misma pieza.
 dup = tn._identificadores_tecnicos(
@@ -269,8 +283,8 @@ pre_lin = _pre(tn.formatear_analisis(en_linea))
 check("Y la pinta en el correo",
       _campo(pre_lin, "Attachment:") == "Attachment 0002",
       "-> %r" % _campo(pre_lin, "Attachment:"))
-check("El Part / Model sigue con su codigo",
-      _campo(pre_lin, "Part / Model:") == "P/N AB-12345",
+check("El Part / Model lleva el codigo Y el modelo OEM",
+      _campo(pre_lin, "Part / Model:") == "P/N AB-12345, S0594DU0500-S1",
       "-> %r" % _campo(pre_lin, "Part / Model:"))
 
 romano = {"especificacion_tecnica_clave": "Per Attachment IV and Annex B."}
@@ -629,21 +643,6 @@ check("Un numero de parte del cuerpo tambien entra",
       _campo(pre_pn, "Part / Model:") == "P/N AB-12345",
       "-> %r" % _campo(pre_pn, "Part / Model:"))
 
-# Y el requisito de fondo: el codigo se pinta EN LUGAR de la descripcion
-# generica, no al lado. "Part / Model: Generic..., NSN ..." le daria al
-# mayorista dos formas de llamarse a la misma pieza, y la mala seria la
-# que estaria delante.
-FICHA_SUSTITUYE = dict(FICHA, notice_id="desc-nsn",
-                       modelo_especifico="Generic Description Pending OEM")
-pre_sust = _pre(tn.formatear_analisis(FICHA_SUSTITUYE))
-print("  Part / Model: %s" % _campo(pre_sust, "Part / Model:"))
-check("El codigo del cuerpo SUSTITUYE a la descripcion generica",
-      _campo(pre_sust, "Part / Model:") == "NSN 1650-01-672-3405",
-      "-> %r" % _campo(pre_sust, "Part / Model:"))
-check("Y la descripcion generica no queda en ningun sitio del correo",
-      "Generic Description Pending" not in pre_sust,
-      "-> sigue en el correo")
-
 # --- Un correo jamas se vuelve un codigo --------------------------------
 FICHA_CORREO = dict(FICHA, notice_id="desc-correo",
                     especificacion_tecnica_clave="12V, Group 31, 1000 CCA",
@@ -670,11 +669,78 @@ check("La singular sigue leyendo SOLO los tres campos de siempre",
 
 
 # =====================================================================
-# 7) ESTRUCTURA
+# 7) EL CODIGO EN EL ASUNTO Y EL MODELO JUNTO AL NSN
 # =====================================================================
 print()
 print("=" * 76)
-print("7) ESTRUCTURA: 4096, <pre>, COLUMNAS, CERO ARROBA")
+print("7) ASUNTO CON CODIGO Y MODELO JUNTO AL NSN")
+print("=" * 76)
+
+# --- 7a. El codigo en el asunto ----------------------------------------
+# El que clasifica los RFQ en el mayorista es el equipo de ventas, y no
+# los abre uno a uno: busca por NSN. Con el codigo delante el asunto se
+# resuelve de un vistazo en la lista de correos.
+asunto_nsn = _pre(tn.formatear_analisis(FICHA_DESC)).splitlines()[0]
+print("  %s" % asunto_nsn)
+check("El NSN va en el asunto, delante de la solicitud",
+      asunto_nsn.startswith("Subject: RFQ - NSN 1650-01-672-3405"
+                            " - 36C24526Q0123"), "-> %r" % asunto_nsn)
+check("Y el titulo sigue ahi, mas corto si hace falta",
+      "Batteries" in asunto_nsn, "-> %r" % asunto_nsn)
+check("Sin codigo detectado el asunto se queda como siempre",
+      _pre(tn.formatear_analisis(FICHA)).splitlines()[0]
+      .startswith("Subject: RFQ - 36C24526Q0123"),
+      "-> %r" % _pre(tn.formatear_analisis(FICHA)).splitlines()[0])
+check("Y el modelo, si es lo unico que hay, NO se cuela en el asunto",
+      "S0594DU0500-S1"
+      not in _pre(tn.formatear_analisis(FICHA)).splitlines()[0],
+      "-> el modelo alargo el asunto")
+
+# --- 7b. El modelo OEM junto al NSN ------------------------------------
+# Las dos vistas de la misma pieza: el NSN para buscarlo en el sistema del
+# distribuidor, el modelo para cruzarlo con el del fabricante.
+FICHA_OEM = dict(FICHA, notice_id="desc-nsn",
+                 especificacion_tecnica_clave="12V, Group 31, 1000 CCA",
+                 modelo_especifico="S0594DU0500-S1")
+pre_oem = _pre(tn.formatear_analisis(FICHA_OEM))
+print("  Part / Model: %s" % _campo(pre_oem, "Part / Model:"))
+check("El NSN del cuerpo y el modelo OEM salen JUNTOS",
+      _campo(pre_oem, "Part / Model:")
+      == "NSN 1650-01-672-3405, S0594DU0500-S1",
+      "-> %r" % _campo(pre_oem, "Part / Model:"))
+check("... con el NSN por delante, que es el que se busca",
+      tn._identificadores_tecnicos(FICHA_OEM)[0] == "NSN 1650-01-672-3405",
+      "-> %s" % tn._identificadores_tecnicos(FICHA_OEM))
+
+# La otra mitad del mismo requisito: si el modelo es una FRASE, mantiene la
+# prioridad del NSN y no se pinta. Los dos casos van juntos a proposito:
+# uno sin el otro no dice nada de la regla completa.
+FICHA_SUSTITUYE = dict(FICHA, notice_id="desc-nsn",
+                       modelo_especifico="Generic Description Pending OEM")
+pre_sust = _pre(tn.formatear_analisis(FICHA_SUSTITUYE))
+print("  Part / Model: %s" % _campo(pre_sust, "Part / Model:"))
+check("Con modelo que es una frase, mantiene la prioridad del NSN",
+      _campo(pre_sust, "Part / Model:") == "NSN 1650-01-672-3405",
+      "-> %r" % _campo(pre_sust, "Part / Model:"))
+check("Y la frase no queda en ningun sitio del correo",
+      "Generic Description Pending" not in pre_sust, "-> se colo")
+
+# Un modelo que ya sale etiquetado como codigo es la misma pieza.
+check("Un modelo que ya sale como P/N no se repite",
+      tn._identificadores_tecnicos(
+          {"especificacion_tecnica_clave": "P/N AB-12345",
+           "modelo_especifico": "AB-12345"}) == ["P/N AB-12345"],
+      "-> %s" % tn._identificadores_tecnicos(
+          {"especificacion_tecnica_clave": "P/N AB-12345",
+           "modelo_especifico": "AB-12345"}))
+
+
+# =====================================================================
+# 8) ESTRUCTURA
+# =====================================================================
+print()
+print("=" * 76)
+print("8) ESTRUCTURA: 4096, <pre>, COLUMNAS, CERO ARROBA")
 print("=" * 76)
 
 # Un lote realista con codigos y anexos a la vez: es el peor caso que se
@@ -779,11 +845,11 @@ check("Ni una palabra en castellano en el correo de la ficha en espanol",
 
 
 # =====================================================================
-# 8) RETROCOMPATIBILIDAD
+# 9) RETROCOMPATIBILIDAD
 # =====================================================================
 print()
 print("=" * 76)
-print("8) RETROCOMPATIBILIDAD")
+print("9) RETROCOMPATIBILIDAD")
 print("=" * 76)
 
 check("formatear_analisis(a) sigue con un solo argumento",

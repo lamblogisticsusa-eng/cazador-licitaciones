@@ -872,6 +872,17 @@ def _en_espanol(bruto) -> bool:
 # un anexo que mostrar en la linea de al lado.
 _MAX_IDENTIFICADORES = 3
 _MAX_ANEXOS = 2
+# Caracteres por encima de los cuales "modelo_especifico" ya no puede ser un
+# codigo: un modelo OEM es un token corto, y mas que eso es una frase. Se
+# usa igual que el corte del titulo en el asunto.
+_MAX_MODELO = 40
+# Tope de columnas del bloque del correo, el mismo que el del resto del
+# mensaje. Dentro de <pre> no hay wrap: una linea de 110 caracteres en un
+# movil obliga a desplazar para leerla entera.
+_MAX_ASUNTO = 90
+# Corte de SIEMPRE del titulo dentro del asunto. El codigo y la solicitud
+# van por delante y no se tocan; el titulo es el unico que cede.
+_MAX_TITULO_ASUNTO = 40
 
 
 def _descripcion_oficial(a: dict) -> str:
@@ -914,6 +925,35 @@ def _descripcion_oficial(a: dict) -> str:
         return ""
 
 
+def _es_modelo_oem(modelo: str) -> bool:
+    """
+    True si modelo_especifico tiene forma de codigo OEM y no de frase.
+
+    Hace falta porque el modelo solo se pinta JUNTO a un NSN si aporta.
+    "Part / Model: NSN 1650-01-672-3405, Generic Description Pending OEM"
+    le daria al mayorista dos formas de llamarse a la misma pieza, y la que
+    estaria delante seria la inutil. Con codigo y modelo generico se
+    mantiene la prioridad del NSN; con codigo y modelo bueno, los dos.
+
+    Dos reglas, y ninguna de las dos es un traductor:
+
+      - Ha de llevar DIGITO. Un modelo es un numero de modelo, y los
+        suyos lo llevan: "S0594DU0500-S1", "XYZ-1", "Dell Latitude 5450".
+        Lo que no lo lleva es justo lo que no queremos: "Generic
+        Description Pending", "Not specified", "N/A", "".
+      - Nada mas largo que _MAX_MODELO. Un codigo es un token; una linea
+        de media pagina es una descripcion, por muy en ingles que este.
+
+    El castellano no se comprueba aqui: lo despacha _en_espanol en el
+    momento de pintar, que es donde se decide si algo entra en un correo
+    en ingles, y mezclar las dos puertas en una solo deja pasar casos.
+    """
+    m = str(modelo or "").strip()
+    if not m or len(m) > _MAX_MODELO:
+        return False
+    return re.search(r"\d", m) is not None
+
+
 def _identificadores_tecnicos(a: dict) -> list[str]:
     """
     TODOS los NSN y numeros de parte escritos en el aviso, no solo el primero.
@@ -931,7 +971,13 @@ def _identificadores_tecnicos(a: dict) -> list[str]:
         mismo "P/N AB-12345" en la especificacion y en el titulo es la
         misma pieza, y repetirlo no informa nada.
       - Si no hay ni NSN ni P/N, el modelo tal cual. Sin etiqueta
-        inventada.
+        inventada: con un hueco no se cotiza, y una descripcion vale mas
+        que nada.
+      - Si SI los hay, el modelo va DETRAS de ellos y solo si es un
+        codigo en regla (ver _es_modelo_oem). El campo se llama Part /
+        Model y las dos vistas de la misma pieza le sirven al mayorista:
+        el NSN para buscarlo en su sistema, el modelo para cruzarlo con
+        el del fabricante. Con un modelo que es una frase, no.
       - NUNCA se mira "contacto". Ese campo trae el correo del oficial de
         contratacion: de ahi saldria un "@" que tira los tests de la ficha
         y, sobre todo, un destinatario que no es el distribuidor.
@@ -986,10 +1032,24 @@ def _identificadores_tecnicos(a: dict) -> list[str]:
                     vistos.add(token.lower())
                     salida.append(token)
 
+    modelo = str(a.get("modelo_especifico") or "").strip()
+
     if not salida:
-        modelo = str(a.get("modelo_especifico") or "").strip()
+        # Sin codigos el modelo es lo unico que hay, y se pinta sea o no un
+        # codigo en regla: mejor una descripcion que un hueco vacio.
         if modelo:
             salida.append(modelo)
+    elif modelo and _es_modelo_oem(modelo):
+        # Con codigos, el modelo entra DETRAS de ellos. Los tres casos de
+        # "ya esta dicho" se comprueban con las etiquetas con las que el
+        # codigo habria salido antes: si la especificacion trae
+        # "P/N AB-12345" y el modelo es "AB-12345" es la misma pieza, y
+        # repetirla no le informa nada a nadie.
+        etiquetas = (modelo.lower(), f"p/n {modelo.lower()}",
+                     f"nsn {modelo.lower()}")
+        if not any(e in vistos for e in etiquetas):
+            salida.append(modelo)
+
     return salida
 
 
@@ -1164,11 +1224,41 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     cuerpo: list[str] = []
 
     # --- Asunto ------------------------------------------------------------
+    # El codigo por DELANTE de todo. Los RFQ no los lee primero ingenieria
+    # sino el equipo de ventas del mayorista, y el NSN es lo primero que se
+    # busca en un sistema de distribucion: "RFQ - NSN 1650-01-672-3405 -
+    # SPE60026T0050 - BATTERY, AIRCRAFT" se clasifica de un vistazo antes
+    # de abrirlo, y el que no trae codigo se queda como siempre.
+    #
+    # SOLO un NSN o un P/N detectados en el texto, no el modelo. El modelo,
+    # si es lo unico que hay, ya esta pintado en Part / Model, y aqui solo
+    # alargaria el asunto de las licitaciones que no son tecnicas. Las
+    # fichas sin codigo siguen saliendo con el asunto de siempre.
+    #
+    # Y sin cortar, a diferencia del titulo: una referencia a media no
+    # sirve para buscar nada, y _cortar_palabra se llevaria por delante un
+    # guion final. Un codigo de mas de _MAX_MODELO no es un codigo, y se
+    # deja fuera en vez de imprimirlo partido.
     asunto = "RFQ"
+    codigo_asunto = next((x for x in identidades
+                          if x.startswith(("NSN ", "P/N "))
+                          and len(x) <= _MAX_MODELO), "")
+    if codigo_asunto:
+        asunto += f" - {codigo_asunto}"
     if sol:
         asunto += f" - {sol}"
     if titulo:
-        asunto += f" - {_cortar_palabra(titulo, 40)}"
+        # El titulo cede hueco y los otros dos no: la solicitud y el codigo
+        # ya identifican la licitacion, y un titulo mas corto no identifica
+        # menos, mientras que partir el NSN dejaria una referencia que no
+        # se puede buscar. Se descuenta "Subject: " (9), el " - " que viene
+        # justo detras y los 3 que _cortar_palabra puede sumar al cerrar
+        # con "...", y con eso pagado se queda el corte de siempre o lo que
+        # quepa, lo que sea menor. Si ni siquiera eso cabe, el asunto se
+        # queda con la solicitud y el codigo, que es lo que identifica.
+        hueco = _MAX_ASUNTO - 9 - len(asunto) - 3 - 3
+        if hueco >= 12:
+            asunto += f" - {_cortar_palabra(titulo, min(_MAX_TITULO_ASUNTO, hueco))}"
     cuerpo.append(f"Subject: {asunto}")
     cuerpo.append("")
     cuerpo.append(saludo)
