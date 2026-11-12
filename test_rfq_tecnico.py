@@ -30,14 +30,25 @@ Que se comprueba, y por que:
    del search: leerlo no cuesta ni una llamada de red, y es lo que permite
    que el RFQ nombre el anexo.
 
-6) ESTRUCTURA: mensaje por debajo de 4096, <pre> equilibrado, ninguna linea
+6) LA DESCRIPCION OFICIAL TAMBIEN SE LEE. El NSN de una licitacion
+   tecnica (DLA, aviacion, defensa) rara vez esta en el titulo: el titulo
+   dice "BATTERY, AIRCRAFT" y el codigo esta en el cuerpo ("NSN
+   1650-01-672-3405: ..."), donde hasta ahora no lo leia NADIE. Se
+   comprueba que esa descripcion cacheada llena el campo Part / Model, que
+   un "Part No." pegado a un correo no se vuelve codigo, que una base caida
+   no tira el aviso, y que si no hay codigo escrito en NINGUNA parte el
+   campo se queda vacio en vez de inventarse.
+
+7) ESTRUCTURA: mensaje por debajo de 4096, <pre> equilibrado, ninguna linea
    por encima de 90 columnas y ni un "@" en el correo.
 
-7) RETROCOMPATIBILIDAD: las firmas publicas no cambian de forma ni de
+8) RETROCOMPATIBILIDAD: las firmas publicas no cambian de forma ni de
    sentido.
 
 NO toca la red: la llamada de Gemini se sustituye SOLO en la seccion 5,
-igual que en test_cadena_distribuidores.
+igual que en test_cadena_distribuidores. La descripcion de la seccion 6
+se cachea con la MISMA funcion que usa el barrido
+(store.cache_descripcion), no con una preparada para el test.
 """
 
 import json
@@ -76,6 +87,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import distribuidores  # noqa: F401,E402
 import gemini_analyzer  # noqa: E402
+import store  # noqa: E402
 import telegram_notify as tn  # noqa: E402
 
 
@@ -529,11 +541,140 @@ check("La ficha pinta el anexo del analisis",
 
 
 # =====================================================================
-# 6) ESTRUCTURA
+# 6) LA DESCRIPCION OFICIAL: EL NSN QUE NO ESTABA EN EL TITULO
 # =====================================================================
 print()
 print("=" * 76)
-print("6) ESTRUCTURA: 4096, <pre>, COLUMNAS, CERO ARROBA")
+print("6) LA DESCRIPCION OFICIAL TAMBIEN SE LEE")
+print("=" * 76)
+
+# Se cachea con store.cache_descripcion, que es EXACTAMENTE la funcion con
+# la que el barrido guarda el texto (scanner.py) antes de analizar. Con una
+# preparada para el test no se probaria lo que pasa de verdad.
+store.init_db()
+
+# Un aviso tecnico de verdad: el titulo es generico y el codigo solo esta
+# en el cuerpo. Es el caso en el que hasta ahora el campo salia vacio.
+DESC_NSN = ("NSN 1650-01-672-3405: BATTERY, AIRCRAFT, 24 VDC. "
+            "Manufacturer: Teledyne Battery Products. "
+            "Deliver FOB Destination to the consignee facility.")
+DESC_PN = ("Part No. AB-12345 bracket, steel, corrosion protected. "
+           "Furnished by the original equipment manufacturer.")
+DESC_SIN_CODIGO = ("Supply and delivery of industrial sealing compounds "
+                   "per the applicable specification.")
+# La clausula de contacto del aviso: un "Part No." pegado a un correo.
+DESC_CORREO = ("Technical data package available upon request. "
+               "Part No. john.smith@af.mil for all questions.")
+
+store.cache_descripcion("desc-nsn", DESC_NSN)
+store.cache_descripcion("desc-pn", DESC_PN)
+store.cache_descripcion("desc-sin", DESC_SIN_CODIGO)
+store.cache_descripcion("desc-correo", DESC_CORREO)
+store.cache_descripcion("desc-vacia", "")
+
+print("  desc-nsn -> %r" % tn._descripcion_oficial({"notice_id": "desc-nsn"}))
+
+check("Lee la descripcion cacheada tal cual",
+      tn._descripcion_oficial({"notice_id": "desc-nsn"}) == DESC_NSN,
+      "-> %r" % tn._descripcion_oficial({"notice_id": "desc-nsn"}))
+check("Sin notice_id no se toca la base",
+      tn._descripcion_oficial({"title": "BATTERY, AIRCRAFT"}) == "")
+check("Un notice_id al que nadie llego devuelve vacio",
+      tn._descripcion_oficial({"notice_id": "nadie-llego-aqui"}) == "")
+check("Una licitacion con descripcion 404 no aporta nada",
+      tn._descripcion_oficial({"notice_id": "desc-vacia"}) == "")
+
+
+# La base no puede tumbar un aviso que ya se analizo bien.
+def _base_rota(nid):
+    raise RuntimeError("database is locked")
+
+
+_bak = store.leer_descripcion
+store.leer_descripcion = _base_rota
+try:
+    caido = tn._descripcion_oficial({"notice_id": "desc-nsn"})
+finally:
+    store.leer_descripcion = _bak
+check("Si la base falla se devuelve vacio y no revienta",
+      caido == "", "-> %r" % caido)
+
+# --- Y el NSN del cuerpo entra en el correo ----------------------------
+FICHA_SIN_CODIGO = dict(FICHA, notice_id="desc-sin",
+                        especificacion_tecnica_clave="12V, Group 31, 1000 CCA",
+                        modelo_especifico="")
+pre_sin = _pre(tn.formatear_analisis(FICHA_SIN_CODIGO))
+check("Referencia: sin codigo escrito el campo sale vacio, como antes",
+      _campo(pre_sin, "Part / Model:") == "",
+      "-> %r" % _campo(pre_sin, "Part / Model:"))
+
+FICHA_DESC = dict(FICHA, notice_id="desc-nsn",
+                  especificacion_tecnica_clave="12V, Group 31, 1000 CCA",
+                  modelo_especifico="")
+pre_nsn = _pre(tn.formatear_analisis(FICHA_DESC))
+print("  Part / Model: %s" % _campo(pre_nsn, "Part / Model:"))
+check("El NSN que solo esta en el cuerpo LLENA el Part / Model",
+      _campo(pre_nsn, "Part / Model:") == "NSN 1650-01-672-3405",
+      "-> %r" % _campo(pre_nsn, "Part / Model:"))
+check("Y sale ademas en el campo Item, por el titulo",
+      _campo(pre_nsn, "Item:") == FICHA["title"],
+      "-> %r" % _campo(pre_nsn, "Item:"))
+
+FICHA_PN = dict(FICHA, notice_id="desc-pn",
+                especificacion_tecnica_clave="12V, Group 31, 1000 CCA",
+                modelo_especifico="")
+pre_pn = _pre(tn.formatear_analisis(FICHA_PN))
+print("  Part / Model: %s" % _campo(pre_pn, "Part / Model:"))
+check("Un numero de parte del cuerpo tambien entra",
+      _campo(pre_pn, "Part / Model:") == "P/N AB-12345",
+      "-> %r" % _campo(pre_pn, "Part / Model:"))
+
+# Y el requisito de fondo: el codigo se pinta EN LUGAR de la descripcion
+# generica, no al lado. "Part / Model: Generic..., NSN ..." le daria al
+# mayorista dos formas de llamarse a la misma pieza, y la mala seria la
+# que estaria delante.
+FICHA_SUSTITUYE = dict(FICHA, notice_id="desc-nsn",
+                       modelo_especifico="Generic Description Pending OEM")
+pre_sust = _pre(tn.formatear_analisis(FICHA_SUSTITUYE))
+print("  Part / Model: %s" % _campo(pre_sust, "Part / Model:"))
+check("El codigo del cuerpo SUSTITUYE a la descripcion generica",
+      _campo(pre_sust, "Part / Model:") == "NSN 1650-01-672-3405",
+      "-> %r" % _campo(pre_sust, "Part / Model:"))
+check("Y la descripcion generica no queda en ningun sitio del correo",
+      "Generic Description Pending" not in pre_sust,
+      "-> sigue en el correo")
+
+# --- Un correo jamas se vuelve un codigo --------------------------------
+FICHA_CORREO = dict(FICHA, notice_id="desc-correo",
+                    especificacion_tecnica_clave="12V, Group 31, 1000 CCA",
+                    modelo_especifico="")
+pre_correo = _pre(tn.formatear_analisis(FICHA_CORREO))
+check("Un 'Part No.' pegado a un correo NO se vuelve numero de parte",
+      tn._identificadores_tecnicos(FICHA_CORREO) == [],
+      "-> %s" % tn._identificadores_tecnicos(FICHA_CORREO))
+check("Ni el '@' ni el nombre del oficial llegan al RFQ",
+      "@" not in pre_correo and "smith" not in pre_correo,
+      "-> hay un @ o un nombre en el correo")
+
+# --- El orden, y lo que la singular congelada hace o no -----------------
+FICHA_PRIORIDAD = dict(FICHA, notice_id="desc-nsn",
+                       especificacion_tecnica_clave="P/N CD-67890",
+                       modelo_especifico="")
+check("El NSN del cuerpo manda sobre un P/N de un campo corto",
+      tn._identificadores_tecnicos(FICHA_PRIORIDAD)[0]
+      == "NSN 1650-01-672-3405",
+      "-> %s" % tn._identificadores_tecnicos(FICHA_PRIORIDAD))
+check("La singular sigue leyendo SOLO los tres campos de siempre",
+      tn._identificador_tecnico(FICHA_PRIORIDAD) == "P/N CD-67890",
+      "-> %r" % tn._identificador_tecnico(FICHA_PRIORIDAD))
+
+
+# =====================================================================
+# 7) ESTRUCTURA
+# =====================================================================
+print()
+print("=" * 76)
+print("7) ESTRUCTURA: 4096, <pre>, COLUMNAS, CERO ARROBA")
 print("=" * 76)
 
 # Un lote realista con codigos y anexos a la vez: es el peor caso que se
@@ -552,7 +693,8 @@ casos = [("base", FICHA),
          ("espec en castellano", espec_es),
          ("titulo en castellano", dict(FICHA,
                                        title="Baterias de arranque")),
-         ("espec larga", dict(FICHA, especificacion_tecnica_clave=ESPEC_LARGA))]
+         ("espec larga", dict(FICHA, especificacion_tecnica_clave=ESPEC_LARGA)),
+         ("descripcion cacheada", FICHA_DESC)]
 
 for nombre, ficha in casos:
     h = tn.formatear_analisis(ficha)
@@ -637,11 +779,11 @@ check("Ni una palabra en castellano en el correo de la ficha en espanol",
 
 
 # =====================================================================
-# 7) RETROCOMPATIBILIDAD
+# 8) RETROCOMPATIBILIDAD
 # =====================================================================
 print()
 print("=" * 76)
-print("7) RETROCOMPATIBILIDAD")
+print("8) RETROCOMPATIBILIDAD")
 print("=" * 76)
 
 check("formatear_analisis(a) sigue con un solo argumento",

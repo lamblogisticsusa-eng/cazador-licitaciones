@@ -874,6 +874,46 @@ _MAX_IDENTIFICADORES = 3
 _MAX_ANEXOS = 2
 
 
+def _descripcion_oficial(a: dict) -> str:
+    """
+    El texto oficial de la licitacion, si esta cacheado en store.
+
+    Esta funcion existe porque el NSN de las licitaciones tecnicas no esta
+    en el titulo. Un aviso de DLA o de aviacion se titula "BATTERY,
+    AIRCRAFT" o "BUSHING, TUBE" y el codigo esta en el cuerpo ("NSN
+    1650-01-672-3405: ..."). Hasta ahora ese cuerpo no se leia en ninguna
+    parte, el campo salia con el modelo generico o vacio, y el distribuidor
+    tenia que devolver el RFQ para preguntar de que pieza hablamos. La
+    descripcion es "el texto de la licitacion de SAM.gov", que es justo lo
+    que hay que buscar.
+
+    POR QUE SE LEE AQUI Y NO SE GUARDA EN EL ANALISIS: el texto ya esta
+    cacheado por el barrido (store.cache_descripcion) ANTES de llamar a
+    analizar, y volver a meterlo en el JSON del analisis duplicaria decenas
+    de kilobytes que ya estan en su sitio. Y vale para todo el que
+    renderiza: el aviso del barrido, /pdf sobre un analisis guardado la
+    semana pasada o una ficha suelta. Metido en el JSON, los analisis ya
+    guardados no lo tendrian nunca.
+
+    NO PUEDE TUMBAR NADA. Sin notice_id, sin store o con la base cerrada se
+    devuelve "" y se sigue cotizando con lo que si esta en el aviso: un
+    fallo de cache no puede tirar un mensaje que ya se analizo bien.
+
+    El texto se devuelve CRUDO, sin depurar: quien lo parsea es
+    _identificadores_tecnicos, y alli la guarda contra los correos del aviso
+    esta puesta en el sitio donde de verdad falla, que es en la captura del
+    codigo, no quitando texto que todavia no se sabe si es util.
+    """
+    nid = str(a.get("notice_id") or "").strip()
+    if not nid:
+        return ""
+    try:
+        import store
+        return str(store.leer_descripcion(nid) or "")
+    except Exception:
+        return ""
+
+
 def _identificadores_tecnicos(a: dict) -> list[str]:
     """
     TODOS los NSN y numeros de parte escritos en el aviso, no solo el primero.
@@ -895,6 +935,15 @@ def _identificadores_tecnicos(a: dict) -> list[str]:
       - NUNCA se mira "contacto". Ese campo trae el correo del oficial de
         contratacion: de ahi saldria un "@" que tira los tests de la ficha
         y, sobre todo, un destinatario que no es el distribuidor.
+      - Un correo tampoco vale como codigo aunque venga escrito dentro del
+        texto que si se lee: la descripcion oficial trae el "Part No."
+        pegado a la firma del oficial, y detras de la captura hay una "@".
+
+    CUATRO fuentes y no tres: ademas de los tres campos cortos, la
+    descripcion OFICIAL de SAM.gov (ver _descripcion_oficial). Es la que
+    faltaba en las licitaciones tecnicas, porque ahi el titulo es generico
+    ("BATTERY, AIRCRAFT") y el NSN solo esta en el cuerpo. Entra la
+    ULTIMA: si el codigo ya esta escrito en un campo corto, ese manda.
 
     Se quita la puntuacion FINAL del codigo, que _RE_PARTE se come porque su
     clase de caracteres incluye el punto: "P/N AB-12345." escrito a final
@@ -906,17 +955,32 @@ def _identificadores_tecnicos(a: dict) -> list[str]:
 
     INVARIANTE, congelado por test: el primer elemento que devuelve esta
     funcion es lo que devuelve _identificador_tecnico, visto desde el mismo
-    lado de la puntuacion.
+    lado de la puntuacion, mientras las dos lean los mismos campos. Como
+    aqui ademas se lee la descripcion oficial y alla no, si la descripcion
+    trae un NSN que en los tres campos cortos no esta, sale el NSN aqui y
+    no alla. Es el acierto, y sigue respetando la regla que comparten: el
+    NSN manda sobre el P/N.
     """
     textos = [str(a.get(c) or "")
               for c in ("especificacion_tecnica_clave", "modelo_especifico",
                         "title")]
+    textos.append(_descripcion_oficial(a))
     salida: list[str] = []
     vistos: set[str] = set()
 
     for patron, etiqueta in ((_RE_NSN, "NSN"), (_RE_PARTE, "P/N")):
         for texto in textos:
             for m in patron.finditer(texto):
+                # Un correo NO es un codigo. _RE_PARTE se come la parte
+                # izquierda de uno ("Part No. john.smith@af.mil" captura
+                # "john.smith", porque la clase no lleva "@") y ese supuesto
+                # codigo acabaria impreso en el RFQ como si fuera OEM: eso
+                # es inventar un numero de parte, que es la mentira que este
+                # repo no se permite, y el que pierde el tiempo buscandolo
+                # despues es el mayorista. Si justo DETRAS de la captura hay
+                # una "@", era un correo.
+                if texto[m.end():m.end() + 1] == "@":
+                    continue
                 token = f"{etiqueta} {m.group(1)}".rstrip(" .,;:")
                 if token and token.lower() not in vistos:
                     vistos.add(token.lower())
