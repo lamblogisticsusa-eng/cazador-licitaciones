@@ -93,6 +93,12 @@ os.environ["SAM_API_KEY"] = "CLAVE-DE-PRUEBA"
 os.environ["GEMINI_API_KEY"] = "x"
 os.environ["TELEGRAM_BOT_TOKEN"] = "x"
 os.environ["TELEGRAM_CHAT_ID"] = "123456789"
+# La seccion 5 mete resourceLinks a proposito (de ahi salen los anexos),
+# pero este test NO baja nada: aqui se comprueba el RFQ y el asunto, no la
+# lectura de PDFs, y una peticion de red en un test unitario es ruido que
+# un dia va a fallar en una maquina sin DNS. La lectura real se comprueba
+# en test_pdf_fetcher, con el transporte sustituido.
+os.environ["PDF_EN_ANALISIS"] = "0"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

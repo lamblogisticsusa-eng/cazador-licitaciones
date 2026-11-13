@@ -339,6 +339,23 @@ DRY_RUN = _bool("DRY_RUN", False)  # True = no envia mensajes, solo loguea
 # que borra el dato no deja forma de comprobar despues que habia filtrado.
 FILTER_OUT_HIGH_RISK_DLA = _bool("FILTER_OUT_HIGH_RISK_DLA", False)
 
+# Leer los PDFs adjuntos de SAM.gov (resourceLinks) y meter su texto en el
+# prompt antes de analizar. Es lo que llena los "No especificado" de NSN,
+# numero de parte, empaque militar y CAGE: esa informacion casi nunca esta
+# en la descripcion corta de la API, esta en el pliego.
+#
+# Por defecto en True: es el motivo de la Fase 7, y un pipeline que no lo
+# hace por defecto no lo hace. Lo que SI se puede apagar con una sola
+# variable de entorno es cuando el gasto no compensa: son 6 o 7 descargas
+# por licitacion con adjuntos, contra un tope diario de SAM.gov que ya se
+# agota. Ponerlo en False no rompe nada: el analisis sigue saliendo con la
+# descripcion oficial, que es exactamente lo que hacia antes.
+#
+# OJO: solo se apagaria la LECTURA, nunca se deja de analizar ni de
+# registrar. Y todo el modulo es defensivo: sin httpx, sin clave, con una
+# URL caida o con un PDF corrupto devuelve "" y sigue.
+PDF_EN_ANALISIS = _bool("PDF_EN_ANALISIS", True)
+
 ETIQUETAS_DIR = os.getenv("ETIQUETAS_DIR", "etiquetas")
 
 PORT = _int("PORT", 10000)

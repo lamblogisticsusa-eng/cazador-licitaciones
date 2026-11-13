@@ -308,7 +308,35 @@ def _modelos_sin_cuota(probados: list) -> str:
     return "\n".join(lineas) + "\n"
 
 
-def _construir_prompt(opp: dict, descripcion: str, lugar: str) -> str:
+def _bloque_adjuntos(corpus: str) -> str:
+    """
+    La seccion del prompt con el texto de los PDFs adjuntos. "" si no hay.
+
+    Va DETRAS de la descripcion oficial y no dentro de ella: son dos
+    fuentes distintas y el modelo tiene que poder distinguirlas. Si la
+    descripcion esta vacia el prompt ya lo dice con el aviso de
+    "*** NO DISPONIBLE ***", y el adjunto sigue ahi igual, que es
+    justamente el caso en el que mas aporta.
+    """
+    t = str(corpus or "").strip()
+    if not t:
+        return ""
+    return ("\n\nDOCUMENTOS ADJUNTOS DE SAM.GOV\n"
+            "Texto extraido de los pliegos, SOW y anexos que el comprador\n"
+            "publico con la licitacion. Es la fuente AUTORITATIVA para los\n"
+            "codigos: si un NSN, un numero de parte, un CAGE o una norma de\n"
+            "empaque aparece aqui, manda sobre lo que diga la descripcion\n"
+            "corta. Copialos tal cual, sin completarlos ni corregirlos.\n"
+            "\n" + t)
+
+
+def _construir_prompt(opp: dict, descripcion: str, lugar: str,
+                      corpus: str = "") -> str:
+    # `corpus` es opcional y llega vacio por defecto a proposito: las seis
+    # suites que construyen el prompt con tres argumentos reciben el MISMO
+    # texto de antes, byte a byte. Los adjuntos son un anadido, no un
+    # cambio de forma.
+    adjuntos_txt = _bloque_adjuntos(corpus)
     return f"""
 Eres Kyomoto, analista senior de abastecimiento del gobierno de EE.UU.
 Evalua esta oportunidad de CONTRATACION DE PRODUCTOS FISICOS para mi cliente:
@@ -401,13 +429,16 @@ SI ES VIABLE, ENTREGA:
                                   distribuidor cotice una pieza equivocada
                                   y pierda el tiempo buscandola.
   numeros_parte                 : los numeros de parte OEM EXACTOS que
-                                  aparezcan (etiquetas "P/N", "Part
-                                  Number", "Part No."). Copiados tal cual,
-                                  sin completarlos ni corregirlos. Lista
-                                  vacia [] si no hay ninguno.
+                                  aparezcan en la descripcion o en los
+                                  DOCUMENTOS ADJUNTOS (etiquetas "P/N",
+                                  "Part Number", "Part No."). Copiados
+                                  tal cual, sin completarlos ni
+                                  corregirlos. Lista vacia [] si no hay
+                                  ninguno.
   fuente_aprobada               : el fabricante aprobado / "approved
                                   source", o el CAGE de 5 caracteres si eso
-                                  es lo unico que trae. "" si no se indica.
+                                  es lo unico que trae, en la descripcion o
+                                  en los adjuntos. "" si no se indica.
   empaque                       : UNO de estos cuatro valores, literal:
                                     "MIL-STD-2073" | "MIL-STD-129" |
                                     "COMERCIAL" | "NO ESPECIFICADO"
@@ -415,12 +446,16 @@ SI ES VIABLE, ENTREGA:
                                   commercial packaging" o cuando no pide
                                   nada de empaque militar. NO ESPECIFICADO
                                   solo cuando habla de empaque pero no
-                                  dice cual es.
+                                  dice cual es. Mira la descripcion y los
+                                  DOCUMENTOS ADJUNTOS: ahi suele estar
+                                  escrito el "MIL-STD-2073".
   entregas                      : las direcciones de entrega EXACTAS que
-                                  aparezcan, cada una como "City, ST". Una
+                                  aparezcan en la descripcion o en los
+                                  adjuntos, cada una como "City, ST". Una
                                   sola si es entrega unica. Lista vacia si
                                   no hay ninguna escrita.
-  notas_descarga                : si menciona loading dock, forklift,
+  notas_descarga                : si en la descripcion o en los adjuntos
+                                  menciona loading dock, forklift,
                                   liftgate, descarga o restriccion de
                                   acceso, en UNA frase en ingles. "" si no
                                   menciona nada.
@@ -641,7 +676,7 @@ DATOS DE LA OPORTUNIDAD
   Enlace:        {opp.get('uiLink', '')}
 
 DESCRIPCION OFICIAL
-{descripcion if descripcion.strip() else "*** NO DISPONIBLE *** (SAM.gov respondio 404 'Description Not Found' para este aviso. Evalua SOLO con el titulo y los metadatos, y baja la certeza de tus estimaciones. Si el titulo no alcanza para saber si es producto fisico, marca viable=false.)"}
+{descripcion if descripcion.strip() else "*** NO DISPONIBLE *** (SAM.gov respondio 404 'Description Not Found' para este aviso. Evalua SOLO con el titulo y los metadatos, y baja la certeza de tus estimaciones. Si el titulo no alcanza para saber si es producto fisico, marca viable=false.)"}{adjuntos_txt}
 """.strip()
 
 
@@ -692,6 +727,30 @@ def _num(valor):
         return None
 
 
+def _corpus_pdf(opp: dict) -> str:
+    """
+    El texto de los PDFs adjuntos de este aviso, para el prompt.
+
+    Nunca lanza y nunca devuelve basura. Sin adjuntos, sin clave, con la
+    lectura apagada (config.PDF_EN_ANALISIS) o con la descarga caida,
+    devuelve "" y el analisis sigue con la descripcion oficial, que es lo
+    que hacia antes de la Fase 7.
+
+    Se llama DENTRO de analizar y no en el escaner, a proposito: quien
+    arma el prompt es quien sabe que le falta, y no hay una segunda
+    ocasion para anadirle los pliegos.
+    """
+    if not getattr(config, "PDF_EN_ANALISIS", True):
+        return ""
+    try:
+        import pdf_fetcher
+        return pdf_fetcher.corpus_para_analisis(opp or {})
+    except Exception as e:
+        log.warning("analisis: no se pudieron leer los adjuntos (%s); se "
+                    "sigue solo con la descripcion oficial", e)
+        return ""
+
+
 def analizar(
     opp: dict,
     descripcion: str,
@@ -728,8 +787,14 @@ def analizar(
     # ESA funcion para meter su doble. Si la llamada se fabricara su propio
     # cliente, esas seis dejarian de probar nada y seguirian en verde.
     cliente = _get_cliente()
+    # Los pliegos van al prompt, no a la descripcion: la descripcion es lo
+    # que SAM.gov escribe, y el adjunto es lo que el comprador publico. El
+    # modelo recibe las dos fuentes separadas para poder saber de donde
+    # sale cada codigo.
+    corpus = _corpus_pdf(opp)
     prompt = _construir_prompt(opp, descripcion,
-                               lugar or filters.lugar_de_entrega(opp))
+                               lugar or filters.lugar_de_entrega(opp),
+                               corpus)
 
     # El 503 es por MODELO, no por la cuenta. Medido el 28-sep-2026:
     #   gemini-3.8-flash  OK 5,1s        gemini-3.6-flash    OK 4,2s
