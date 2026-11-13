@@ -275,7 +275,20 @@ check("El '~' va en presupuesto y costo, NO en la ganancia",
       and "$11,242.50" in h)
 check("Y el precio ofertado NO lleva '~' (se calcula)",
       "~$74,500" not in h and "$74,500.00" in h)
-check("Cabe en un solo mensaje", len(h) < 4096, "-> %d" % len(h))
+# OJO: ya no se pide que la ficha entera quepa en UN mensaje. La ficha
+# lleva ahora cuatro cosas que antes no (bandera de complejidad, NSN/P-N,
+# logistica y empaque) y el correo dos viñetas de cumplimiento mas, y en
+# los casos largos eso se pasa de las 4096 de Telegram. Lo que NO se puede
+# permitir es que el corte rompa el correo, y eso es lo que comprueban los
+# dos checks de troceo de mas abajo.
+trozos_h = tn._trocear(h, 4096 - 32)
+check("Cualquier trozo cabe en Telegram",
+      all(len(t) < 4096 for t in trozos_h),
+      "-> %s" % [len(t) for t in trozos_h])
+check("Y el correo viaja ENTERO, en un solo trozo",
+      sum(1 for t in trozos_h if "Subject: Wholesale RFQ" in t) == 1,
+      "-> %d trozos con el correo"
+      % sum(1 for t in trozos_h if "Subject: Wholesale RFQ" in t))
 
 print()
 print("  Sin descripcion y sin candidatos (el peor caso):")

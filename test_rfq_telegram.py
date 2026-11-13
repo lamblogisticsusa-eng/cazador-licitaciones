@@ -136,7 +136,7 @@ check("Las secciones de antes siguen ahi",
 
 pres = re.findall(r"<pre>(.*?)</pre>", h, re.S)
 check("El correo va dentro de un <pre>", len(pres) >= 2
-      and "Subject: RFQ" in pres[-1], "-> %d bloques" % len(pres))
+      and "Subject: Wholesale RFQ" in pres[-1], "-> %d bloques" % len(pres))
 check("El PRIMER <pre> sigue siendo el resumen financiero",
       "Presupuesto govt." in pres[0], "-> %r" % pres[0][:60])
 check("El de escenarios sigue en el medio",
@@ -146,7 +146,9 @@ print()
 print("  Aislamiento total del bot dentro del <pre>:")
 
 check("El </pre> cierra justo detras de la firma corporativa",
-      "EIN: 32-0868469\n</pre>" in h, "-> no cierra ahi")
+      "Albuquerque, NM 87110\n</pre>" in h, "-> no cierra ahi")
+check("Y la firma NO arrastra el EIN", "EIN" not in pres[-1],
+      "-> sigue el EIN en el correo")
 check("El rotulo de la seccion queda FUERA del <pre>",
       h.index("RFQ Listo para Enviar") < h.index("<pre>\nSubject:"),
       "-> esta dentro")
@@ -158,9 +160,9 @@ for frase_bot in ("Kyomoto", "Amo, oportunidad", "(˶", "antes de escribir",
 check("Dentro solo hay texto de correo, plano y sin etiquetas",
       all(x not in pres[-1] for x in ("<b>", "<i>", "<a href", "<code>")),
       "-> hay etiqueta dentro")
-check("Y el bloque empieza en Subject y acaba en el EIN",
+check("Y el bloque empieza en Subject y acaba en la ciudad de la firma",
       pres[-1].lstrip("\n").startswith("Subject:")
-      and pres[-1].rstrip().endswith("EIN: 32-0868469"),
+      and pres[-1].rstrip().endswith("Albuquerque, NM 87110"),
       "-> %r ... %r" % (pres[-1][:30], pres[-1][-30:]))
 
 
@@ -178,10 +180,16 @@ cuerpo = pres[-1]
 # above" nunca se encontraria aunque este escrito completo.
 plano = " ".join(cuerpo.split())
 
-check("Asunto con el numero de solicitud",
-      plano.startswith("Subject: RFQ - 36C24526Q0123"), "-> %r"
-      % plano[:60])
-check("Linea de solicitud", "  Solicitation: 36C24526Q0123" in cuerpo)
+check("Asunto SIN el numero de solicitud (confidencialidad de la oferta)",
+      plano.startswith("Subject: Wholesale RFQ - Batteries"), "-> %r"
+      % plano[:70])
+check("Y el numero de solicitud no aparece NI en el asunto NI en el cuerpo",
+      "36C24526Q0123" not in cuerpo, "-> se colo")
+check("Pero el correo si dice de donde viene el trabajo",
+      "in support of a U.S. federal government solicitation" in plano,
+      "-> no esta")
+check("El equipo SI sigue viendo la solicitud en la ficha (fuera del pre)",
+      "36C24526Q0123" in h, "-> desaparecio")
 check("Descripcion tecnica del producto (Item)",
       "  Item:         Batteries, Lead-Acid" in cuerpo, "-> no esta")
 check("Cantidad con su unidad", "  Quantity:     500 EA" in cuerpo,
@@ -211,13 +219,16 @@ check("   Y pidiendo el envio sin costo por volumen",
 check("4) CoC o trazabilidad OEM para pieza tecnica o militar",
       "Certificate of Conformity (CoC)" in plano
       and "OEM traceability" in plano, "-> no esta")
-check("5) Los dos dias antes del cierre para presentar la oferta federal",
-      "at least two (2) days before the closing date above" in plano
-      and "federal offer on time" in plano, "-> no esta")
+check("5) Los cinco dias antes del cierre para presentar la oferta federal",
+      ("five (5) days before the closing date above" in plano
+       or re.search(r"by [A-Z][a-z]+ \d+, \d{4}, five \(5\) days before",
+                    plano)) and "federal offer on time" in plano,
+      "-> no esta")
 
 check("La carta de apertura explica el encargo con tono formal",
       "We are requesting a formal quotation for the item detailed below "
-      "in support of a U.S. federal solicitation" in plano, "-> no esta")
+      "in support of a U.S. federal government solicitation" in plano,
+      "-> no esta")
 check("La lista de requerimientos va en viñetas, no numerada",
       "  • Unit and total wholesale pricing" in cuerpo
       and not re.search(r"^\s*1\. Unit", cuerpo, re.M), "-> no esta")
@@ -231,9 +242,12 @@ print()
 print("  La firma, tal cual la pidio el cliente:")
 for linea in ("Bastian Cordero",
               "Managing Member | L.A.M.B Logistics LLC",
-              "Albuquerque, NM 87110 | EIN: 32-0868469"):
+              "Albuquerque, NM 87110"):
     check("  %s" % linea, cuerpo.rstrip().endswith(linea)
           or ("\n" + linea) in cuerpo, "-> no esta")
+check("Y SIN el EIN: es un dato fiscal que al distribuidor no le hace "
+      "falta para cotizar y este correo se pega en bandejas ajenas",
+      "32-0868469" not in cuerpo, "-> se colo el EIN")
 
 
 # =====================================================================
@@ -268,7 +282,7 @@ h_vacio = tn.formatear_analisis(dict(FICHA, distribuidores_candidatos=[],
 check("Sin candidatos, el saludo es generico",
       "\nDear Sales Team,\n" in h_vacio, "-> no degrada")
 check("Y el RFQ sigue saliendo igual",
-      "Subject: RFQ" in h_vacio, "-> desaparece el bloque")
+      "Subject: Wholesale RFQ" in h_vacio, "-> desaparece el bloque")
 
 
 # =====================================================================
@@ -288,10 +302,12 @@ malas = [p.strip() for p in palabras if p in plano.lower()]
 check("Ni una palabra en espanol dentro del correo", not malas,
       "-> %s" % malas)
 check("Los rotulos son ingleses",
-      all(x in plano for x in ("Subject:", "Solicitation:", "Item:",
+      all(x in plano for x in ("Subject:", "Item:", "Part / Model:",
                                "Quantity:", "Closing:", "Ship-To:",
                                "please provide the following:",
                                "Thank you for your consideration.")))
+check("Y NO esta la de solicitud: el numero se protege",
+      "Solicitation:" not in plano, "-> se colo")
 check("La nota en espanol queda FUERA del <pre>",
       "confirma que vende el producto antes de escribir" not in cuerpo)
 
@@ -356,9 +372,34 @@ plano_sf = " ".join(pre_sf.split())
 check("No aparece la linea Closing", "  Closing:" not in pre_sf,
       "-> se colo una fecha")
 check("No aparece 'Vence'", "Vence" not in h_sin_fecha, "-> se colo")
-check("La frase de los dos dias sigue, sin apuntar a una fecha inventada",
-      "at least two (2) days before the solicitation closing date"
+check("La frase de los cinco dias sigue, sin apuntar a una fecha inventada",
+      "at least five (5) days before the solicitation closing date"
       in plano_sf, "-> no esta")
+
+print()
+print("  El plazo del distribuidor son cinco dias de calendario antes del cierre:")
+check("  Cierre ilegible -> no se pinta fecha",
+      tn._fecha_cotizacion("no es una fecha") == "")
+check("  Sin cierre -> no se pinta fecha",
+      tn._fecha_cotizacion("") == "")
+# El cierre tiene que ser a mas de cinco dias para que la fecha limite
+# salga impresa: si ya habria pasado, es una mentira que el distribuidor
+# descubre al responder. Se construye una fecha futura a proposito para
+# que el test no dependa del dia en que se ejecute.
+from datetime import datetime, timedelta, timezone
+_futuro = (datetime.now(timezone.utc) + timedelta(days=20))
+_fecha_txt = "%04d-%02d-%02dT12:00:00+00:00" % (
+    _futuro.year, _futuro.month, _futuro.day)
+check("  Cierre a 20 dias -> sale la fecha limite, cinco dias antes",
+      tn._fecha_cotizacion(_fecha_txt)
+      == "%s %d, %d" % (tn._MESES_EN[(_futuro - timedelta(days=5)).month - 1],
+                        (_futuro - timedelta(days=5)).day,
+                        (_futuro - timedelta(days=5)).year),
+      "-> %r" % tn._fecha_cotizacion(_fecha_txt))
+_cerca = (datetime.now(timezone.utc) + timedelta(days=3))
+check("  Cierre a 3 dias -> no se pinta una fecha limite que ya habria pasado",
+      tn._fecha_cotizacion("%04d-%02d-%02dT12:00:00+00:00" % (
+          _cerca.year, _cerca.month, _cerca.day)) == "")
 
 print()
 print("  Fechas en ingles:")
@@ -410,7 +451,7 @@ flojo = tn.formatear_analisis(dict(
     lugar_entrega=""))
 check("El peor caso tambien cabe", len(flojo) < 4096, "-> %d" % len(flojo))
 check("Y en ese peor caso el RFQ sigue saliendo",
-      "Subject: RFQ" in flojo, "-> desaparece")
+      "Subject: Wholesale RFQ" in flojo, "-> desaparece")
 check("Sin candidatos, sin fecha y sin destino no se inventa nada",
       "Dear Sales Team," in flojo and "  Closing:" not in flojo
       and "  Ship-To:" not in flojo and "@" not in flojo,
@@ -451,12 +492,12 @@ print("  Y con la ficha entera, rellenada hasta pasarse:")
 relleno = ("Relleno para pasar el limite de Telegram. " * 120).strip()
 check("El relleno pasa de 4096", len(relleno) > 4096, "-> %d" % len(relleno))
 trozos = tn._trocear(relleno + "\n" + h)
-con_rfq = [t for t in trozos if "Subject: RFQ" in t]
+con_rfq = [t for t in trozos if "Subject: Wholesale RFQ" in t]
 check("El RFQ viaja en UN solo trozo", len(con_rfq) == 1,
       "-> %d trozos con el correo" % len(con_rfq))
 if con_rfq:
-    check("Con el </pre> justo detras del EIN",
-          "EIN: 32-0868469\n</pre>" in con_rfq[0], "-> no cierra ahi")
+    check("Con el </pre> justo detras de la ciudad de la firma",
+          "Albuquerque, NM 87110\n</pre>" in con_rfq[0], "-> no cierra ahi")
     check("Y el rotulo de la seccion no se queda huerfano dentro",
           "RFQ Listo para Enviar" not in con_rfq[0], "-> se colo")
 check("Se trocea sin romper ningun <pre> del mensaje",
@@ -468,11 +509,131 @@ check("Ningun trozo pasa de 4096", all(len(t) <= 4096 for t in trozos),
 
 
 # =====================================================================
-# 7) RETROCOMPATIBILIDAD
+# 7) LO NUEVO DE LA FICHA: COMPLEJIDAD, CODIGOS Y LOGISTICA
 # =====================================================================
 print()
 print("=" * 76)
-print("7) RETROCOMPATIBILIDAD Y QUE NO HAYA SECRETOS")
+print("7) COMPLEJIDAD, NSN/P-N, LOGISTICA Y EMPAQUE")
+print("=" * 76)
+
+pos_sa = h.find("Total Small Business")
+pos_cx = h.find("Nivel de Complejidad")
+check("La bandera de complejidad existe y es obligatoria",
+      pos_cx > 0, "-> no esta")
+check("Y va JUSTO debajo del Set-Aside, antes del producto",
+      0 < pos_sa < pos_cx < h.find("<b>Producto</b>"),
+      "-> sa=%d cx=%d" % (pos_sa, pos_cx))
+check("Trae su motivo, porque una bandera sin motivo no se discute",
+      "—" in h[pos_cx:h.find("\n", pos_cx)], "-> no trae motivo")
+check("Trae uno de los tres niveles conocidos",
+      any(x in h[pos_cx:h.find("\n", pos_cx)]
+          for x in ("ALTA COMPLEJIDAD", "COMPLEJIDAD MEDIA", "PTIMA")),
+      "-> nivel desconocido")
+
+print()
+print("  Los codigos exactos dentro del bloque de Producto:")
+pos_prod = h.find("<b>Producto</b>")
+pos_fin = h.find("<b>Resumen financiero</b>")
+prod = h[pos_prod:pos_fin]
+check("NSN y P/N salen siempre, con su rotulo",
+      ("NSN:" in prod and "P/N:" in prod) or "NSN / P/N:" in prod,
+      "-> no salen")
+# Sin descripcion cacheada no hay codigo que leer, y ahi se manda al
+# pliego en vez de inventar uno.
+check("Sin ningun codigo, dice 'No especificado - Verificar pliego'",
+      "No especificado - Verificar pliego" in prod, "-> no degrada")
+# Con un NSN escrito en el aviso, sale el NSN y no el modelo.
+con_nsn_ficha = tn.formatear_analisis(dict(
+    FICHA, especificacion_tecnica_clave="NSN 6140-01-234-5678, 1000 CCA"))
+prod_nsn = con_nsn_ficha[con_nsn_ficha.find("<b>Producto</b>"):
+                         con_nsn_ficha.find("<b>Resumen financiero</b>")]
+check("Con NSN escrito, sale el NSN exacto",
+      "NSN: 6140-01-234-5678" in prod_nsn, "-> no salio")
+check("Y el NSN de la ficha es el MISMO que el del Part / Model del RFQ",
+      "6140-01-234-5678" in "\n".join(
+          tn._bloque_rfq(dict(FICHA, especificacion_tecnica_clave=
+                              "NSN 6140-01-234-5678, 1000 CCA"),
+                         {"candidatos": [{}], "nombre": "X"})),
+      "-> se contradicen")
+
+print()
+print("  La linea de logistica:")
+check("Aparece con su rotulo", "Logística:" in h, "-> no esta")
+check("Trae el empaque, aunque sea 'No especificado'",
+      "Empaque:" in h, "-> no trae empaque")
+check("Nunca promete 'Entrega Unica' sin conocer el recuento",
+      ("Entrega Única" in h) == bool(FICHA.get("entregas")),
+      "-> promete sin saber")
+check("Y el Ship-To del correo sigue intacto",
+      "  Ship-To:      Norfolk, VA (South)" in cuerpo, "-> cambio")
+
+print()
+print("  Los dos pedidos de cumplimiento, obligatorios:")
+check("U.S. origin / Buy American Act (FAR 52.225-1) o TAA",
+      "U.S. origin / Buy American Act (FAR 52.225-1) or TAA"
+      in plano, "-> no esta")
+check("Y el estandar de empaque (Comercial o MIL-STD)",
+      "Packaging compliance: Commercial or MIL-STD-2073 / MIL-STD-129."
+      in plano, "-> no esta")
+
+print()
+print("  El empaque conocido se inyecta en el RFQ y cambia el punto:")
+con_emp = dict(FICHA, empaque="MIL-STD-2073")
+pre_emp = "\n".join(tn._bloque_rfq(con_emp,
+                                   {"candidatos": [{}], "nombre": "X"}))
+check("La linea Packaging sale con el estandar",
+      "  Packaging:    MIL-STD-2073" in pre_emp, "-> no sale")
+check("Y el punto nombra ese estandar",
+      "Packaging to MIL-STD-2073 with military markings" in pre_emp,
+      "-> no lo nombra")
+pre_com = "\n".join(tn._bloque_rfq(dict(FICHA, empaque="COMERCIAL"),
+                                   {"candidatos": [{}], "nombre": "X"}))
+check("Si es comercial, se dice comercial",
+      "  Packaging:    Standard Commercial Packaging" in pre_com
+      and "Standard commercial packaging as required." in pre_com,
+      "-> no lo dice")
+pre_noemp = "\n".join(tn._bloque_rfq(dict(FICHA, empaque="NO ESPECIFICADO"),
+                                     {"candidatos": [{}], "nombre": "X"}))
+check("Si no se sabe, no se pinta la linea (nunca se inventa)",
+      "  Packaging:" not in pre_noemp, "-> se colo")
+
+print()
+print("  El nivel de complejidad se calcula con reglas, no con el modelo:")
+import complejidad
+check("  DLA Aviation + ITAR -> ALTA",
+      complejidad.evaluar({"agencia": "DLA Aviation",
+                           "cumple": ["ITAR"]})[0] == complejidad.ALTA)
+check("  DLA Land and Maritime + FAT -> ALTA",
+      complejidad.evaluar(
+          {"agencia": "Defense Logistics Agency > DLA Land and Maritime",
+           "cumple": ["First Article Testing"]})[0] == complejidad.ALTA)
+check("  DLA Aviation sin gatillo -> NO es ALTA",
+      complejidad.evaluar({"agencia": "DLA Aviation",
+                           "cumple": []})[0] != complejidad.ALTA)
+check("  USDA sin nada -> OPTIMA",
+      complejidad.evaluar({"agencia": "USDA", "cumple": []}
+                          )[0] == complejidad.OPTIMA)
+check("  Empaque militar -> MEDIA",
+      complejidad.evaluar({"agencia": "USDA",
+                           "cumple": ["MIL-STD-2073"]})[0]
+      == complejidad.MEDIA)
+check("  Dos o mas destinos -> MEDIA",
+      complejidad.evaluar({"agencia": "USDA", "cumple": [],
+                           "entregas": ["Norfolk, VA", "San Diego, CA"]}
+                          )[0] == complejidad.MEDIA)
+check("  'NOT ITAR' no cuenta como gatillo (no se anula a si mismo)",
+      "ITAR" not in complejidad.canonizar(["NOT ITAR"]))
+check("  Analisis antiguo sin campos -> OPTIMA y lo dice",
+      complejidad.evaluar({"agencia": "GSA"})[0] == complejidad.OPTIMA
+      and "analisis anterior" in complejidad.evaluar({"agencia": "GSA"})[1])
+
+
+# =====================================================================
+# 8) RETROCOMPATIBILIDAD
+# =====================================================================
+print()
+print("=" * 76)
+print("8) RETROCOMPATIBILIDAD Y QUE NO HAYA SECRETOS")
 print("=" * 76)
 
 check("formatear_analisis conserva su firma",
@@ -489,8 +650,10 @@ check("_identificador_tecnico(a) devuelve str",
 check("La firma es exactamente la que pidio el cliente",
       tn.FIRMA_RFQ == ("Bastian Cordero\n"
                        "Managing Member | L.A.M.B Logistics LLC\n"
-                       "Albuquerque, NM 87110 | EIN: 32-0868469"),
+                       "Albuquerque, NM 87110"),
       "-> %r" % (tn.FIRMA_RFQ,))
+check("Y sin el EIN, que el cliente pidio quitar",
+      "EIN" not in tn.FIRMA_RFQ, "-> sigue el EIN")
 
 with open(tn.__file__, encoding="utf-8") as _f:
     _fuente = _f.read()

@@ -31,6 +31,7 @@ import time
 import config
 import filters
 import sensibilidad
+import complejidad
 
 log = logging.getLogger("kyomoto.gemini")
 
@@ -47,6 +48,22 @@ ESQUEMA = {
     "cantidad_total": "num",
     "especificacion_tecnica_clave": "str",
     "lugar_entrega": "str",
+    # --- Extraccion tecnica y de cumplimiento ---
+    # Todo esto se LEE de la descripcion y de los adjuntos, y si no esta
+    # escrito va vacio. Un NSN o un numero de parte inventados hacen que el
+    # distribuidor cotice una pieza equivocada, que es la mentira que este
+    # repo no se permite: por eso son campos de lectura, no de juicio.
+    "nsn": "str",
+    "numeros_parte": "[str]",
+    "fuente_aprobada": "str",
+    "empaque": "str",
+    "entregas": "[str]",
+    "notas_descarga": "str",
+    # Los gatillos de riesgo, con el vocabulario CERRADO que se le lista en
+    # el prompt. La clasificacion (🚩/🟡/🟢) no la hace el modelo: la
+    # calcula complejidad.py a partir de estos hechos, para que sea
+    # reproducible y testeable. Ver el docstring de ese modulo.
+    "cumple": "[str]",
     # --- Precio por unidad ---
     "precio_unitario_costo": "num|null",
     "precio_unitario_mercado": "num|null",
@@ -375,6 +392,53 @@ SI ES VIABLE, ENTREGA:
   cantidad_total                : numero de unidades. Sin "comas" ni texto.
   especificacion_tecnica_clave  : 3-5 datos tecnicos que hay que cumplir
   lugar_entrega                 : ciudad / estado, o "No especificado"
+  nsn                          : el National Stock Number EXACTO, con su
+                                  formato 4-2-3-4 de 13 digitos
+                                  (1650-01-123-4567), SOLO si esta escrito
+                                  en la descripcion o en los adjuntos.
+                                  Si no esta, "". NUNCA lo deduzcas ni lo
+                                  completes: un NSN fabricado hace que el
+                                  distribuidor cotice una pieza equivocada
+                                  y pierda el tiempo buscandola.
+  numeros_parte                 : los numeros de parte OEM EXACTOS que
+                                  aparezcan (etiquetas "P/N", "Part
+                                  Number", "Part No."). Copiados tal cual,
+                                  sin completarlos ni corregirlos. Lista
+                                  vacia [] si no hay ninguno.
+  fuente_aprobada               : el fabricante aprobado / "approved
+                                  source", o el CAGE de 5 caracteres si eso
+                                  es lo unico que trae. "" si no se indica.
+  empaque                       : UNO de estos cuatro valores, literal:
+                                    "MIL-STD-2073" | "MIL-STD-129" |
+                                    "COMERCIAL" | "NO ESPECIFICADO"
+                                  COMERCIAL cuando pide "standard
+                                  commercial packaging" o cuando no pide
+                                  nada de empaque militar. NO ESPECIFICADO
+                                  solo cuando habla de empaque pero no
+                                  dice cual es.
+  entregas                      : las direcciones de entrega EXACTAS que
+                                  aparezcan, cada una como "City, ST". Una
+                                  sola si es entrega unica. Lista vacia si
+                                  no hay ninguna escrita.
+  notas_descarga                : si menciona loading dock, forklift,
+                                  liftgate, descarga o restriccion de
+                                  acceso, en UNA frase en ingles. "" si no
+                                  menciona nada.
+  cumple                        : SOLO valores de esta lista cerrada, y
+                                  SOLO los que esten escritos en la
+                                  descripcion o en los adjuntos:
+                                    "FIRST ARTICLE TESTING",
+                                    "CRITICAL SAFETY ITEM", "ITAR",
+                                    "SOURCE APPROVAL REQUEST",
+                                    "NON-MANUFACTURER RULE",
+                                    "MIL-STD-2073", "MIL-STD-129",
+                                    "BUY AMERICAN ACT", "FAR 52.225-1",
+                                    "BERRY AMENDMENT"
+                                  Lista vacia [] si no hay ninguno. NO los
+                                  infieras por el nombre de la agencia ni
+                                  por lo que es habitual en defensa: si no
+                                  esta escrito, no esta en la lista. Se
+                                  escriben en mayusculas tal cual.
   valor_contrato_usd            : mejor estimacion del valor total
   precio_unitario_costo         : lo que cuesta COMPRAR una unidad en USA
   precio_unitario_mercado       : precio de catalogo de una unidad
@@ -538,6 +602,9 @@ Ejemplo, bidding 50 laptops:
   "unidad_medida": "EA", "cantidad_total": 50,
   "especificacion_tecnica_clave": "i5-1345U, 16GB RAM, 512GB SSD",
   "lugar_entrega": "Fort Huachuca / Arizona / UNITED STATES",
+  "nsn": "", "numeros_parte": [], "fuente_aprobada": "",
+  "empaque": "COMERCIAL", "entregas": ["Fort Huachuca, Arizona"],
+  "notas_descarga": "", "cumple": [],
   "valor_contrato_usd": 66000,
   "precio_unitario_costo": 1200, "precio_unitario_mercado": 1249,
   "precio_unitario_oferta": 1320, "ganancia_por_unidad": 120,
@@ -853,6 +920,23 @@ def analizar(
         "cantidad_total": cantidad,
         "especificacion_tecnica_clave": _limpiar_ia(datos.get("especificacion_tecnica_clave"))[:700],
         "lugar_entrega": _limpiar_ia(datos.get("lugar_entrega")) or lugar or "No especificado",
+        # --- Extraccion tecnica y de cumplimiento ---
+        # Campos de LECTURA: lo que dice la descripcion o los adjuntos. Si
+        # no esta escrito, va vacio. Un NSN o un P/N inventados hacen que
+        # el distribuidor cotice una pieza equivocada, y esa es la unica
+        # mentira que este bot no se permite.
+        "nsn": _nsn(datos.get("nsn")),
+        "numeros_parte": [_limpiar_ia(x)[:60]
+                          for x in _lista(datos.get("numeros_parte"))][:6],
+        "fuente_aprobada": _limpiar_ia(datos.get("fuente_aprobada"))[:120],
+        "empaque": _empaque(datos.get("empaque")),
+        "entregas": _direcciones(datos.get("entregas")),
+        "notas_descarga": _limpiar_ia(datos.get("notas_descarga"))[:200],
+        # Se guarda YA canonizado: solo pueden entrar los nombres del
+        # vocabulario cerrado de complejidad.py. Guardar lo que el modelo
+        # dijo con sus propias palabras seria dar por bueno algo que aun
+        # no se ha entendido, y encima no se podria comprobar despues.
+        "cumple": complejidad.canonizar(datos.get("cumple")),
         # Unidad
         "precio_unitario_costo": pu_costo,
         "precio_unitario_mercado": pu_mercado,
@@ -1120,6 +1204,89 @@ def _limpiar_ia(valor) -> str:
     texto = re.sub(r"`{1,3}([^`\n]+)`{1,3}", r"\1", texto)
     texto = texto.replace("`", "")
     return texto.strip()
+
+
+def _nsn(bruto) -> str:
+    """
+    El NSN en su formato 4-2-3-4, o "" si no tiene forma de NSN.
+
+    Un NSN son 13 digitos. Si vienen pegados (1650011234567) se les ponen
+    las rayas, que es arreglar el FORMATO y no inventar el numero. Si no
+    hay 13 digitos seguidos con forma de NSN, no hay NSN, y devolver el
+    texto tal cual dejaria en el RFQ una referencia que el distribuidor
+    buscaria sin encontrar.
+
+    Se busca con limites de palabra dentro de lo que llegue, porque el
+    modelo a veces devuelve "NSN 1650-01-123-4567 (see attachment)" y el
+    numero, que es lo unico que sirve, esta ahi dentro.
+    """
+    t = str(bruto or "").strip().upper()
+    if t.startswith("NSN"):
+        t = t[3:].strip(" :")
+    m = re.search(r"\b\d{4}-\d{2}-\d{3}-\d{4}\b", t)
+    if m:
+        return m.group(0)
+    m = re.search(r"\b\d{13}\b", t)
+    if m:
+        d = m.group(0)
+        return f"{d[:4]}-{d[4:6]}-{d[6:9]}-{d[9:]}"
+    return ""
+
+
+# Las cuatro formas que se le piden al modelo, y a las que se reduce todo
+# lo que devuelva. "MIL-STD-2073-1" cuenta como MIL-STD-2073: el -1 es la
+# revision, no otro estandar.
+_EMPAQUE = ("MIL-STD-2073", "MIL-STD-129", "COMERCIAL", "NO ESPECIFICADO")
+
+
+def _empaque(bruto) -> str:
+    """
+    El estandar de empaque, reducido a los valores que se le pidieron.
+
+    Si el modelo dice "MIL-STD" sin numero se queda en MIL-STD, que es lo
+    que pone el aviso: inventar el 2073 o el 129 seria decidir por el
+    distribuidor cual de los dos tiene que cumplir.
+    """
+    t = _limpiar_ia(bruto).upper()
+    if not t:
+        return "NO ESPECIFICADO"
+    m = re.search(r"MIL[\s-]*STD[\s-]*\d+", t)
+    if m:
+        return m.group(0).replace(" ", "-")
+    if "MIL-STD" in t or "MIL STD" in t:
+        return "MIL-STD"
+    if "COMMERCIAL" in t or "COMERCIAL" in t:
+        return "COMERCIAL"
+    for v in _EMPAQUE:
+        if v in t:
+            return v
+    return "NO ESPECIFICADO"
+
+
+def _direcciones(valor) -> list[str]:
+    """
+    Las direcciones de entrega, una por linea y sin inventar ninguna.
+
+    Solo se aceptan las que traen ciudad Y estado ("Albuquerque, NM"): una
+    linea sin estado no sirve para saber a donde se envia, que es lo
+    unico que le importa al distribuidor al leer este campo.
+    """
+    if isinstance(valor, str):
+        valor = [valor]
+    if not isinstance(valor, (list, tuple)):
+        return []
+    fuera: list[str] = []
+    for bruto in valor:
+        linea = " ".join(str(bruto or "").split())
+        if not linea or len(linea) > 90:
+            continue
+        # Ciudad, ST  |  City, State  |  City/ST
+        partes = re.split(r"[,/]| - ", linea)
+        if len([p for p in partes if p.strip()]) < 2:
+            continue
+        if linea not in fuera:
+            fuera.append(linea)
+    return fuera[:8]
 
 
 def _contacto(opp: dict) -> str:

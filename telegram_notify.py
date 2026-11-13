@@ -27,6 +27,7 @@ import logging
 import requests
 
 import config
+import complejidad
 
 log = logging.getLogger("kyomoto.telegram")
 
@@ -523,6 +524,60 @@ def _descripcion_corta(a: dict) -> str:
     return ". ".join(partes) if partes else "Sin descripcion publicada."
 
 
+def _logistica(a: dict) -> str:
+    """
+    "Entrega Única (City, ST)" o "Multi-Entrega (X ubicaciones)", con el
+    empaque detras.
+
+    El numero de destinos es lo que multiplica el coste de la oferta: una
+    entrega es un flete y tres son tres, con tres ventanas de entrega
+    distintas. Antes este dato no salia en la ficha y solo se descubria al
+    montar el RFQ.
+
+    La regla de oro de las direcciones tambien ap aqui: sin ciudad ni
+    estado no se afirma que sea una sola entrega ni a donde va. "Entrega
+    Única (UNITED STATES)" seria exactamente el error de poner el pais
+    como destino, que es lo que ya prohibe el Ship-To del RFQ. Ahi se
+    dice el destino tal cual se sabe, sin prometer nada.
+    """
+    ents = [str(x).strip() for x in (a.get("entregas") or [])
+            if str(x).strip()]
+    if len(ents) > 1:
+        sitio = f"Multi-Entrega ({len(ents)} ubicaciones)"
+    elif ents:
+        sitio = f"Entrega Única ({ents[0]})"
+    else:
+        # Sin la lista de direcciones no se conoce el NUMERO de entregas, y
+        # sin ese numero no se puede afirmar que sea una sola: "Entrega
+        # Única" seria mentir con lo mismo que ya prohibe el Ship-To del
+        # RFQ. Se dice el destino tal cual se sabe.
+        lugar = str(a.get("lugar_entrega") or "").strip()
+        if not lugar or lugar.lower() == "no especificado":
+            sitio = "Entrega: No especificada"
+        else:
+            # SAM.gov lo trae como "City / State / Country". Los dos
+            # primeros son la ciudad y el estado, y "City, State" es como
+            # se escribe una direccion de verdad: se monta asi y el pais
+            # se queda fuera, que para una entrega dentro de EE.UU. no
+            # anade nada y solo alarga la linea.
+            partes = [p.strip() for p in lugar.split("/") if p.strip()]
+            if len(partes) >= 2:
+                sitio = f"Destino: {partes[0]}, {partes[1]}"
+            else:
+                sitio = f"Destino: {lugar}"
+
+    emp = str(a.get("empaque") or "").strip().upper()
+    if emp.startswith("MIL-STD"):
+        emp_txt = emp
+    elif emp == "COMERCIAL":
+        emp_txt = "Comercial"
+    else:
+        # Aqui SI se dice que no se sabe: es el propio usuario quien tiene
+        # que mirarlo en el pliego, y callarlo dejaria la linea incompleta.
+        emp_txt = "No especificado"
+    return f"{sitio} · Empaque: {emp_txt}"
+
+
 def _usd_texto(valor) -> str:
     """
     Monto con el signo y los decimales, SIN la palabra USD detras.
@@ -766,12 +821,16 @@ _RE_ESPANOL = re.compile(
     r"remisi[oó]n|expedici[oó]n|transporte|etiquetado|facturaci[oó]n|"
     r"aceptaci[oó]n|compra)\b", re.IGNORECASE)
 
-# Firma del RFQ, tal cual la pidio el cliente. El EIN no es un secreto (va
-# en SAM.gov y en toda factura) y sin el el correo no identifica a la
-# empresa ante el distribuidor.
+# Firma del RFQ, tal cual la pidio el cliente. SIN el EIN: es un dato
+# fiscal que el distribuidor no necesita para cotizar, y este correo se
+# copia y pega en bandejas ajenas. La empresa se identifica igual con el
+# nombre, el cargo y la ciudad, que es lo que va en la firma.
+#
+# El </pre> cierra justo detras de la ultima linea, que ahora es la
+# ciudad. Ver el final de _bloque_rfq.
 FIRMA_RFQ = ("Bastian Cordero\n"
              "Managing Member | L.A.M.B Logistics LLC\n"
-             "Albuquerque, NM 87110 | EIN: 32-0868469")
+             "Albuquerque, NM 87110")
 
 
 def _fecha_ingles(bruto) -> str:
@@ -810,6 +869,39 @@ def _fecha_ingles(bruto) -> str:
             zona = f" UTC{signo}{abs(total) // 60:02d}"
         cuando += f", {dt.hour:02d}:{dt.minute:02d}{zona}"
     return cuando
+
+
+def _fecha_cotizacion(bruto, dias: int = 5) -> str:
+    """
+    La fecha limite para que el distribuidor mande el precio: cierre - `dias`.
+
+    Son cinco dias de calendario, no dos. Con dos el distribuidor responde
+    el ultimo dia y no queda tiempo para terminar la oferta federal con sus
+    cifras; con cinco hay margen para una ronda de preguntas. La fecha
+    CONCRETA va en el correo ("by November 4, 2026"), porque un plazo
+    relativo obliga al distribuidor a restar el cierre el mismo, y si el
+    cierre no esta en el correo no puede restarlo.
+
+    Devuelve "" cuando no se puede calcular, que es cuando la fecha no se
+    lee o cuando ya habria pasado: una fecha limite en el pasado no es un
+    plazo, es una mentira, y el distribuidor la descubre al responder.
+    """
+    if not bruto:
+        return ""
+    from datetime import datetime, timedelta, timezone
+
+    texto = str(bruto).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(texto)
+    except (ValueError, TypeError):
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    limite = dt - timedelta(days=dias)
+    if limite.date() < datetime.now(timezone.utc).date():
+        return ""
+    return f"{_MESES_EN[limite.month - 1]} {limite.day}, {limite.year}"
 
 
 def _identificador_tecnico(a: dict) -> str:
@@ -1032,6 +1124,31 @@ def _identificadores_tecnicos(a: dict) -> list[str]:
                     vistos.add(token.lower())
                     salida.append(token)
 
+    # --- Lo que el propio analisis LEO de la descripcion y los adjuntos --
+    # El "nsn" y los "numeros_parte" que trae el analisis, ya validados en
+    # gemini_analyzer: el NSN tiene que tener forma 4-2-3-4 de 13 digitos
+    # y los gatillos van con vocabulario cerrado. Van DETRAS de lo que
+    # sale del texto oficial, que es el que manda, y ANTES del modelo:
+    # si hay un NSN leido no hay razon para pintar el modelo en su lugar.
+    #
+ # Aportan algo que el regex de arriba no puede ver: los adjuntos. El
+    # extractor solo lee la descripcion cacheada, y un NSN que esta en el
+    # PDF del SOW pero no en el cuerpo del aviso solo lo trae el modelo.
+    # Si la descripcion no esta cacheada (avisos antiguos), son ademas la
+    # unica fuente, y sin ellos el Part / Model saldria vacio en una
+    # licitacion tecnica que si tiene codigo.
+    _leidos: list[tuple[str, str]] = []
+    if str(a.get("nsn") or "").strip():
+        _leidos.append((str(a["nsn"]).strip(), "NSN"))
+    for _pn in (a.get("numeros_parte") or []):
+        if str(_pn or "").strip():
+            _leidos.append((str(_pn).strip(), "P/N"))
+    for _valor, _etiqueta in _leidos:
+        _token = f"{_etiqueta} {_valor}".rstrip(" .,;:")
+        if _token.lower() not in vistos:
+            vistos.add(_token.lower())
+            salida.append(_token)
+
     modelo = str(a.get("modelo_especifico") or "").strip()
 
     if not salida:
@@ -1173,7 +1290,9 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     # Y el corte es por borde de PALABRA y no a la letra: un [:140] deja
     # "MIL-PRF-" a media referencia, y una referencia a media no sirve para
     # buscar nada.
-    sol = str(a.get("solicitation") or "").strip()
+    # OJO: el numero de solicitud se LEE del analisis pero NO se pinta en
+    # el correo. Ver el comentario del asunto mas abajo: es una decision de
+    # confidencialidad de la oferta, no un dato que se haya olvidado.
     titulo = str(a.get("title") or "").strip()
     if _en_espanol(titulo):
         titulo = ""
@@ -1186,6 +1305,23 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
         spec = ""
     spec = _cortar_palabra(spec, 140)
     fecha = _fecha_ingles(a.get("limite"))
+    # La fecha en la que hay que tener el precio del distribuidor: cinco
+    # dias de calendario ANTES del cierre, para que quede margen para una
+    # ronda de preguntas antes de cerrar la oferta federal. Si no se puede
+    # calcular (fecha ilegible, o cierre a menos de cinco dias) se queda
+    # vacio y la frase cae al plazo relativo: nunca se imprime una fecha
+    # que ya habria pasado.
+    fecha_cot = _fecha_cotizacion(a.get("limite"))
+    # El empaque, traducido al ingles comercial del correo. "NO
+    # ESPECIFICADO" no se pinta: pedir un estandar sin saber cual es solo
+    # consigue que el distribuidor pregunte en vez de cotizar.
+    _emp_raw = str(a.get("empaque") or "").strip().upper()
+    if _emp_raw.startswith("MIL-STD"):
+        empaque = _emp_raw
+    elif _emp_raw == "COMERCIAL":
+        empaque = "Standard Commercial Packaging"
+    else:
+        empaque = ""
 
     # El campo de identificacion: hasta tres codigos, y si quedan mas se
     # dice. Callarselos al mayorista es lo que hace que cotice una pieza de
@@ -1224,41 +1360,41 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     cuerpo: list[str] = []
 
     # --- Asunto ------------------------------------------------------------
-    # El codigo por DELANTE de todo. Los RFQ no los lee primero ingenieria
-    # sino el equipo de ventas del mayorista, y el NSN es lo primero que se
-    # busca en un sistema de distribucion: "RFQ - NSN 1650-01-672-3405 -
-    # SPE60026T0050 - BATTERY, AIRCRAFT" se clasifica de un vistazo antes
-    # de abrirlo, y el que no trae codigo se queda como siempre.
+    # CONFIDENCIALIDAD DE LA OFERTA: el numero de solicitud NO sale aqui ni
+    # en el cuerpo. Es la referencia con la que cualquiera localiza la
+    # licitacion en SAM.gov, y un RFQ que lo trae en el asunto le regala al
+    # distribuidor la pista para ir a mirar el pliego, para cotizar en
+    # directo o para saber contra quien competimos. El correo dice que es
+    # para una licitacion federal de EE.UU., que es lo que al distribuidor
+    # le hace falta saber para cotizar, y nada mas.
+    #
+    # Formato: "Wholesale RFQ - [item] [NSN/P/N]". El codigo va DETRAS y
+    # sin cortar: una referencia a media no sirve para buscar nada, y
+    # _cortar_palabra se llevaria por delante un guion final. Un codigo de
+    # mas de _MAX_MODELO no es un codigo, y se deja fuera.
     #
     # SOLO un NSN o un P/N detectados en el texto, no el modelo. El modelo,
     # si es lo unico que hay, ya esta pintado en Part / Model, y aqui solo
-    # alargaria el asunto de las licitaciones que no son tecnicas. Las
-    # fichas sin codigo siguen saliendo con el asunto de siempre.
-    #
-    # Y sin cortar, a diferencia del titulo: una referencia a media no
-    # sirve para buscar nada, y _cortar_palabra se llevaria por delante un
-    # guion final. Un codigo de mas de _MAX_MODELO no es un codigo, y se
-    # deja fuera en vez de imprimirlo partido.
-    asunto = "RFQ"
+    # alargaria el asunto de las licitaciones que no son tecnicas.
+    asunto = "Wholesale RFQ"
     codigo_asunto = next((x for x in identidades
                           if x.startswith(("NSN ", "P/N "))
                           and len(x) <= _MAX_MODELO), "")
-    if codigo_asunto:
-        asunto += f" - {codigo_asunto}"
-    if sol:
-        asunto += f" - {sol}"
     if titulo:
-        # El titulo cede hueco y los otros dos no: la solicitud y el codigo
-        # ya identifican la licitacion, y un titulo mas corto no identifica
-        # menos, mientras que partir el NSN dejaria una referencia que no
-        # se puede buscar. Se descuenta "Subject: " (9), el " - " que viene
-        # justo detras y los 3 que _cortar_palabra puede sumar al cerrar
-        # con "...", y con eso pagado se queda el corte de siempre o lo que
-        # quepa, lo que sea menor. Si ni siquiera eso cabe, el asunto se
-        # queda con la solicitud y el codigo, que es lo que identifica.
-        hueco = _MAX_ASUNTO - 9 - len(asunto) - 3 - 3
+        # El titulo cede hueco y el codigo no: un titulo mas corto no
+        # identifica menos, mientras que partir el NSN deja una referencia
+        # inservible. Se descuenta "Subject: " (9), el " - " que viene
+        # justo detras, los 3 que _cortar_palabra suma al cerrar con "..."
+        # y el hueco que se va a llevar el codigo al final de la linea.
+        _hueco_codigo = (len(codigo_asunto) + 1) if codigo_asunto else 0
+        hueco = _MAX_ASUNTO - 9 - len(asunto) - 3 - 3 - _hueco_codigo
         if hueco >= 12:
             asunto += f" - {_cortar_palabra(titulo, min(_MAX_TITULO_ASUNTO, hueco))}"
+    if codigo_asunto:
+        # Con titulo, pegado tras el; sin titulo, con su guion, o saldria
+        # "Wholesale RFQ NSN 1650-01-672-3405", que se lee mal.
+        _pegado = " " if len(asunto) > len("Wholesale RFQ") else " - "
+        asunto += f"{_pegado}{codigo_asunto}"
     cuerpo.append(f"Subject: {asunto}")
     cuerpo.append("")
     cuerpo.append(saludo)
@@ -1266,10 +1402,14 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     # La carta. Un "Requesting a quotation" a secas no distingue a una
     # empresa de otra, y el distribuidor recibe decenas: el parrafo de
     # apertura dice que es, para que y contra que licitacion, en el tono
-    # con el que se escribe un RFQ entre empresas en EE.UU.
+    # con el que se escribe un RFQ entre empresas en EE.UU. La frase
+    # "in support of a U.S. federal government solicitation" es la que
+    # pide el cliente y es literal: sin el numero de solicitud, estas dos
+    # palabras son lo unico que le dice al distribuidor de donde viene el
+    # trabajo.
     cuerpo.extend(textwrap.wrap(
         "We are requesting a formal quotation for the item detailed below "
-        "in support of a U.S. federal solicitation.", width=72))
+        "in support of a U.S. federal government solicitation.", width=72))
     cuerpo.append("")
 
     # --- Los datos, en columna --------------------------------------------
@@ -1290,9 +1430,19 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
                                     subsequent_indent=" " * 16,
                                     break_on_hyphens=False) or [linea])
 
-    campo("Solicitation:", sol)
+    # OJO: aqui NO va la linea "Solicitation:". Es la decision de
+    # confidencialidad de la oferta explicada en el asunto: el numero de
+    # solicitud identifica el pliego ante cualquier competidor, y el
+    # correo solo tiene que decir que es para una licitacion federal.
+    # "Item" y "Part / Model" son lo que al distribuidor le hace falta
+    # para cotizar.
     campo("Item:", titulo)
     campo("Part / Model:", ident)
+    # El empaque, junto a la especificacion, para que el distribuidor sepa
+    # si tiene que envolver en MIL-STD o le basta con el comercial antes de
+    # calcular el flete. Solo se pinta si se sabe: una linea de empaque
+    # inventada hace cotizar un embalaje que despues no se usa.
+    campo("Packaging:", empaque)
     # Justo detras de los codigos: el lector ve que se piden tres piezas y
     # a renglon seguido donde esta la lista entera. Solo se pinta si el
     # aviso trae alguna: una linea de anexo inventada haria pedir al
@@ -1318,6 +1468,20 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
         "To help us prepare our offer, please provide the following:",
         width=72))
     cuerpo.append("")
+    # El punto de empaque cambia segun lo que se sepa: si el aviso pide
+    # MIL-STD se nombra el estandar, si es comercial se dice comercial, y
+    # si no se sabe se piden LOS DOS y que el distribuidor diga cual
+    # aplica. Nunca se inventa un estandar. Y siempre cabe en una o dos
+    # lineas: el correo ya va apretado de las 4096 del mensaje.
+    if empaque.startswith("MIL-STD"):
+        punto_empaque = (f"Packaging to {empaque} with military markings "
+                         "and preservation.")
+    elif empaque:
+        punto_empaque = "Standard commercial packaging as required."
+    else:
+        punto_empaque = ("Packaging compliance: Commercial or "
+                         "MIL-STD-2073 / MIL-STD-129.")
+
     for punto in (
             "Unit and total wholesale pricing for the quantity above, "
             "including any volume or contract discounts that may apply.",
@@ -1328,20 +1492,37 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
             "volume.",
             "Confirmation of technical compliance, supported by a "
             "Certificate of Conformity (CoC) or OEM traceability for "
-            "technical or military spare parts."):
+            "technical or military spare parts.",
+            # --- Los dos de cumplimiento, obligatorios -------------------
+            # Son los que deciden si el producto entra en EE.UU. y como
+            # llega al almacen. Sin ellos el distribuidor cotiza un precio
+            # que no incluye ni el arancel ni el embalaje, y la diferencia
+            # la pone L.A.M.B. al final. Van como peticion, en la misma
+            # forma nominal que el resto de viñetas, y sin relleno: cada
+            # linea de mas es una linea que empuja el mensaje por encima
+            # de las 4096 de Telegram.
+            "U.S. origin / Buy American Act (FAR 52.225-1) or TAA "
+            "compliance.",
+            punto_empaque):
         cuerpo.extend(textwrap.wrap(punto, width=72,
                                     initial_indent="  • ",
                                     subsequent_indent="    "))
     cuerpo.append("")
-    # La frase de los dos dias: con la fecha si la hay (apunta a la linea de
-    # arriba), sin ella si no, porque decir "la fecha de cierre" sin poder
-    # decirla deja al distribuidor sin el dato que le piden.
-    if fecha:
-        frase = ("Please submit your quotation at least two (2) days before "
-                 "the closing date above so that we may finalize our "
-                 "federal offer on time.")
+    # La frase del plazo. Con la fecha CONCRETA si se pudo calcular (apunta
+    # a la linea Closing de arriba) y con el plazo relativo si no, porque
+    # decir "cinco dias antes del cierre" sin poder decir el cierre deja al
+    # distribuidor sin el dato que le piden. Es cinco dias y no dos: con
+    # dos solo queda margen para aceptar o rechazar, no para preguntar.
+    if fecha and fecha_cot:
+        frase = (f"Please submit your quotation by {fecha_cot}, five (5) "
+                 "days before the closing date above, so that we may "
+                 "finalize our federal offer on time.")
+    elif fecha:
+        frase = ("Please submit your quotation at least five (5) days "
+                 "before the closing date above so that we may finalize "
+                 "our federal offer on time.")
     else:
-        frase = ("Please submit your quotation at least two (2) days before "
+        frase = ("Please submit your quotation at least five (5) days before "
                  "the solicitation closing date so that we may finalize "
                  "our federal offer on time.")
     cuerpo.extend(textwrap.wrap(frase, width=72))
@@ -1350,9 +1531,9 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     cuerpo.append("")
     cuerpo.append("Respectfully,")
     cuerpo.append("")
-    # La firma va la ULTIMA: el </pre> cierra justo detras del EIN, que es
-    # lo que hace que el bloque sea un recorte limpio y no arrastre nada
-    # del bot al pegarlo.
+    # La firma va la ULTIMA: el </pre> cierra justo detras de la ultima
+    # linea de la firma, que es la ciudad, y eso es lo que hace que el
+    # bloque sea un recorte limpio y no arrastre nada del bot al pegarlo.
     cuerpo.extend(FIRMA_RFQ.split("\n"))
 
     # --- Se pinta ----------------------------------------------------------
@@ -1436,12 +1617,52 @@ def formatear_analisis(a: dict) -> str:
     _sa = str(a.get("set_aside") or "").strip()
     if _sa and "sin set-aside" not in _sa.lower():
         L.append(f"🏷️ {_esc(_sa)}")
+
+    # La bandera de complejidad, DEBAJO del set-aside y SIEMPRE: es el dato
+    # que decide si el RFQ es una compra de catalogo o un expediente que
+    # puede atascarse, y no depende de que el aviso traiga set-aside.
+    #
+    # La calcula complejidad.py con reglas sobre hechos que extrajo el
+    # modelo, no con el juicio del modelo: una clasificacion que sale de un
+    # modelo no se puede reproducir y una noche la misma licitacion puede
+    # salir 🟢 y a la siguiente 🚩. El motivo va siempre, porque una
+    # bandera sin motivo no se puede discutir.
+    _niv, _motivo = complejidad.evaluar(a)
+    L.append(f"⚠️ Nivel de Complejidad: {complejidad.ETIQUETAS[_niv]}"
+             + (f" — {_esc(_motivo)}" if _motivo else ""))
     L.append(_SEPARADOR)
     L.append("")
 
     # --- Producto ---
     L.append("📝 <b>Producto</b>")
     L.append(_esc(_descripcion_corta(a)))
+    L.append("")
+    # Los codigos exactos, que es lo que el distribuidor busca en su
+    # sistema antes de leer la frase de arriba. Salen de la MISMA lista que
+    # el Part / Model del RFQ para que no pueda haber un NSN en la ficha y
+    # otro distinto en el correo: una sola fuente, o las dos lineas se
+    # contradicen y el distribuidor cotiza la que este mal.
+    _codigos = [x for x in _identificadores_tecnicos(a)
+                if not _en_espanol(x)]
+    _nsns = ", ".join(x[4:] for x in _codigos if x.startswith("NSN "))
+    _pns = ", ".join(x[4:] for x in _codigos if x.startswith("P/N "))
+    # "No especificado - Verificar pliego" es literalmente lo que hay que
+    # decir cuando no hay codigo: mejor mandar al pliego que inventar un
+    # numero que el distribuidor buscara sin encontrar nunca.
+    #
+    # Las dos etiquetas van SIEMPRE, aunque una este vacia: un P/N a
+    # medias hace que el distribuidor pregunte en vez de cotizar. Pero si
+    # faltan los dos, se dicen en UNA linea y no en dos: son 40 caracteres
+    # que la ficha ya no tiene de sobra (ver el corte de 4096 en los
+    # tests), y decir "No especificado" dos veces no aporta nada.
+    _falta = "No especificado - Verificar pliego"
+    if _nsns or _pns:
+        L.append(f"🧾 NSN: {_esc(_nsns or _falta)} · P/N: {_esc(_pns or _falta)}")
+    else:
+        L.append(f"🧾 NSN / P/N: {_falta}")
+    # Y a donde llega, en cuantas entregas y con que empaque, que es lo
+    # que decide el flete y el plazo.
+    L.append(f"📍 Logística: {_esc(_logistica(a))}")
     L.append("")
     L.append(_SEPARADOR)
     L.append("")

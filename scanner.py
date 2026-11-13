@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import autocalibracion
+import complejidad
 import config
 import filters
 import gemini_analyzer
@@ -648,6 +649,17 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         _log(f"   -> notificando [{puntos}]: {a['title'][:62]}")
         if config.DRY_RUN:
             _log("      (DRY_RUN: no se envia)")
+            continue
+        # El pre-filtro de las 🚩 (config.FILTER_OUT_HIGH_RISK_DLA). Por
+        # defecto en False, asi que en la practica aqui no pasa nada y la
+        # alerta sale con su bandera para aprender a clasificarla antes de
+        # decidir. Solo se omite el ENVIO: el analisis ya esta guardado,
+        # que es donde esta el historial, y un filtro que borra el dato no
+        # deja forma de comprobar despues que habia filtrado.
+        if config.FILTER_OUT_HIGH_RISK_DLA and complejidad.riesgo_alto_dla(a):
+            _log("      (FILTER_OUT_HIGH_RISK_DLA: alerta 🚩 omitida)")
+            resumen["omitidas_riesgo_alto"] = (
+                resumen.get("omitidas_riesgo_alto", 0) + 1)
             continue
         ok = telegram_notify.enviar(
             chat_id, telegram_notify.formatear_analisis(a), html_mode=True

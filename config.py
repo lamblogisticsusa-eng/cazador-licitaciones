@@ -327,6 +327,18 @@ GEMINI_ESPERA_BACKOFF_SEG = float(os.getenv("GEMINI_ESPERA_BACKOFF_SEG", "2"))
 INTERVALO_HORAS = _float("INTERVALO_HORAS", 2)
 DB_PATH = os.getenv("DB_PATH", "licitaciones.db")
 DRY_RUN = _bool("DRY_RUN", False)  # True = no envia mensajes, solo loguea
+
+# Pre-filtro de las alertas de mayor riesgo (ver telegram_notify.
+# nivel_complejidad). Por defecto en False: la alerta sale IGUAL, pero con
+# la bandera 🚩 arriba, para que se pueda aprender a clasificarla antes de
+# decidirla. Ponerlo en True es un solo cambio de entorno y a partir de
+# ahi esas alertas no llegan a Telegram (siguen analizandose y guardandose,
+# que es donde esta el historial).
+#
+# OJO: solo se omite el ENVIO, nunca el analisis ni el registro. Un filtro
+# que borra el dato no deja forma de comprobar despues que habia filtrado.
+FILTER_OUT_HIGH_RISK_DLA = _bool("FILTER_OUT_HIGH_RISK_DLA", False)
+
 ETIQUETAS_DIR = os.getenv("ETIQUETAS_DIR", "etiquetas")
 
 PORT = _int("PORT", 10000)

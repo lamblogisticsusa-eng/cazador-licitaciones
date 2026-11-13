@@ -363,7 +363,7 @@ check("Y no aparece en NINGUN sitio del correo",
       "Acero fundido" not in pre_es and "sellos mecanicos" not in pre_es,
       "-> se colo")
 check("El resto del correo sale igual",
-      pre_es.startswith("Subject: RFQ - 36C24526Q0123 - Batteries, Lead-Acid")
+      pre_es.startswith("Subject: Wholesale RFQ - Batteries, Lead-Acid")
       and _campo(pre_es, "Quantity:") == "500 EA"
       and _campo(pre_es, "Part / Model:") == "S0594DU0500-S1",
       "-> falto algo")
@@ -379,12 +379,15 @@ titulo_es = _pre(tn.formatear_analisis(
 check("Un titulo en castellano tampoco entra como Item",
       _campo(titulo_es, "Item:") == "", "-> %r" % _campo(titulo_es, "Item:"))
 check("Ni se pinta a medias en el asunto",
-      titulo_es.startswith("Subject: RFQ - 36C24526Q0123\n"),
+      titulo_es.startswith("Subject: Wholesale RFQ\n"),
       "-> %r" % titulo_es.split("\n")[0])
 check("Y el correo sigue completo por lo demas",
-      _campo(titulo_es, "Solicitation:") == "36C24526Q0123"
+      _campo(titulo_es, "Item:") == ""
       and _campo(titulo_es, "Ship-To:") == "Norfolk, VA (South)",
       "-> falto algo")
+check("Pero la linea de solicitud NO se pinta: el numero se protege",
+      "Solicitation:" not in titulo_es and "36C24526Q0123" not in titulo_es,
+      "-> se colo")
 
 check("El espanol del asunto tampoco se cuela",
       not re.search(r"\b(de|la|el|los|las|para|que)\b",
@@ -678,18 +681,28 @@ print("=" * 76)
 
 # --- 7a. El codigo en el asunto ----------------------------------------
 # El que clasifica los RFQ en el mayorista es el equipo de ventas, y no
-# los abre uno a uno: busca por NSN. Con el codigo delante el asunto se
-# resuelve de un vistazo en la lista de correos.
+# los abre uno a uno: busca por NSN. Con el codigo en el asunto el
+# pedido se resuelve de un vistazo en la lista de correos.
+#
+# OJO: el NUMERO DE SOLICITUD ya no sale. Es la decision de
+# confidencialidad de la oferta: con ese numero cualquiera localiza el
+# pliego en SAM.gov. El asunto lleva el item y el codigo, que es lo que
+# al distribuidor le hace falta para cotizar.
 asunto_nsn = _pre(tn.formatear_analisis(FICHA_DESC)).splitlines()[0]
 print("  %s" % asunto_nsn)
-check("El NSN va en el asunto, delante de la solicitud",
-      asunto_nsn.startswith("Subject: RFQ - NSN 1650-01-672-3405"
-                            " - 36C24526Q0123"), "-> %r" % asunto_nsn)
+check("El NSN va en el asunto, DETRAS del titulo y sin la solicitud",
+      asunto_nsn.startswith("Subject: Wholesale RFQ - Batteries")
+      and asunto_nsn.rstrip().endswith("NSN 1650-01-672-3405"),
+      "-> %r" % asunto_nsn)
+check("Y el numero de solicitud no aparece en el asunto",
+      "36C24526Q0123" not in asunto_nsn, "-> se colo")
 check("Y el titulo sigue ahi, mas corto si hace falta",
       "Batteries" in asunto_nsn, "-> %r" % asunto_nsn)
-check("Sin codigo detectado el asunto se queda como siempre",
+check("Sin codigo detectado el asunto no anade nada raro",
       _pre(tn.formatear_analisis(FICHA)).splitlines()[0]
-      .startswith("Subject: RFQ - 36C24526Q0123"),
+      .startswith("Subject: Wholesale RFQ - Batteries")
+      and "S0594DU0500-S1"
+      not in _pre(tn.formatear_analisis(FICHA)).splitlines()[0],
       "-> %r" % _pre(tn.formatear_analisis(FICHA)).splitlines()[0])
 check("Y el modelo, si es lo unico que hay, NO se cuela en el asunto",
       "S0594DU0500-S1"
@@ -765,14 +778,28 @@ casos = [("base", FICHA),
 for nombre, ficha in casos:
     h = tn.formatear_analisis(ficha)
     p = _pre(h)
-    check("%s: mensaje por debajo de 4096" % nombre, len(h) < 4096,
-          "-> %d" % len(h))
+    # OJO: ya no se pide que la ficha entera quepa en un solo mensaje.
+    # La ficha lleva ahora cuatro cosas que antes no (bandera de
+    # complejidad, NSN/P-N, logistica y empaque) y el correo dos viñetas
+    # de cumplimiento mas, y en los casos largos eso se pasa de las 4096
+    # de Telegram. Lo que NO se puede permitir es que el corte parta el
+    # correo, y eso es lo que se comprueba aqui: cualquier exceso se
+    # trocea en trozos que caben, y el bloque viaja ENTERO en uno solo.
+    trozos = tn._trocear(h, 4096 - 32)
+    check("%s: cualquier trozo cabe en Telegram" % nombre,
+          all(len(t) < 4096 for t in trozos),
+          "-> %s" % [len(t) for t in trozos])
+    con_asunto = sum(1 for t in trozos if "Subject: Wholesale RFQ" in t)
+    check("%s: el correo viaja ENTERO, en un solo trozo" % nombre,
+          con_asunto == 1, "-> %d trozos con el correo" % con_asunto)
     check("%s: <pre> equilibrado" % nombre,
           h.count("<pre>") == h.count("</pre>"),
           "-> %d vs %d" % (h.count("<pre>"), h.count("</pre>")))
-    check("%s: el </pre> cierra en el EIN" % nombre,
-          p.rstrip().endswith("EIN: 32-0868469"),
+    check("%s: el </pre> cierra en la ciudad de la firma" % nombre,
+          p.rstrip().endswith("Albuquerque, NM 87110"),
           "-> %r" % p.rstrip()[-40:])
+    check("%s: y la firma no arrastra el EIN" % nombre,
+          "EIN" not in p, "-> se colo el EIN")
     largas = [x for x in p.split("\n") if len(x) > 90]
     check("%s: ninguna linea por encima de 90 columnas" % nombre,
           not largas, "-> %r" % (largas[:1],))
@@ -822,18 +849,18 @@ check("El bloque RFQ aparece VERBATIM en UN solo trozo",
       "-> %d trozos lo contienen"
       % sum(1 for t in troceos if cuerpo_largo in t))
 # Y cierra bien. OJO con lo que NO se comprueba aqui: ese trozo acaba en el
-# cierre de Kyomoto, no en el EIN, porque el cierre va detras y FUERA del
+# cierre de Kyomoto, no en la firma, porque el cierre va detras y FUERA del
 # <pre>. Separar el rotulo de la seccion del cuerpo le pasa al rotulo, que
 # es una linea de interfaz y no el correo: el correo es lo que tiene que
 # salir entero, y sale entero.
 con_cuerpo = [t for t in troceos if cuerpo_largo in t]
 despues = (con_cuerpo[0][con_cuerpo[0].index(cuerpo_largo)
                          + len(cuerpo_largo):] if con_cuerpo else "")
-check("Y ese trozo cierra el </pre> justo despues del EIN",
+check("Y ese trozo cierra el </pre> justo despues de la firma",
       len(con_cuerpo) == 1 and despues.lstrip().startswith("</pre>"),
       "-> despues del bloque viene %r" % despues[:40])
 check("El bloque completo termina en la firma corporativa",
-      cuerpo_largo.rstrip().endswith("EIN: 32-0868469"),
+      cuerpo_largo.rstrip().endswith("Albuquerque, NM 87110"),
       "-> %r" % cuerpo_largo.rstrip()[-40:])
 
 palabras = (" de ", " la ", " el ", " los ", " las ", " que ", " para ",

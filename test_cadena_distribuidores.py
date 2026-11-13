@@ -246,7 +246,19 @@ if leido:
     check("Y avisa de verificar antes de escribir", "antes de escribir" in h)
     check("Y NO hay ningun correo inventado", "@" not in h, "-> hay un @")
     check("Y no hay ningun telefono", "+1 " not in h, "-> hay un telefono")
-    check("La ficha cabe en un mensaje", len(h) < 4096, "-> %d" % len(h))
+    # OJO: ya no se pide que la ficha entera quepa en UN mensaje. La ficha
+    # lleva ahora cuatro cosas que antes no (bandera de complejidad,
+    # NSN/P-N, logistica y empaque) y el correo dos viñetas de cumplimiento
+    # mas, y en los casos largos eso se pasa de las 4096 de Telegram. Lo
+    # que NO se puede permitir es que el corte rompa el correo, y eso es lo
+    # que se comprueba aqui.
+    trozos = tn._trocear(h, 4096 - 32)
+    check("Cualquier trozo cabe en Telegram",
+          all(len(t) < 4096 for t in trozos),
+          "-> %s" % [len(t) for t in trozos])
+    con_asunto = sum(1 for t in trozos if "Subject: Wholesale RFQ" in t)
+    check("Y el correo viaja ENTERO, en un solo trozo",
+          con_asunto == 1, "-> %d trozos con el correo" % con_asunto)
     check("Y el HTML sigue balanceado",
           h.count("<b>") == h.count("</b>") and h.count("<a ") == h.count("</a>"))
 
