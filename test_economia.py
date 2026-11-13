@@ -11,6 +11,10 @@ import sys
 
 os.environ.setdefault("DRY_RUN", "1")
 os.environ.setdefault("SAM_API_KEY", "x")
+# La suite no sale a USAspending: el historial de precios se prueba en
+# test_usaspending con el transporte sustituido. Aqui solo se mide la
+# economia, que no depende de ningun dato externo.
+os.environ["PRECIOS_HISTORICOS"] = "0"
 
 FALLA = 0
 

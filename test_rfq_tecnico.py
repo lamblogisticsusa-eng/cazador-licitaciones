@@ -99,6 +99,11 @@ os.environ["TELEGRAM_CHAT_ID"] = "123456789"
 # un dia va a fallar en una maquina sin DNS. La lectura real se comprueba
 # en test_pdf_fetcher, con el transporte sustituido.
 os.environ["PDF_EN_ANALISIS"] = "0"
+# Mismo razonamiento para el historial de precios: el aviso de prueba
+# trae classificationCode, asi que sin esto el test saldria a pedirle a
+# USAspending cinco cosas. La consulta real se comprueba en
+# test_usaspending, con la API sustituida.
+os.environ["PRECIOS_HISTORICOS"] = "0"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

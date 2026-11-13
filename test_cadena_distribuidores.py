@@ -37,6 +37,10 @@ os.environ["DRY_RUN"] = "1"
 os.environ["SAM_API_KEY"] = "x"
 os.environ["GEMINI_API_KEY"] = "x"
 os.environ["TELEGRAM_CHAT_ID"] = "123456789"
+# La consulta a USAspending va en test_usaspending, con la API
+# sustituida. Aqui se mide la cadena de distribuidores, que no depende
+# de ningun dato externo.
+os.environ["PRECIOS_HISTORICOS"] = "0"
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 FALLA = 0

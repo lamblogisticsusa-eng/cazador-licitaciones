@@ -72,6 +72,11 @@ os.environ["SAM_API_KEY"] = "CLAVE-DE-PRUEBA"
 os.environ["GEMINI_API_KEY"] = "x"
 os.environ["TELEGRAM_BOT_TOKEN"] = "x"
 os.environ["TELEGRAM_CHAT_ID"] = "123456789"
+# Este archivo SI prueba la lectura de los adjuntos (con el transporte
+# sustituido), pero no la consulta de precios: esa se prueba en
+# test_usaspending con la API tambien sustituida. Aqui solo se quiere
+# medir que el texto del pliego llega al prompt.
+os.environ["PRECIOS_HISTORICOS"] = "0"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -629,8 +634,8 @@ check("pdf_fetcher.descargar_y_extraer_pdfs existe y es la del spec",
 check("Y admite el max_pdfs del spec (7 por defecto)",
       inspect.signature(pf.descargar_y_extraer_pdfs).parameters[
           "max_pdfs"].default == 7)
-check("gemini_analyzer._construir_prompt acepta 3 y 4 argumentos",
-      len(inspect.signature(ga._construir_prompt).parameters) == 4)
+check("gemini_analyzer._construir_prompt acepta 3, 4 y 5 argumentos",
+      len(inspect.signature(ga._construir_prompt).parameters) == 5)
 check("Y el tercero sigue siendo el lugar",
       list(inspect.signature(ga._construir_prompt).parameters)[:3]
       == ["opp", "descripcion", "lugar"])

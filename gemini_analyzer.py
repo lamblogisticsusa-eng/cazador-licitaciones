@@ -330,13 +330,102 @@ def _bloque_adjuntos(corpus: str) -> str:
             "\n" + t)
 
 
+def _bloque_precios(precios: dict) -> str:
+    """
+    La seccion del prompt con el historial de adjudicaciones. "" si no hay.
+
+    Va DETRAS de los adjuntos, como tercera fuente aparte: los adjuntos
+    dicen que pidio este comprador en ESTA licitacion, y esto dice que ha
+    pagado el gobierno por esta clase en los ultimos tres anos. Son
+    preguntas distintas y el modelo no debe mezclarlas.
+
+    Lo mas importante de este bloque es lo que PROHIBE. USAspending no
+    publica precios unitarios: publica montos de contrato. Si el modelo
+    coge el monto medio de una clase y lo escribe en
+    `precio_unitario_mercado`, la ficha ensena al cliente un numero que no
+    significa nada y encima con cuatro cifras de apariencia exacta. Por eso
+    la advertencia va escrita en el prompt, no en un comentario del
+    codigo: el modelo no lee comentarios.
+    """
+    d = precios if isinstance(precios, dict) else {}
+    if not d or d.get("sin_datos"):
+        return ""
+
+    def _f(v, dec=0):
+        try:
+            return "{:,.{}f}".format(float(v), dec)
+        except (TypeError, ValueError):
+            return "N/D"
+
+    lineas = [
+        "",
+        "",
+        "INTELIGENCIA DE PRECIOS HISTORICOS (USAspending.gov)",
+        "Historial publico de adjudicaciones federales de EE.UU. para la",
+        "clase de producto en cuestion.",
+        "",
+        "  Criterio de busqueda:  %s" % str(d.get("criterio") or "N/D"),
+        "  Clase:                 %s" % (str(d.get("psc_nombre") or "")
+                                         .strip() or "N/D"),
+        "  Ventana:               %s meses (%s a %s)"
+        % (d.get("ventana_meses") or "N/D", d.get("desde") or "?",
+           d.get("hasta") or "?"),
+        "  Premios registrados:   %s" % _f(d.get("premios")),
+        "  Monto total:           USD %s" % _f(d.get("monto_total_usd")),
+        "  Monto medio:           USD %s" % _f(d.get("monto_medio_usd")),
+        "  Monto minimo:          USD %s" % _f(d.get("monto_min_usd")),
+        "  Monto maximo:          USD %s" % _f(d.get("monto_max_usd")),
+    ]
+    # Todo lo que viene de un tercero se verifica antes de usarlo: una
+    # cache corrupta o una respuesta que cambie de forma no puede tumbar
+    # el analisis entero por una linea del prompt.
+    ultimo = d.get("ultimo")
+    ultimo = ultimo if isinstance(ultimo, dict) else {}
+    if ultimo:
+        lineas.append(
+            "  Ultimo premio:         USD %s el %s (%s)"
+            % (_f(ultimo.get("monto_usd")), ultimo.get("fecha") or "sin fecha",
+               (str(ultimo.get("contratista") or "").strip()
+                .replace("\n", " ") or "sin contratista")))
+    tendencia = str(d.get("tendencia") or "")
+    if tendencia and tendencia != "SIN_DATOS":
+        try:
+            pct = float(d.get("ultimo_vs_media_pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        lineas.append(
+            "  Tendencia:             %s (%+.1f%% vs la media de la ventana)"
+            % (tendencia, pct))
+    top = d.get("contratistas") or []
+    if top:
+        lineas.append("  Mayores adjudicaciones: "
+                      + "; ".join(str(x.get("nombre") or "").strip()
+                                  for x in top[:3] if isinstance(x, dict)))
+
+    lineas += [
+        "",
+        "IMPORTANTE, y esto gobierna todo lo anterior: son MONTOS DE",
+        "CONTRATO, no precios unitarios. USAspending no publica precio por",
+        "unidad, publica cuanto se obligo en cada adjudicacion. NO copies",
+        "el monto medio ni el maximo en `precio_unitario_mercado`: ese",
+        "numero es el promedio de contratos completos, no de unidades.",
+        "Sirven para otra cosa: decir si la clase se compra, cada cuanto,",
+        "quien se la lleva y en que rango se mueven los montos. Si el",
+        "presupuesto de este aviso queda muy por debajo del rango, lo mas",
+        "probable es que sea una parte de un contrato mayor, y eso conviene",
+        "decirlo en `observaciones` en vez de inventar un precio.",
+    ]
+    return "\n".join(lineas)
+
+
 def _construir_prompt(opp: dict, descripcion: str, lugar: str,
-                      corpus: str = "") -> str:
-    # `corpus` es opcional y llega vacio por defecto a proposito: las seis
-    # suites que construyen el prompt con tres argumentos reciben el MISMO
-    # texto de antes, byte a byte. Los adjuntos son un anadido, no un
-    # cambio de forma.
+                      corpus: str = "", precios: dict = None) -> str:
+    # `corpus` y `precios` son opcionales y llegan vacios por defecto a
+    # proposito: las suites que construyen el prompt con tres o cuatro
+    # argumentos reciben el MISMO texto de antes, byte a byte. Los
+    # adjuntos y el historial son anadidos, no cambios de forma.
     adjuntos_txt = _bloque_adjuntos(corpus)
+    precios_txt = _bloque_precios(precios)
     return f"""
 Eres Kyomoto, analista senior de abastecimiento del gobierno de EE.UU.
 Evalua esta oportunidad de CONTRATACION DE PRODUCTOS FISICOS para mi cliente:
@@ -676,7 +765,7 @@ DATOS DE LA OPORTUNIDAD
   Enlace:        {opp.get('uiLink', '')}
 
 DESCRIPCION OFICIAL
-{descripcion if descripcion.strip() else "*** NO DISPONIBLE *** (SAM.gov respondio 404 'Description Not Found' para este aviso. Evalua SOLO con el titulo y los metadatos, y baja la certeza de tus estimaciones. Si el titulo no alcanza para saber si es producto fisico, marca viable=false.)"}{adjuntos_txt}
+{descripcion if descripcion.strip() else "*** NO DISPONIBLE *** (SAM.gov respondio 404 'Description Not Found' para este aviso. Evalua SOLO con el titulo y los metadatos, y baja la certeza de tus estimaciones. Si el titulo no alcanza para saber si es producto fisico, marca viable=false.)"}{adjuntos_txt}{precios_txt}
 """.strip()
 
 
@@ -751,6 +840,46 @@ def _corpus_pdf(opp: dict) -> str:
         return ""
 
 
+# La forma que queda en el analisis cuando no se pudo consultar nada. Se
+# devuelve COMPLETA y no {}: quien la consuma (el prompt y la ficha) tiene
+# una sola estructura que mirar, y "no hay historial de esta clase" es una
+# respuesta, no un error que haya que tragarse.
+_SIN_PRECIOS = {"sin_datos": True, "fuente": "USAspending.gov",
+                "motivo": "no se consulto"}
+
+
+def _precios_historicos(opp: dict, descripcion: str, corpus: str) -> dict:
+    """
+    El historial de adjudicaciones para ESTE aviso, para el prompt y para
+    la ficha.
+
+    Se llama DENTRO de analizar, entre los adjuntos y el prompt, y no en el
+    escaner: quien arma el prompt es quien sabe que le falta, y aqui no hay
+    una segunda ocasion para anadirle el mercado. Ademas el NSN muchas
+    veces sale justamente del corpus de la Fase 7, que solo existe dentro
+    de esta funcion.
+
+    Nunca lanza. Con la consulta apagada (config.PRECIOS_HISTORICOS), sin
+    codigo NSN ni PSC, sin httpx o con la API caida devuelve la forma
+    vacia y el analisis sigue. Un servicio de terceros no puede tumbar un
+    escaneo entero por no contestar.
+    """
+    if not getattr(config, "PRECIOS_HISTORICOS", True):
+        return dict(_SIN_PRECIOS, motivo="consulta desactivada")
+    try:
+        import usaspending_client
+        datos = usaspending_client.precios_del_aviso(opp or {},
+                                                     descripcion or "",
+                                                     corpus or "")
+    except Exception as e:
+        log.warning("analisis: no se pudo consultar el historial de precios "
+                    "(%s); se sigue sin el bloque de mercado", e)
+        return dict(_SIN_PRECIOS, motivo="consulta fallida")
+    if not isinstance(datos, dict):
+        return dict(_SIN_PRECIOS, motivo="respuesta ilegible")
+    return datos
+
+
 def analizar(
     opp: dict,
     descripcion: str,
@@ -792,9 +921,15 @@ def analizar(
     # modelo recibe las dos fuentes separadas para poder saber de donde
     # sale cada codigo.
     corpus = _corpus_pdf(opp)
+    # El mercado va DESPUES de los adjuntos, por el mismo motivo: la Fase 7
+    # puede ser la que descubre el NSN, y sin ese NSN no hay clase por la
+    # que consultar. Son tres fuentes separadas (lo que pide el comprador,
+    # el pliego, lo que ha pagado el gobierno) y el prompt las presenta
+    # como tales.
+    precios = _precios_historicos(opp, descripcion, corpus)
     prompt = _construir_prompt(opp, descripcion,
                                lugar or filters.lugar_de_entrega(opp),
-                               corpus)
+                               corpus, precios)
 
     # El 503 es por MODELO, no por la cuenta. Medido el 28-sep-2026:
     #   gemini-3.8-flash  OK 5,1s        gemini-3.6-flash    OK 4,2s
@@ -1023,6 +1158,14 @@ def analizar(
         # imprima en el PDF o lo reenvie no tiene que recomputarlo, y la
         # cuenta no puede divergir entre el mensaje y el registro.
         "escenarios_oferta": sensibilidad.escenarios(valor, costo_total),
+        # El historial de adjudicaciones federales para la clase de este
+        # producto (Fase 8). Va en el analisis y no solo en el mensaje por
+        # la misma razon que los escenarios: quien lo guarde, lo imprima en
+        # el PDF o lo reenvie no tiene que volver a consultar la API, y la
+        # ficha y el registro no pueden decir dos cosas distintas. Cuando
+        # no hay datos lleva su forma vacia con `sin_datos` y su motivo,
+        # que es mas informativo que la ausencia de la clave.
+        "precios_historicos": precios,
         # Los dos campos de estrategia se SOBRESCRIBEN con la frase calculada
         # en Python. No es que se ignoren lo que dice el modelo: es que lo que
         # dice no puede ser correcto, porque sus cifras se corrigen mas arriba

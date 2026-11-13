@@ -60,6 +60,10 @@ os.environ["SAM_API_KEY"] = "x"
 os.environ["GEMINI_API_KEY"] = "CLAVE-DE-PRUEBA"
 os.environ["TELEGRAM_CHAT_ID"] = "123456789"
 os.environ["DRY_RUN"] = "1"
+# La consulta a USAspending va en test_usaspending, con la API
+# sustituida. La estrategia de oferta se calcula con el presupuesto y el
+# costo, no con el mercado externo.
+os.environ["PRECIOS_HISTORICOS"] = "0"
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 FALLA = 0

@@ -690,6 +690,130 @@ def _bloque_escenarios(a: dict) -> list[str]:
     return L
 
 
+def _bloque_precios(a: dict) -> list[str]:
+    """
+    El historial de adjudicaciones federales para la clase del producto.
+
+    Va en su PROPIO <pre>, detras de los escenarios y antes de la
+    estrategia: los escenarios dicen lo que se puede hacer con ESTE
+    presupuesto, esto dice como se ha comportado el mercado por fuera, y
+    la estrategia se decide con las dos cosas encima de la mesa.
+
+    Sin datos no hay bloque, igual que en los escenarios. Un historial
+    vacio no ayuda a decidir: estorba, y ademas ocupa uno de los trozos
+    de 4096 que la ficha ya no tiene de sobra.
+
+    La rotulacion es la mitad del trabajo aqui. Lo que devuelve la API son
+    MONTOS DE CONTRATO, no precios unitarios, y una linea que diga
+    "precio historico: $127,849" dejaria al cliente creyendo que esa es la
+    cifra por unidad. Por eso la etiqueta es "Monto medio", la nota de
+    abajo lo dice con palabras, y la comparacion va contra el presupuesto
+    (que tambien es un monto de contrato) y no contra un precio unitario:
+    solo asi la comparacion es de manzanas con manzanas.
+    """
+    d = a.get("precios_historicos")
+    if not isinstance(d, dict) or not d or d.get("sin_datos"):
+        return []
+
+    def _mercado(v) -> str:
+        # Sin decimales a proposito. Son agregados de una clase entera y
+        # escribir "$127,849.37" promete una precision que el dato no
+        # tiene: los centimos ahi son ruido con apariencia de exactitud.
+        try:
+            return "${:,.0f}".format(float(v))
+        except (TypeError, ValueError):
+            return "N/E"
+
+    def _cortar(texto: str, limite: int) -> str:
+        # Se corta en un espacio y no a lo bruto: "SISTEM COMPONEN" a
+        # media palabra no se lee, y una ficha que hay que descifrar no
+        # ayuda a decidir en diez segundos.
+        if len(texto) <= limite:
+            return texto
+        corte = texto.rfind(" ", 0, limite)
+        if corte < 20:
+            corte = limite
+        return texto[:corte].rstrip() + "…"
+
+    def _num(v):
+        # Un campo que venga como texto no puede tumbar la ficha entera:
+        # se descarta ese dato y el resto se pinta igual.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f and abs(f) != float("inf") else None
+
+    meses = d.get("ventana_meses") or 0
+    if not isinstance(meses, (int, float)):
+        meses = 0
+    filas: list[tuple[str, str]] = []
+
+    criterio = str(d.get("criterio") or "").strip()
+    if criterio:
+        filas.append(("Criterio", criterio))
+    clase = " ".join(str(d.get("psc_nombre") or "").split())
+    if clase:
+        filas.append(("Clase", _cortar(clase, 56)))
+    premios = _num(d.get("premios"))
+    if premios:
+        filas.append((f"Premios {int(meses)}m" if meses else "Premios",
+                      f"{int(premios):,}"))
+    media = _num(d.get("monto_medio_usd"))
+    if media is not None:
+        filas.append(("Monto medio", _mercado(media)))
+    minimo = _num(d.get("monto_min_usd"))
+    maximo = _num(d.get("monto_max_usd"))
+    if minimo is not None and maximo is not None:
+        filas.append(("Rango",
+                      f"{_mercado(minimo)} - {_mercado(maximo)}"))
+
+    ultimo = d.get("ultimo") if isinstance(d.get("ultimo"), dict) else {}
+    monto_ultimo = _num(ultimo.get("monto_usd"))
+    if monto_ultimo is not None:
+        linea = _mercado(monto_ultimo)
+        if ultimo.get("fecha"):
+            linea += f" · {str(ultimo['fecha'])[:10]}"
+        filas.append(("Último premio", linea))
+
+    tendencia = str(d.get("tendencia") or "")
+    if tendencia and tendencia != "SIN_DATOS":
+        pct = _num(d.get("ultimo_vs_media_pct"))
+        linea = tendencia
+        if pct is not None:
+            linea += f" ({pct:+.1f}% vs media)"
+        filas.append(("Tendencia", linea))
+
+    top = [str(x.get("nombre") or "").strip()
+           for x in (d.get("contratistas") or [])
+           if isinstance(x, dict) and str(x.get("nombre") or "").strip()]
+    if top:
+        filas.append(("Contratistas", _cortar(" · ".join(top[:3]), 62)))
+
+    # La comparativa pedida: el presupuesto de ESTE aviso contra lo que el
+    # gobierno paga por la clase. Los dos son montos de contrato, asi que
+    # la razon significa algo. Sin media no se pinta: un "0.66x" sin que
+    # haya una media detras seria un numero inventado.
+    presupuesto = _num(a.get("valor_contrato_usd"))
+    if presupuesto and media and media > 0:
+        filas.append(("Vs presupuesto",
+                      f"{_mercado(presupuesto)} "
+                      f"({presupuesto / media:.2f}x la media)"))
+
+    if not filas:
+        return []
+
+    L: list[str] = ["📈 <b>Inteligencia de Mercado (USAspending)</b>", "<pre>"]
+    for etiqueta, valor in filas:
+        L.append(f"{etiqueta:<17}{valor}")
+    L.append("</pre>")
+    L.append(
+        f"<i>Montos de contrato, no precios unitarios · USAspending.gov "
+        f"/ FPDS · ventana {int(meses) or '?'} meses · "
+        f"fuente: {str(d.get('fuente') or 'USAspending.gov')}</i>")
+    return L
+
+
 def _bloque_distribuidores(d: dict) -> list[str]:
     """
     Los 3 distribuidores candidatos, cada uno con su busqueda de verificacion.
@@ -1677,6 +1801,15 @@ def formatear_analisis(a: dict) -> str:
     if _escenarios:
         L.append("")
         L.extend(_escenarios)
+    # El mercado va despues de los escenarios y antes de la estrategia:
+    # los escenarios son "que puedo hacer con este presupuesto", el
+    # historial es "que ha pasado por fuera", y la estrategia es la
+    # decision que se toma con las dos cosas a la vista. Meterlo antes de
+    # las cifras separaria un dato externo de la cuenta propia.
+    _mercado = _bloque_precios(a)
+    if _mercado:
+        L.append("")
+        L.extend(_mercado)
     L.append("")
     L.append(_SEPARADOR)
     L.append("")

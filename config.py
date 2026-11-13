@@ -356,6 +356,35 @@ FILTER_OUT_HIGH_RISK_DLA = _bool("FILTER_OUT_HIGH_RISK_DLA", False)
 # URL caida o con un PDF corrupto devuelve "" y sigue.
 PDF_EN_ANALISIS = _bool("PDF_EN_ANALISIS", True)
 
+# Consultar el historial de adjudicaciones federales (USAspending.gov) con
+# el NSN o el PSC del aviso, y meter el resultado en el prompt de Gemini y
+# en la ficha. Responde si la clase se compra, cada cuanto, quien se la
+# lleva y en que rango se mueven los montos: es la diferencia entre "este
+# producto existe" y "este producto lo estan comprando".
+#
+# Por defecto en True, por el mismo motivo que PDF_EN_ANALISIS: una fase
+# que no esta encendida por defecto no esta integrada. La consulta NO exige
+# autenticacion ni tiene cuota conocida, asi que el coste no es de clave
+# sino de latencia: son 5 peticiones por aviso que aun no tenga cacheada
+# su clase, y se cachean 7 dias por PSC en store.
+#
+# OJO: solo se apagaria la CONSULTA. El analisis, el registro y la ficha
+# siguen igual, simplemente sin el bloque de mercado. Y el modulo es
+# defensivo de punta a punta: sin httpx, con la API caida, con un filtro
+# que la API ignora o con una respuesta que cambia de forma, devuelve el
+# dict vacio con su motivo y el analisis sigue.
+PRECIOS_HISTORICOS = _bool("PRECIOS_HISTORICOS", True)
+
+# Base de la API publica. Se puede apuntar a otro espejo sin tocar codigo,
+# y es lo que usan los tests para no salir de la maquina.
+USASPENDING_URL = os.getenv("USASPENDING_URL", "https://api.usaspending.gov")
+# Segundos por peticion. 12 es generoso: la API publica contesta en menos
+# de 2 en frio, y pasados 30 el aviso no merece esperar.
+USASPENDING_TIMEOUT = _int("USASPENDING_TIMEOUT", 12)
+# Ventana de analisis. 36 meses cubre tres ejercicios fiscales, que es lo
+# minimo para que una tendencia signifique algo; 12 solo da ruido.
+USASPENDING_MESES = _int("USASPENDING_MESES", 36)
+
 ETIQUETAS_DIR = os.getenv("ETIQUETAS_DIR", "etiquetas")
 
 PORT = _int("PORT", 10000)
