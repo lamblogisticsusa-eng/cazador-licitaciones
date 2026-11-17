@@ -375,6 +375,47 @@ PDF_EN_ANALISIS = _bool("PDF_EN_ANALISIS", True)
 # dict vacio con su motivo y el analisis sigue.
 PRECIOS_HISTORICOS = _bool("PRECIOS_HISTORICOS", True)
 
+# --------------------------------------------------------------------------
+# Fase 9 - friccion, viabilidad y pliego largo
+#
+# El pliego entero (no los 3.000 caracteres que ve el prompt) se baja
+# solo para los avisos que se van a juzgar, y se cachea en SQLite por
+# noticeId + fecha de actualizacion, asi que el coste son 4 peticiones
+# por barrido y solo la primera vez de cada aviso.
+#
+# Por defecto en True por el mismo motivo que PDF_EN_ANALISIS y
+# PRECIOS_HISTORICOS: una fase que no esta encendida por defecto no esta
+# integrada. Se puede apagar con PLIEGO_LARGO_EN_ANALISIS=0 sin que se
+# rompa nada: el diagnostico se hace con la descripcion oficial y los
+# adjuntos, que es exactamente lo que habia antes de la Fase 9.
+# --------------------------------------------------------------------------
+PLIEGO_LARGO_EN_ANALISIS = _bool("PLIEGO_LARGO_EN_ANALISIS", True)
+
+# El diagnostico de friccion y viabilidad en la ficha de Telegram, PRIMERO
+# y antes de las cifras: es la decision de si merece la pena seguir
+# leyendo, y esa decision va encima del dinero. Ponerlo en False deja la
+# ficha exactamente como estaba (el bloque no se pinta, y el gate del RFQ
+# sigue funcionando con el diagnostico que viaja en el analisis).
+DIAGNOSTICO_EN_FICHA = _bool("DIAGNOSTICO_EN_FICHA", True)
+
+# El borrador de RFQ solo se pinta cuando el aviso es CANDIDATE_RFQ o
+# hay una aprobacion explicita (rfq_aprobado_manual en el analisis, o
+# RFQ_APROBAR_TODO en el entorno). Apagandolo se vuelve al comportamiento
+# anterior: el RFQ sale siempre.
+RFQ_REQUIERE_CANDIDATO = _bool("RFQ_REQUIERE_CANDIDATO", True)
+# Aprobacion explicita a escala de despliegue, por si el operador quiere
+# el RFQ siempre aunque el motor diga revision manual.
+RFQ_APROBAR_TODO = _bool("RFQ_APROBAR_TODO", False)
+
+# El motor de friccion: score a partir del cual un aviso es CANDIDATE_RFQ.
+SCORE_CANDIDATO_MIN = _int("SCORE_CANDIDATO_MIN", 70)
+# Foco de compra simplificada. Por encima de este monto el aviso deja de
+# ser la compra rutinaria para la que existe L.A.M.B. y se anade un aviso.
+MONTO_SIMPLIFICADO_USD = _float("MONTO_SIMPLIFICADO_USD", 250000.0)
+# Dias de cierre por debajo de los cuales se avisa: no da tiempo a
+# verificar stock, empaque y envio.
+DIAS_MIN_CIERRE = _int("DIAS_MIN_CIERRE", 5)
+
 # Base de la API publica. Se puede apuntar a otro espejo sin tocar codigo,
 # y es lo que usan los tests para no salir de la maquina.
 USASPENDING_URL = os.getenv("USASPENDING_URL", "https://api.usaspending.gov")

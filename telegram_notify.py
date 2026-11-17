@@ -28,6 +28,7 @@ import requests
 
 import config
 import complejidad
+import friction_engine
 
 log = logging.getLogger("kyomoto.telegram")
 
@@ -1672,6 +1673,69 @@ def _bloque_rfq(a: dict, d: dict) -> list[str]:
     return L
 
 
+def _bloque_diagnostico(a: dict) -> list[str]:
+    """
+    El diagnostico de friccion y viabilidad (Fase 9), PRIMERO en la ficha.
+
+    Orden, y es una decision y no un capricho: identidad (que es, de quien
+    es, cuando cierra) -> diagnostico (merece la pena seguir leyendo?) ->
+    producto -> cifras -> mercado -> estrategia -> RFQ. El diagnostico va
+    ANTES del dinero porque es la unica linea que decide si la ficha se
+    sigue leyendo entera: si el aviso es un rechazo automatico, las tres
+    columnas de abajo solo hacen perder el tiempo del usuario.
+
+    TRES reglas de forma, y las tres las impone la suite:
+
+    1. NO usa <pre>. El primer <pre> de la ficha es la tabla financiera y
+       la hay columnas contadas desde ahi (test_formato mide el PRIMER
+       bloque, test_rfq_telegram fija que el de escenarios va segundo): un
+       <pre> nuevo aqui desplazaria esas columnas. El bloque se compone
+       con <b>, <i> y "·", que es lo que se leye bien sin monoespaciado.
+    2. NO escribe "USD": la ficha cuenta cuatro, y no se puede anadir un
+       quinto sin que la comprobacion deje de cuadrar.
+    3. Solo se pinta si el analisis TRAE diagnostico. Un registro anterior
+       a la Fase 9 (o uno cuyo motor fallo) no tiene la clave, y la
+       ausencia de un dato no puede cambiar el aspecto de una ficha que
+       ya funciona: si se pintara algo en vacio, saldria un bloque con
+       "Veredicto: " y "Score: 0/100", que es mentir.
+    """
+    if not getattr(config, "DIAGNOSTICO_EN_FICHA", True):
+        return []
+    d = a.get("diagnostico")
+    if not isinstance(d, dict) or not d.get("verdict"):
+        return []
+
+    veredicto = str(d.get("verdict") or "")
+    etiqueta = friction_engine.ETIQUETAS.get(veredicto, veredicto)
+    try:
+        score = int(d.get("score") or 0)
+    except (TypeError, ValueError):
+        score = 0
+    dias = d.get("days_to_deadline")
+    cierre = str(dias) if isinstance(dias, (int, float)) else "sin fecha"
+
+    L = ["🩺 <b>Diagnóstico y Viabilidad</b>",
+         (f"Veredicto: <b>{_esc(etiqueta)}</b>"
+          f" · Score: <b>{score}/100</b>"
+          f" · Días al cierre: <b>{_esc(cierre)}</b>")]
+
+    resumen = " ".join(str(d.get("viability_summary") or "").split())
+    if resumen:
+        L.append(f"Resumen rápido: <i>{_esc(resumen[:420])}</i>")
+
+    criticas = [str(x) for x in (d.get("criticas") or []) if str(x).strip()]
+    altas = [str(x) for x in (d.get("altas") or []) if str(x).strip()]
+    if criticas:
+        L.append("<b>Cláusulas críticas detectadas:</b>")
+        L.extend(f" · {_esc(c[:90])}" for c in criticas[:4])
+    elif altas:
+        L.append("<b>Cláusulas de fricción alta detectadas:</b>")
+        L.extend(f" · {_esc(c[:90])}" for c in altas[:4])
+    else:
+        L.append("Cláusulas críticas detectadas: ninguna")
+    return L
+
+
 def formatear_analisis(a: dict) -> str:
     """
     La ficha, en formato ejecutivo.
@@ -1791,6 +1855,18 @@ def formatear_analisis(a: dict) -> str:
     L.append(_SEPARADOR)
     L.append("")
 
+    # --- Diagnostico de friccion y viabilidad (Fase 9) ---
+    # PRIMERO y antes de las cifras: es la linea que decide si la ficha se
+    # sigue leyendo o no. Sin diagnostico no se pinta NADA, ni un separador
+    # de mas, para que una ficha anterior a la Fase 9 salga byte a byte
+    # igual que antes.
+    _diag = _bloque_diagnostico(a)
+    if _diag:
+        L.extend(_diag)
+        L.append("")
+        L.append(_SEPARADOR)
+        L.append("")
+
     # --- Analisis financiero ---
     L.extend(_bloque_financiero(a))
     # Los escenarios van justo detras del resumen, sin separador propio:
@@ -1871,7 +1947,24 @@ def formatear_analisis(a: dict) -> str:
     L.append("")
     L.append(_SEPARADOR)
     L.append("")
-    L.extend(_bloque_rfq(a, d))
+    # El gate de la Fase 9: el borrador solo se redacta cuando el aviso ha
+    # pasado los filtros de friccion (CANDIDATE_RFQ) o cuando hay una
+    # aprobacion explicita. El juicio vive en friction_engine, no aqui,
+    # para que la ficha, el registro y cualquier otro consumidor decidan
+    # lo mismo. Con apagado (RFQ_REQUIERE_CANDIDATO=0) se vuelve al
+    # comportamiento anterior: el RFQ sale siempre.
+    _puede_rfq, _motivo_rfq = (
+        friction_engine.rfq_permitido(a)
+        if getattr(config, "RFQ_REQUIERE_CANDIDATO", True) else (True, ""))
+    if _puede_rfq:
+        L.extend(_bloque_rfq(a, d))
+    else:
+        # Un aviso, no un hueco: el usuario tiene que saber POR QUE no hay
+        # RFQ y que no es un fallo del bot.
+        L.append("⏸️ <b>RFQ en pausa</b>")
+        L.append(f"<i>{_esc(_motivo_rfq)}</i>")
+        L.append("<i>Se habilita aprobándolo a mano o cuando el aviso "
+                 "pase los filtros.</i>")
 
     L.append("")
     L.append(f"<i>{kyo.CIERRE}</i>")

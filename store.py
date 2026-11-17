@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS cache_estructura (
     modelo    TEXT,
     guardado  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS cache_pliegos (
+    notice_id  TEXT NOT NULL,
+    actualizado TEXT NOT NULL DEFAULT '',
+    texto      TEXT NOT NULL,
+    guardado   TEXT NOT NULL,
+    PRIMARY KEY (notice_id, actualizado)
+);
 """
 
 
@@ -204,7 +211,77 @@ def limpiar_cache() -> int:
     with _lock, _conexion() as c:
         n = c.execute("SELECT COUNT(*) FROM cache_descripciones").fetchone()[0]
         c.execute("DELETE FROM cache_descripciones")
+        c.execute("DELETE FROM cache_pliegos")
         return n
+
+
+# --------------------------------------------------------------------------
+# Pliegos largos (Fase 9)
+#
+# Cache por (notice_id, fecha de actualizacion), que es la clave que
+# exige el requisito: la descripcion de un aviso se guarda UNA vez por
+# version del aviso. Si el comprador publica una enmienda, cambia
+# updateDate, cambia la clave, y se vuelve a pagar la peticion; lo que NO
+# se hace es reconsultar la misma version, que es lo que ahorra cuota.
+#
+# Tabla aparte de cache_descripciones a proposito: esa la llena el
+# escaner con el texto CORTADO en config.MAX_CHARS_DESCRIPCION, y
+# mezclarla aqui dejaria el texto largo en la mano de quien solo queria
+# 3.000 caracteres, cambiandole el prompt sin avisar.
+# --------------------------------------------------------------------------
+SIN_PLIEGO = "\x00pliego_vacio"
+
+
+def cache_pliego(notice_id: str, actualizado: str, texto: str) -> None:
+    """Guarda la descripcion larga de este aviso y de ESTA version."""
+    if not notice_id:
+        return
+    init_db()
+    with _lock, _conexion() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO cache_pliegos "
+            "(notice_id, actualizado, texto, guardado) VALUES (?,?,?,?)",
+            (str(notice_id), str(actualizado or ""),
+             texto if texto else SIN_PLIEGO, _ahora()),
+        )
+
+
+def leer_pliego(notice_id: str, actualizado: str = "") -> str | None:
+    """
+    El pliego cacheado de esa version, "" si se guardo vacio, o None si
+    NUNCA se ha preguntado.
+
+    None y "" tienen que ser distintos, y por eso no se devuelve "" para
+    las dos: "" es "SAM.gov no tiene descripcion para este aviso", que ya
+    se sabe y no hay que volver a pagar; None es "todavia no se ha
+    mirado", que es la unica senal para ir a la API.
+    """
+    if not notice_id:
+        return None
+    init_db()
+    with _lock, _conexion() as c:
+        fila = c.execute(
+            "SELECT texto FROM cache_pliegos WHERE notice_id = ? "
+            "AND actualizado = ?",
+            (str(notice_id), str(actualizado or "")),
+        ).fetchone()
+    if not fila:
+        return None
+    return "" if fila[0] == SIN_PLIEGO else fila[0]
+
+
+def pliego_consultado(notice_id: str, actualizado: str = "") -> bool:
+    """Esa version del aviso ya se le pregunto a SAM.gov, tenga texto o no."""
+    if not notice_id:
+        return False
+    init_db()
+    with _lock, _conexion() as c:
+        fila = c.execute(
+            "SELECT 1 FROM cache_pliegos WHERE notice_id = ? "
+            "AND actualizado = ?",
+            (str(notice_id), str(actualizado or "")),
+        ).fetchone()
+    return fila is not None
 
 
 def rango_buscado(desde: str, hasta: str) -> bool:

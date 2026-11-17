@@ -22,7 +22,8 @@ import sys
 MODULOS = [
     "config.py", "store.py", "sam_api.py", "filters.py", "gemini_analyzer.py",
     "telegram_notify.py", "label.py", "scanner.py", "quota.py", "kyo.py",
-    "menu.py", "distribuidores.py", "main.py",
+    "menu.py", "distribuidores.py", "main.py", "complejidad.py",
+    "friction_engine.py", "pliego.py",
 ]
 
 FALLA = 0

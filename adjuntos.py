@@ -62,6 +62,7 @@ import re
 import tempfile
 
 import config
+import pliego
 
 log = logging.getLogger("kyomoto.adjuntos")
 
@@ -100,7 +101,14 @@ class FalloDescargaEspecificaciones(Exception):
 
 _EXT_TEXTO = (".txt", ".csv", ".htm", ".html", ".xml", ".md", ".json")
 _EXT_PDF = (".pdf",)
-_EXT_PEOR = (".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx", ".zip", ".dwg")
+# Fase 9: son texto de verdad y se LEEN, no se descartan. El .docx va con
+# zipfile de la stdlib (nada de python-docx, que ya estuvo retirado a
+# proposito) y el .html se convierte a texto conservando la estructura.
+# La lista vive en pliego, que es donde se abre cada una: dos listas
+# distintas significarian que un fichero se lee por un sitio y no por el
+# otro solo por como ha llegado.
+_EXT_RICO = pliego.EXT_RICO
+_EXT_PEOR = (".xls", ".xlsx", ".doc", ".ppt", ".pptx", ".zip", ".dwg")
 
 _RE_BASE = re.compile(r"(base_)?name|\bname\b", re.I)
 
@@ -200,6 +208,12 @@ def _texto_de_recurso(bits: bytes, nombre: str, content_type: str = "") -> str:
     ext = ("." + nombre.rsplit(".", 1)[-1].lower()) if "." in nombre else ""
     if ext in _EXT_PDF or "pdf" in str(content_type).lower():
         return _texto_de_pdf(bits, nombre)
+    # El pliego llega a veces como HTML o como .docx, y los dos son texto
+    # de verdad. Antes el .docx se devolvia vacio y el HTML con sus
+    # etiquetas dentro: el modelo leia <p> en vez de parrafos, y las
+    # clausulas numeradas se fundian en un bloque sin numero.
+    if ext in _EXT_RICO:
+        return pliego.de_archivo(bits, nombre, content_type)
     if ext in _EXT_PEOR:
         # Un .xlsx o un .zip no se leen aqui. El nombre del fichero se devuelve
         # igualmente, que es lo unico aprovechable.

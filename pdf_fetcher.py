@@ -46,6 +46,7 @@ import os
 import tempfile
 
 import config
+import pliego
 
 log = logging.getLogger("kyomoto.pdf_fetcher")
 
@@ -66,7 +67,16 @@ CONEXIONES = 4
 # Extensiones de las que sale TEXTO legible. Un .dwg, un .zip, un .xlsx o
 # una imagen no aportan nada al prompt: bajarlos seria tiempo y cuota
 # contra nada. Los indices de SAM.gov no llevan extension y se quedan.
-_DOC = (".pdf", ".txt", ".csv", ".htm", ".html", ".xml", ".md", ".json")
+# El .docx entra desde la Fase 9: es texto, y se abre con la stdlib.
+_DOC = (".pdf", ".txt", ".csv", ".htm", ".html", ".xml", ".md", ".json",
+        ".docx")
+
+# De estas sale texto, pero hay que ABRIRLAS y limpiarlas antes: un .docx
+# es un zip con word/document.xml dentro, y un .html viene con sus
+# etiquetas. La apertura y la limpieza viven en pliego.EXT_RICO, que es
+# donde tambien se limpia la descripcion, para que un mismo HTML no se lea
+# de dos formas segun por donde haya entrado.
+_EXT_RICO = pliego.EXT_RICO
 
 # Hasta donde sigue un indice de adjuntos. Un nivel: el indice apunta a
 # ficheros, los ficheros no apuntan a nada. Sin esto, un JSON que
@@ -207,7 +217,12 @@ def _leer_fichero(ruta: str, nombre: str, ctype: str) -> str:
         if _ext(nombre) == ".pdf" or "pdf" in str(ctype).lower():
             return _pdf(ruta, nombre)
         with open(ruta, "rb") as f:
-            return _decodificar(f.read())
+            bits = f.read()
+        # Fase 9: HTML y DOCX son texto de verdad. Antes se devolvian las
+        # etiquetas tal cual y el modelo leia <p> en vez de parrafos.
+        if _ext(nombre) in _EXT_RICO:
+            return pliego.de_archivo(bits, nombre, ctype)
+        return _decodificar(bits)
     except Exception as e:
         log.info("pdf_fetcher: no se pudo leer %s: %s", nombre, e)
         return ""

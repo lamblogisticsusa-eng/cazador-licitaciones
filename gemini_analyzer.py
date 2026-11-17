@@ -880,6 +880,113 @@ def _precios_historicos(opp: dict, descripcion: str, corpus: str) -> dict:
     return datos
 
 
+def _pliego_largo(opp: dict, descripcion: str) -> str:
+    """
+    El pliego COMPLETO, solo cuando la descripcion llego CORTADA.
+
+    Es la bajada de la Fase 9 (pliego.texto_largo) y el condicion de aqui
+    es deliberado: si lo que se tiene mide menos que
+    config.MAX_CHARS_DESCRIPCION, la descripcion NO estaba cortada, y
+    volver a pedirla seria pagar una peticion del tope diario por el
+    mismo texto. Solo se paga cuando hay motivos para creer que hay mas
+    texto abajo, que es justo cuando las clausulas que deciden el
+    expediente (SUBSAFE, Nivel I, radiografia) estan.
+
+    El coste queda ademas acotado: el escaner baja 40 descripciones por
+    barrido, pero aqui solo se llama desde analizar(), que se ejecuta como
+    mucho MAX_A_GEMINI veces, y cada bajada se cachea por noticeId +
+    fecha de actualizacion.
+
+    Nunca lanza y nunca aporta basura: con la lectura apagada, sin
+    noticeId o con la API caida devuelve "" y el juicio se hace con la
+    descripcion oficial mas los adjuntos, que es lo que habia antes.
+    """
+    if not getattr(config, "PLIEGO_LARGO_EN_ANALISIS", True):
+        return ""
+    if len(str(descripcion or "")) < config.MAX_CHARS_DESCRIPCION:
+        return ""
+    nid = (opp or {}).get("noticeId")
+    if not nid:
+        return ""
+    try:
+        import pliego
+        return pliego.texto_largo(nid, opp or {})
+    except Exception as e:
+        log.warning("analisis: no se pudo bajar el pliego largo de %s (%s); "
+                    "el diagnostico se hace con lo que ya se tiene", nid, e)
+        return ""
+
+
+def _historial_favorable(precios) -> bool | None:
+    """
+    Si la clase se compra, se compra seguido y no esta cayendo.
+
+    None cuando no hay datos, y None NO es False: "no se pudo consultar"
+    no es "el mercado esta mal", y penalizar lo primero por lo segundo
+    lleva a descartar aviso por un fallo de red.
+    """
+    if not isinstance(precios, dict) or precios.get("sin_datos", True):
+        return None
+    try:
+        premios = int(precios.get("premios") or 0)
+    except (TypeError, ValueError):
+        return None
+    if premios < 3:
+        return None
+    return str(precios.get("tendencia") or "").upper() != "BAJA"
+
+
+def _diagnostico(opp: dict, descripcion: str, corpus: str, *,
+                 unidad: str = "", monto=None, margen_neto=None,
+                 precios=None) -> dict:
+    """
+    El juicio de friccion y viabilidad (Fase 9), ya en su forma JSON.
+
+    Va en el analisis y NO solo en el mensaje, por la misma razon que los
+    escenarios y el historial de precios de la Fase 8: quien lo guarde, lo
+    reenvie o lo reabra no tiene que volver a montarlo, y la ficha y el
+    registro no pueden decir dos cosas distintas.
+
+    Aqui NO se juzga con Gemini. Los hechos los extrae el modelo (eso ya
+    hace) y las reglas las aplica friction_engine en Python, igual que
+    hace complejidad.py con la bandera de complejidad: un veredicto que
+    sale de un modelo no se puede reproducir, no se puede testear, y una
+    noche la misma licitacion saldria candidata y a la siguiente
+    rechazada.
+
+    Si algo falla devuelve {} y no una excepcion: un analisis sin
+    diagnostico es una ficha sin bloque y con el RFQ habilitado, que es
+    lo que pasaba antes de la Fase 9. Un KeyError en la ficha por una
+    clave que un registro antiguo no trae seria un fallo sin motivo.
+    """
+    try:
+        import friction_engine
+        texto = "\n\n".join(
+            p for p in (
+                str(descripcion or "").strip(),
+                str(corpus or "").strip(),
+                _pliego_largo(opp, descripcion),
+            ) if p
+        )
+        a = opp if isinstance(opp, dict) else {}
+        contexto = friction_engine.Contexto(
+            titulo=str(a.get("title") or ""),
+            agencia=str(a.get("fullParentPathName") or ""),
+            set_aside=str(a.get("typeOfSetAsideDescription")
+                          or a.get("typeOfSetAside") or ""),
+            unidad=unidad,
+            limite=a.get("responseDeadLine") or None,
+            monto=monto,
+            margen_neto=margen_neto,
+            historial_favorable=_historial_favorable(precios),
+        )
+        return friction_engine.evaluar(texto, contexto).a_dict()
+    except Exception as e:
+        log.warning("analisis: el motor de friccion no pudo evaluar (%s); "
+                    "el aviso sale sin diagnostico", e)
+        return {}
+
+
 def analizar(
     opp: dict,
     descripcion: str,
@@ -1104,6 +1211,20 @@ def analizar(
             if _pct_descuento is not None else float("nan"),
         )
 
+    # --- Diagnostico de friccion y viabilidad (Fase 9) ---
+    # Se calcula aqui y no en Telegram porque es un JUICIO con reglas, no
+    # una presentacion: tiene que viajar en el analisis, y porque lo que
+    # decide si el RFQ se redacta o no no puede vivir en el modulo que
+    # pinta mensajes. Se hace al final porque necesita tres datos que solo
+    # existen a estas alturas: el margen neto ya calculado, la unidad
+    # normalizada y el historial de la Fase 8.
+    unidad_medida = _limpiar_ia(datos.get("unidad_medida"))[:20].upper() or "EA"
+    diagnostico = _diagnostico(opp, descripcion, corpus,
+                               unidad=unidad_medida,
+                               monto=valor,
+                               margen_neto=margen_neto,
+                               precios=precios)
+
     return {
         "notice_id": opp.get("noticeId"),
         "viable": bool(datos["viable"]),
@@ -1116,7 +1237,7 @@ def analizar(
         "sin_descripcion": not bool(descripcion.strip()),
         "producto": _limpiar_ia(datos.get("producto"))[:400],
         "modelo_especifico": _limpiar_ia(datos.get("modelo_especifico"))[:120],
-        "unidad_medida": _limpiar_ia(datos.get("unidad_medida"))[:20].upper() or "EA",
+        "unidad_medida": unidad_medida,
         "cantidad_total": cantidad,
         "especificacion_tecnica_clave": _limpiar_ia(datos.get("especificacion_tecnica_clave"))[:700],
         "lugar_entrega": _limpiar_ia(datos.get("lugar_entrega")) or lugar or "No especificado",
@@ -1166,6 +1287,13 @@ def analizar(
         # no hay datos lleva su forma vacia con `sin_datos` y su motivo,
         # que es mas informativo que la ausencia de la clave.
         "precios_historicos": precios,
+        # El diagnostico de friccion y viabilidad (Fase 9). Va en el
+        # analisis por la misma razon que los escenarios y el historial:
+        # es el dato con el que se decide si el RFQ se redacta, y no puede
+        # depender de que alguien vuelva a montarlo. Trae su forma entera
+        # (verdict, score, days_to_deadline, matched_rules, key_findings,
+        # viability_summary) y, con ella, el gate del RFQ.
+        "diagnostico": diagnostico,
         # Los dos campos de estrategia se SOBRESCRIBEN con la frase calculada
         # en Python. No es que se ignoren lo que dice el modelo: es que lo que
         # dice no puede ser correcto, porque sus cifras se corrigen mas arriba

@@ -25,9 +25,7 @@ codigo original no encontraba nada:
 """
 from __future__ import annotations
 
-import html
 import logging
-import re
 import threading
 import time
 import unicodedata
@@ -38,6 +36,7 @@ from urllib.parse import urlencode
 import requests
 
 import config
+import pliego
 import store
 
 log = logging.getLogger("kyomoto.sam")
@@ -114,10 +113,6 @@ _proximo_acceso: str | None = None
 # Ventanas servidas hace poco desde la cache, para no repetir los mismos
 # bloques dentro del intervalo de barrido.
 _cache_rangos: dict[str, float] = {}
-
-TAG_HTML = re.compile(r"<[^>]+>")
-ESPACIOS = re.compile(r"[ \t\r\f\v]+")
-SALTOS = re.compile(r"\n{3,}")
 
 
 class SamError(Exception):
@@ -266,13 +261,23 @@ def _parse_fecha(valor: str | None) -> datetime | None:
 
 
 def limpiar_html(bruto: str) -> str:
-    """El endpoint noticedesc devuelve HTML, a veces con ** de markdown dentro."""
-    texto = TAG_HTML.sub(" ", bruto or "")
-    texto = html.unescape(texto)
-    texto = texto.replace("**", " ").replace("\r", " ")
-    texto = ESPACIOS.sub(" ", texto)
-    texto = SALTOS.sub("\n\n", texto)
-    return texto.strip()
+    """
+    El endpoint noticedesc devuelve HTML, a veces con ** de markdown dentro.
+
+    La limpieza vive en pliego.py y aqui solo se delega (Fase 9): era el
+    unico sitio que la tenia, y ahora el mismo texto se limpia igual
+    venga de la descripcion, de un adjunto .html o de un pliego pegado a
+    mano. Dos versiones de "como se limpia un HTML" significan dos
+    pliegos distintos para el mismo aviso.
+
+    Lo que cambia respecto al reemplazo de etiquetas que había: los
+    bloques (`<p>`, `<li>`, `<br>`, encabezados) se convierten en SALTO DE
+    LINEA en vez de en un espacio. Sin eso, la numeracion de clausulas y
+    las viñetas de los CDRL se fundian en un parrafo de 3.000 caracteres
+    y no quedaba forma de citar una clausula.
+    """
+    texto = str(bruto or "").replace("**", " ")
+    return pliego.de_html_a_texto(texto)
 
 
 def verificar_api() -> dict:
@@ -391,7 +396,7 @@ def _get(params: dict, reintentos: int | None = None,
     raise ultima or SamError("Fallo desconocido")
 
 
-def _descripcion_interna(opp: dict) -> str:
+def _descripcion_interna(opp: dict, cortar: bool = True) -> str:
     """
     Texto que YA venia en la respuesta de la busqueda, si lo hubo.
 
@@ -410,13 +415,19 @@ def _descripcion_interna(opp: dict) -> str:
     La distincion se hace por forma: una URL empieza por http. Un texto real
     no. Es una heuristica, no una garantia, asi que el criterio es
     conservador: si hay duda, se pide igual.
+
+    `cortar=False` devuelve el texto entero, que es lo que necesita el
+    motor de friccion de la Fase 9: las clausulas que deciden el
+    expediente (SUBSAFE, Nivel I, radiografia) estan casi siempre mas
+    abajo de config.MAX_CHARS_DESCRIPCION.
     """
     bruto = str(opp.get("description") or "").strip()
     if not bruto:
         return ""
     if bruto.lower().startswith("http"):
         return ""
-    return limpiar_html(bruto)[: config.MAX_CHARS_DESCRIPCION]
+    texto = limpiar_html(bruto)
+    return texto[: config.MAX_CHARS_DESCRIPCION] if cortar else texto
 
 
 def metadatos_sinteticos(opp: dict) -> dict | None:
@@ -464,6 +475,41 @@ def metadatos_sinteticos(opp: dict) -> dict | None:
     }
 
 
+def obtener_descripcion_larga(notice_id: str, opp: dict | None = None) -> str:
+    """
+    La descripcion COMPLETA, sin el corte de config.MAX_CHARS_DESCRIPCION.
+
+    Es el mismo camino que obtener_descripcion, con la unica diferencia de
+    que no trunca, y existe por el motivo que esta escrito en pliego.
+    texto_largo: las clausulas que mandan en un pliego (SUBSAFE, Nivel I,
+    radiografia, los datos DI) estan casi siempre por debajo del corte, y
+    el motor de friccion de la Fase 9 no puede juzgar lo que no ve.
+
+    Devuelve "" si falla, igual que obtener_descripcion: el escaneo no se
+    frena ni se reintenta, y quien llama ya sabe que sin texto se juzga
+    con lo que haya.
+    """
+    if opp is not None:
+        ya_venia = _descripcion_interna(opp, cortar=False)
+        if ya_venia:
+            return ya_venia
+    try:
+        # Mismo timeout estricto y mismos 2 reintentos que la variante
+        # corta: un detalle que se cuelga en Render se resuelve rapido.
+        r = _get({"api_key": config.SAM_API_KEY, "noticeid": notice_id},
+                reintentos=config.REINTENTOS_DESC, timeout=config.TIMEOUT_DESC)
+        if r.status_code != 200:
+            return ""
+        crudo = r.text
+        if not crudo or not crudo.lstrip().startswith("{"):
+            return ""
+        return limpiar_html(r.json().get("description") or "")
+    except SamError as e:
+        log.warning("No se pudo bajar la descripcion larga de %s: %s",
+                    notice_id, e)
+        return ""
+
+
 def obtener_descripcion(notice_id: str, opp: dict | None = None) -> str:
     """
     Texto real de la oportunidad. Devuelve "" si falla (no revienta el escaneo).
@@ -472,6 +518,11 @@ def obtener_descripcion(notice_id: str, opp: dict | None = None) -> str:
     requerimiento: el ciclo de barrido no se frena ni se reintenta. Lo que no
     habia era el atajo de arriba: si la busqueda ya trajo el texto, no hay
     que gastarse una peticion del tope diario en volver a pedirlo.
+
+    Es la MISMA bajada que obtener_descripcion_larga, cortada a
+    config.MAX_CHARS_DESCRIPCION: una sola fuente para los dos caminos, que
+    es la unica forma de que la descripcion que ve el prompt y la que ve el
+    motor de friccion no puedan decir dos cosas distintas del mismo aviso.
 
     NO se anade un segundo endpoint (/opportunityApi/v1/resources) a proposito.
     Ahi no hay descripciones: hay adjuntos, y sus nombres de archivo ("QRA_
@@ -482,25 +533,8 @@ def obtener_descripcion(notice_id: str, opp: dict | None = None) -> str:
     para traer menos informacion que la que ya se tiene. Si algun dia hace
     falta, tiene que ir con un flag y medirse, no por defecto.
     """
-    if opp is not None:
-        ya_venia = _descripcion_interna(opp)
-        if ya_venia:
-            return ya_venia
-    try:
-        # v5.2.0: timeout estricto de 3.5s y 2 reintentos para la descarga de
-        # detalle. Un detalle que se cuelga en Render se resuelve rapido y sin
-        # bloquear el barrido, en vez de aguantar el timeout general de 45s.
-        r = _get({"api_key": config.SAM_API_KEY, "noticeid": notice_id},
-                reintentos=config.REINTENTOS_DESC, timeout=config.TIMEOUT_DESC)
-        if r.status_code != 200:
-            return ""
-        crudo = r.text
-        if not crudo or not crudo.lstrip().startswith("{"):
-            return ""
-        return limpiar_html(r.json().get("description") or "")[: config.MAX_CHARS_DESCRIPCION]
-    except SamError as e:
-        log.warning("No se pudo bajar la descripcion de %s: %s", notice_id, e)
-        return ""
+    return obtener_descripcion_larga(notice_id, opp)[
+        : config.MAX_CHARS_DESCRIPCION]
 
 
 def limpiar_solicitud(bruto) -> str:
