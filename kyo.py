@@ -56,6 +56,12 @@ def resumen_escaneo(r: dict) -> str:
     lineas.append(f"🔎 Avisos revisados: <b>{r.get('traidas', 0)}</b> en SAM.gov")
     lineas.append(f"📦 Con producto fisico: <b>{r.get('puntuales', 0)}</b> pasaron el filtro")
     lineas.append(f"🧠 Analizados por IA: <b>{r.get('analizadas', 0)}</b>")
+    # De donde a donde bajo el numero. Solo si el escanero lo trae: los
+    # resumenes armados a mano (tests, /escaneo manual) no lo llevan y esta
+    # linea no tiene por que existir ahi.
+    _emb = str(r.get("embudo_texto") or "").strip()
+    if _emb:
+        lineas.append(f"<i>{_emb}</i>")
     lineas.append(f"💎 <b>Viables para ti: {viables}</b>")
     q = r.get("cuota") or {}
     if q:

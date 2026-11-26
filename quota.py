@@ -120,13 +120,64 @@ def reservar(notice_id: str) -> bool:
     """
     True si este aviso entra hoy al presupuesto. False si ya se contó hoy.
     Evita que un reintento dentro del mismo barrido gaste dos cupos.
+
+    BUG QUE ARREGLA (Fase 10): la tabla es `notice_id TEXT PRIMARY KEY`, sin
+    `dia` en la clave, asi que el viejo `INSERT OR IGNORE` ignoraba la fila
+    aunque hubiera sido escrita AYER. `limpiar_reservas()` solo corre en
+    `main()` al arrancar (main.py:1104), asi que un proceso vivo cruzando la
+    medianoche del Pacifico bloqueaba para siempre los avisos reservados el
+    dia anterior.
+
+    La solución no cambia el esquema (habría que migrar la PK, y una tabla ya
+    desplegada no se migra con CREATE IF NOT EXISTS): si la fila existente es
+    de OTRO dia, se refresca y la reserva vale. Si es de HOY, no cambia nada
+    y devuelve False.
     """
+    hoy = hoy_pacifico()
     with _lock, _conexion() as c:
+        fila = c.execute(
+            "SELECT dia FROM vista_quota WHERE notice_id = ?", (notice_id,)
+        ).fetchone()
+        if fila and fila[0] == hoy:
+            return False
         c.execute(
-            "INSERT OR IGNORE INTO vista_quota (notice_id, dia) VALUES (?,?)",
-            (notice_id, hoy_pacifico()),
+            "INSERT INTO vista_quota (notice_id, dia) VALUES (?,?) "
+            "ON CONFLICT(notice_id) DO UPDATE SET dia = excluded.dia",
+            (notice_id, hoy),
         )
-        return c.total_changes > 0
+        return True
+
+
+def liberar(notice_id: str) -> bool:
+    """
+    Devuelve al presupuesto la reserva de un aviso cuyo analisis fallo.
+
+    Por que existe: `reservar()` se llama ANTES de someter a Gemini (scanner.py
+    ~linea 561) y `store.marcar()` DESPUES. Si Gemini falla (429, saturacion,
+    timeout) el aviso NO se marca como visto -que es lo que queremos, para que
+    se reintente- pero la reserva ya estaba hecha y nada la devolvia. El
+    resultado era el embudo muerto que se reporto:
+
+        Pasaron el filtro: 40  ->  Analizados por IA: 0
+
+    Porque el siguiente barrido volvia a traer esos mismos 40 avisos (siguen
+    sin estar en licitaciones_procesadas), `reservar()` devolvia False para
+    todos, `futuros` quedaba vacio y `resumen["analizadas"] = len(futuros)`
+    daba 0. Y como `gastar_fallo()` incrementa `fallidas` y NO `llamadas`,
+    `estado()["restantes"]` seguia en el tope, la guarda de presupuesto no se
+    disparaba, no habia mensaje de error, y solo salia "Barrido sin
+    oportunidades": una caja negra.
+
+    Nunca lanza: liberar mal no puede tumbar el barrido.
+    """
+    try:
+        with _lock, _conexion() as c:
+            n = c.execute(
+                "DELETE FROM vista_quota WHERE notice_id = ?", (notice_id,)
+            ).rowcount
+            return bool(n)
+    except sqlite3.Error:
+        return False
 
 
 def limpiar_reservas() -> int:

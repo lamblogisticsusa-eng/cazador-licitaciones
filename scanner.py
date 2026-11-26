@@ -45,6 +45,33 @@ DESCARTE_POR_MOTIVO: dict[str, int] = {}
 DESCARTE_LOG: list[dict] = []
 MAX_DESCARTE_LOG = 120
 
+# Desglose del embudo: de donde a donde baja el numero de avisos.
+#
+# Existe porque el reporte salia como caja negra. En produccion se vio:
+#
+#     Pasaron el filtro: 40   ->   Analizados por IA: 0
+#     Barrido sin oportunidades
+#
+# y no estaba claro en que tramo se frenaban los 40. Cada tramo tiene su
+# contador aqui, y `resumen["embudo"]` los exporta para que el mensaje los
+# muestre. Sin esto, un 0 es indistinguible de "hoy no habia nada bueno".
+#
+# Los tramos, en el orden en que se aplican:
+#   traidas       avisos que SAM.gov devolvio en la ventana
+#   ya_vistos     ya estan en licitaciones_procesadas (cache / dedup)
+#   naics         veto de NAICS (servicios, no venta de bienes)
+#   fecha         sin fecha limite legible o ya vencido
+#   sin_titulo    sin titulo
+#   puntaje       pasaron los tres vetos pero no llegaron a PUNTAJE_MINIMO
+#   duplicados    mismo titulo/pedido ya visto en este barrido
+#   valor         fuera del rango USD MIN_USD..TOPE_USD
+#   complejidad   veto de complejidad/riesgo (high_complexity_defense)
+#   sin_texto     sin descripcion y sin metadatos que la cubran
+#   reserva       ya tenian cupo reservado hoy (reintento tras un fallo)
+#   puntuales     lo que llego de verdad al bloque de analisis
+#   analizadas    lo que se sometio a Gemini
+EMBUDO: dict[str, int] = {}
+
 # Avisos ya contados en ESTE barrido.
 #
 # Hace falta porque cada aviso se puntua DOS veces: el pre-puntaje por titulo,
@@ -80,6 +107,19 @@ def limpiar_descarte() -> None:
     DESCARTE_POR_MOTIVO.clear()
     DESCARTE_LOG.clear()
     _DESCARTE_VISTOS.clear()
+    EMBUDO.clear()
+
+
+def sumar(tramo: str, n: int = 1) -> None:
+    """Suma `n` unidades al tramo del embudo. Nunca lanza.
+
+    El embudo es observabilidad, no logica de negocio: un contador que no
+    pueda contar tiene que quedarse corto, no tumbar el barrido.
+    """
+    try:
+        EMBUDO[tramo] = EMBUDO.get(tramo, 0) + max(0, int(n))
+    except Exception:
+        pass
 
 
 def _contar_descarte(motivos: list, notice_id: str = "",
@@ -125,6 +165,85 @@ def _log(txt: str) -> None:
     print(f"{datetime.now().strftime('%H:%M:%S')} {txt}", flush=True)
 
 
+def _embudo_puntaje(motivos: list) -> None:
+    """
+    Clasifica un aviso que no llego al piso de puntaje, UNA vez.
+
+    Se separa `complejidad` de `puntaje` porque no dicen lo mismo: `puntaje`
+    es "no parece producto", mientras que `complejidad` es "parece producto
+    pero es una trampa militar/naval". Que el segundo se pierda dentro del
+    primero hace que un barrido con 30 trampas se lea como "30 avisos que no
+    eran producto", que es exactamente la confusion que hay que evitar.
+
+    Solo se cuenta aqui, en el bucle que recorre `candidatas` completo: el
+    pre-puntaje por titulo evalua esos mismos avisos otra vez y contarlos en
+    los dos sitios duplicaria el numero.
+    """
+    texto = " | ".join(str(m) for m in motivos)
+    if "high_complexity" in texto:
+        sumar("complejidad")
+    else:
+        sumar("puntaje")
+
+
+# Nombre legible de cada tramo del embudo, en el mismo orden en que se
+# aplican. Vive aqui y no en kyo.py: las etiquetas describen contadores que
+# solo existen en este modulo, y separarlas seria dejar la mitad del
+# vocabulario en cada archivo.
+ETIQUETAS_EMBUDO: list[tuple[str, str]] = [
+    ("ya_vistos", "ya analizados antes"),
+    ("naics", "veto NAICS"),
+    ("fecha", "fecha vencida o ilegible"),
+    ("sin_titulo", "sin titulo"),
+    ("puntaje", "bajo el piso de puntaje"),
+    ("complejidad", "complejidad/riesgo alto"),
+    ("valor", "fuera del rango USD"),
+    ("duplicados", "duplicados por titulo"),
+    ("sin_texto", "sin descripcion todavia"),
+    ("reserva", "cupos ya reservados hoy"),
+]
+
+
+def desglose_embudo(resumen: dict | None = None) -> str:
+    """
+    Los tramos que dejaron avisos, como una linea para el mensaje de Telegram.
+
+    Solo los distintos de cero: un "veto NAICS x0" no explica nada, y con
+    barridos cada 2 h cada linea de mas son 12 al dia de ruido. Devuelve ""
+    cuando no hay nada que decir, que es lo que hace en los retornos tempranos
+    (SAM caido, sin candidatos) donde todavia no corrio ningun filtro.
+    """
+    emb: dict = dict(EMBUDO)
+    emb.update((resumen or {}).get("embudo") or {})
+    partes = [
+        f"{etiqueta} x{int(emb.get(clave) or 0)}"
+        for clave, etiqueta in ETIQUETAS_EMBUDO
+        if int(emb.get(clave) or 0)
+    ]
+    if not partes:
+        return ""
+    return "Sin analizar: " + ", ".join(partes)
+
+
+def _publicar_embudo(resumen: dict) -> None:
+    """
+    Vuelca el desglose al resumen, en forma de dict y en forma de linea.
+
+    Se llama antes de CADA `return resumen`, tambien en los retornos
+    tempranos. Sin esto, los caminos mas interesantes -SAM caido, todos
+    vetados por NAICS, nadie sobre el piso de puntaje- devuelven un resumen
+    sin desglose, que es justamente donde mas hace falta saber a donde se
+    fueron los avisos.
+    """
+    emb: dict = dict(EMBUDO)
+    emb["traidas"] = resumen.get("traidas", 0)
+    emb["candidatas"] = resumen.get("candidatas", 0)
+    emb["puntuales"] = resumen.get("puntuales", 0)
+    emb["analizadas"] = resumen.get("analizadas", 0)
+    resumen["embudo"] = emb
+    resumen["embudo_texto"] = desglose_embudo(resumen)
+
+
 def _traer_candidatos(dias: int) -> tuple[list[dict], int, int]:
     """
     Fase A: trae de la API y descarta con NAICS + titulo solamente.
@@ -133,20 +252,33 @@ def _traer_candidatos(dias: int) -> tuple[list[dict], int, int]:
     vistos = store.ids_procesados()
     crudos: list[dict] = []
     total = 0
+    ya_vistos = 0
     stats: dict = {}
     for opp in sam_api.barrer(dias, stats=stats, indice_psc=True):
         total += 1
         nid = opp.get("noticeId")
-        if not nid or nid in vistos:
+        if not nid:
+            continue
+        if nid in vistos:
+            # Contado AQUI y no devuelto como len(vistos): lo que hace falta
+            # para el embudo es "cuantos de ESTE barrido ya estaban hechos",
+            # no el tamano historico de la tabla, que solo crece y nunca
+            # explica nada.
+            ya_vistos += 1
             continue
         # El veto por NAICS es gratis y elimina la mayoria.
         if filters.es_bien_por_naics(opp) is False:
+            sumar("naics")
             continue
         if sam_api.dias_restantes(opp) < 0:
+            sumar("fecha")
             continue
         if not str(opp.get("title") or "").strip():
+            sumar("sin_titulo")
             continue
         crudos.append(opp)
+
+    sumar("ya_vistos", ya_vistos)
 
     # Si NINGUN bloque se pudo leer, esto no es "un dia tranquilo": es SAM.gov
     # caido o la clave rechazada. Hay que decirlo, no devolver cero y sonreir.
@@ -156,7 +288,7 @@ def _traer_candidatos(dias: int) -> tuple[list[dict], int, int]:
             f"intentos. Ultimo error: {stats['errores'][0] if stats['errores'] else 'desconocido'}"
         )
 
-    return crudos, total, len(vistos)
+    return crudos, total, ya_vistos
 
 
 def _ya_sin_texto(opp: dict) -> bool:
@@ -296,6 +428,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         "analisis": [],
         "cuota": {},
         "descarte_motivo": {},
+        "embudo": {},
     }
 
     def avisar(texto: str) -> None:
@@ -312,10 +445,12 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     except sam_api.SamError as e:
         resumen["errores"].append(f"SAM.gov fallo: {e}")
         _log(f"SAM.gov fallo: {e}")
+        _publicar_embudo(resumen)
         return resumen
 
     resumen["traidas"] = total
     resumen["candidatas"] = len(candidatas)
+    _publicar_embudo(resumen)
     _log(f"SAM.gov: {total} avisos en {dias}d, {ya_vistos} ya vistos, {len(candidatas)} potencialmente bienes")
 
     if not candidatas:
@@ -385,6 +520,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         puntos, motivos = filters.puntuar(opp, desc)
         if puntos < config.PUNTAJE_MINIMO:
             _contar_descarte(motivos, opp.get("noticeId", ""), opp)
+            _embudo_puntaje(motivos)
             continue
 
         # v5.2.0: resiliencia ante la caida del endpoint de descripciones.
@@ -405,6 +541,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
                 puntos, motivos = filters.puntuar(opp, desc)
                 if puntos < config.PUNTAJE_MINIMO_DEGRADADO:
                     _contar_descarte(motivos, opp.get("noticeId", ""), opp)
+                    _embudo_puntaje(motivos)
                     continue
 
         # El tope de USD se aplica AQUI, con los datos que ya tenemos, para no
@@ -414,10 +551,12 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         if valor is not None:
             if valor > config.TOPE_USD:
                 descartados_por_valor += 1
+                sumar("valor")
                 store.marcar(opp["noticeId"], opp.get("title", ""), viable=False, puntaje=puntos)
                 continue
             if valor < config.MIN_USD:
                 descartados_por_valor += 1
+                sumar("valor")
                 store.marcar(opp["noticeId"], opp.get("title", ""), viable=False, puntaje=puntos)
                 continue
             puntos += 2
@@ -447,6 +586,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         sin_repetir.append(item)
     if repetidas:
         _log(f"Se descartaron {repetidas} duplicados por titulo")
+        sumar("duplicados", repetidas)
     puntuadas = sin_repetir
 
     resumen["puntuales"] = len(puntuadas)
@@ -478,6 +618,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
              f"certificacion de origen exclusiva de defensa")
 
     if not puntuadas:
+        _publicar_embudo(resumen)
         return resumen
 
     a_analizar = puntuadas[: config.MAX_A_GEMINI]
@@ -502,6 +643,11 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             f"Las {len(puntuadas)} oportunidades siguen pendientes para el "
             f"proximo barrido."
         )
+        # Aqui no se sometio NADA: el 4 que decia la linea de progreso era
+        # "lo que se iba a intentar", no "lo que se intento". El numero del
+        # reporte tiene que ser el segundo.
+        resumen["analizadas"] = 0
+        _publicar_embudo(resumen)
         return resumen
 
     top = min(len(puntuadas), config.MAX_A_GEMINI,
@@ -513,6 +659,7 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
     # si con eso no alcanza para llenar los cupos.
     con_texto = [it for it in puntuadas if it[2].strip()]
     sin_texto = len(puntuadas) - len(con_texto)
+    sumar("sin_texto", sin_texto)
     top = min(top, len(con_texto))
     a_analizar = con_texto[:top]
     if sin_texto:
@@ -526,6 +673,10 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             "Los avisos que pasan el filtro todavia no tienen descripcion "
             "descargada. Se reintentan en el proximo barrido."
         )
+        # Igual que arriba: no se sometio nada, y el desglose de `sin_texto`
+        # es el que explica por que.
+        resumen["analizadas"] = 0
+        _publicar_embudo(resumen)
         return resumen
     resumen["analizadas"] = len(a_analizar)
     avisar(
@@ -557,13 +708,37 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
 
     with ThreadPoolExecutor(max_workers=max(1, config.GEMINI_WORKERS)) as pool:
         futuros = {}
+        omitidas_reserva = 0
         for p, o, d, _m, degradado in a_analizar:
             if not quota.reservar(o["noticeId"]):
+                # Ya conto hoy: o se analizo bien antes, o su reserva quedo
+                # colgada tras un fallo. En el segundo caso `quota.liberar()`
+                # la devuelve al abajo del mismo bucle, asi que este 0 solo
+                # puede significar lo primero.
+                omitidas_reserva += 1
+                sumar("reserva")
                 continue  # ya conto hoy
             futuros[pool.submit(_analizar, o, d,
                                 filters.lugar_de_entrega(o),
                                 continuar=_continuar, degradado=degradado)] = (p, o)
         resumen["analizadas"] = len(futuros)
+
+        # El embudo tenia que poder explicar su propio cero. Antes esto era
+        # una caja negra: "Pasaron el filtro: 40 -> Analizados por IA: 0"
+        # salia sin ninguna linea que dijera por que, y como `gastar_fallo()`
+        # incrementa `fallidas` y no `llamadas`, la guarda de presupuesto no
+        # se disparaba tampoco. Que el reporte lo diga en letras.
+        if not futuros and a_analizar and omitidas_reserva == len(a_analizar):
+            resumen["errores"].append(
+                f"Los {len(a_analizar)} avisos mejores ya tenian cupo de Gemini "
+                f"reservado hoy, asi que no se sometio ninguno. Si el barrido "
+                f"anterior fallo, la reserva se libero y se reintenta en el "
+                f"proximo."
+            )
+            _log(
+                f"0 analisis: los {len(a_analizar)} candidatos ya tenian cupo "
+                f"reservado hoy"
+            )
 
         for fut in as_completed(futuros):
             puntos, opp = futuros[fut]
@@ -583,10 +758,20 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
                     quota.gastar_fallo()
                 # NO se marca como vista: si fallo por cuota o saturacion, este
                 # aviso debe reintentarse en el proximo barrido.
+                #
+                # Y hay que devolverle el cupo, que es la otra mitad del mismo
+                # contrato. `quota.reservar()` se llamo ANTES de someter; sin
+                # `liberar()` la reserva quedaba colgada, el aviso seguia sin
+                # estar en licitaciones_procesadas, volvia a pasar el filtro y
+                # en el siguiente barrido `reservar()` lo rechazaba a el y a
+                # todos los demas: el embudo terminaba en 0/0.
+                quota.liberar(nid)
                 continue
             except Exception as e:
                 fallos_gemini.append(f"{type(e).__name__}: {e}")
                 _log(f"   Error inesperado en {nid[:8]}: {e}")
+                # Mismo trato que arriba: fallo inesperado no es "ya analizado".
+                quota.liberar(nid)
                 continue
 
             quota.gastar()
@@ -672,6 +857,10 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             )
 
     resumen["descarte_motivo"] = dict(DESCARTE_POR_MOTIVO)
+    # El embudo completo, en el orden en que se aplica. `puntuales` y
+    # `analizadas` se meten aqui aunque tambien esten en el resumen: el
+    # desglose tiene que poder leerse solo, sin cruzar dos diccionarios.
+    _publicar_embudo(resumen)
 
     # Un solo aviso de "no salio nada" por barrido, nunca uno por nada.
     #
@@ -694,6 +883,13 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             _top = sorted(_dm.items(), key=lambda kv: -kv[1])[:3]
             _por_que = ("\n\nDescartes: "
                         + ", ".join(f"{k} x{v}" for k, v in _top))
+        # Desglose del embudo (Fase 10). Sin esto, "Pasaron el filtro: 40"
+        # sobre "Analizados por IA: 0" no decia en que tramo se frenaban los
+        # 40, y un 0 es indistinguible de "hoy no habia nada bueno". Van solo
+        # los tramos que dejaron algo: los que estan en cero no explican nada.
+        _emb = desglose_embudo(resumen)
+        if _emb:
+            _por_que += "\n\n" + _emb
         telegram_notify.enviar(
             chat_id,
             "<b>Barrido sin oportunidades</b>\n\n"

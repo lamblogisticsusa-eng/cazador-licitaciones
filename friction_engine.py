@@ -32,12 +32,16 @@ DOS ESCALONES, y el motivo de no meterlo todo en el mismo cajon:
         pruebas no destructivas de soldadura (radiografia, RT, RSS), los
         datos DI obligatorios (DI-MISC-80678 / 81020, DI-QCIC-81110),
         la prohibicion de reparar por soldadura, QALI, o disolver el
-        small business set aside del que depende la oferta. No hay
+        small business set aside del que depende la oferta. Ademas la
+        familia nuclear naval (DSS-SOC, TRIPER, Naval Nuclear Propulsion)
+        y la de clasificacion (NOFORN, CONFIDENTIAL/SECRET con contexto,
+        DD Form 254, Facility Clearance / FAR 52.204-2). No hay
         negociacion posible: el expediente no es para un intermediario.
 
     ALTA -> HIGH_FRICTION_REVIEW y BLOQUEA el RFQ. Friccion seria pero
         superable con canal, documentacion y tiempo: empaque militar
-        (MIL-STD-2073 / 129), inspeccion de origen, distribuidor
+        (MIL-STD-2073 / 129), inspeccion de origen (incluida la de DCMA
+        y QAR), distribuidor
         autorizado, CAC/PKI, GFE/GFM, DPAS/DO, DD250, CMMC, ITAR, FAT.
         Se puede tramitar, pero un borrador de RFQ "listo para enviar"
         seria mentir sobre lo rapido que es. Por eso no sale el bloque:
@@ -193,6 +197,44 @@ CRITICAS: tuple[Regla, ...] = (
           r"dissolve\s+(?:the\s+)?small\s+business\s+set[-\s]?aside"
           r"|dissolve\s+(?:the\s+)?set[-\s]?aside", CRITICA,
           "Disuelve el small business set aside"),
+
+    # --- Familia nuclear naval (Fase 10) ---
+    # Los tres van juntos porque van juntos en el pliego: un aviso que cita
+    # DSS-SOC o TRIPER es un aviso de propulsion nuclear, y esa linea de
+    # trabajo no se puede cubrir comprando y revendiendo por mas margen que
+    # haya en el medio.
+    Regla("dss_soc", r"\bDSS[-\s]?SOC\b", CRITICA,
+          "DSS-SOC: programa de seguridad de diseño naval"),
+    Regla("triper", r"\bTRIPER\b", CRITICA,
+          "TRIPER: requisito de inspección nuclear naval"),
+    Regla("propulsion_nuclear",
+          r"Naval\s+Nuclear\s+Propulsion|Naval\s+Nuclear\b"
+          r"|Nuclear\s+Propulsion\s+(?:System|Plant|Program|Requirements)",
+          CRITICA, "Naval Nuclear Propulsion"),
+
+    # --- Clasificacion (Fase 10) ---
+    # NOFORN y DD Form 254 no tienen doble lectura: son de un aviso
+    # clasificado y punto. CONFIDENTIAL y SECRET si la tienen, porque una
+    # clausula de "confidential information" es boilerplate de casi cualquier
+    # contrato y rechazar por eso seria rechazar la mitad del catalogo. Por
+    # eso esas dos van con `contexto`: solo cuentan junto a lenguaje de
+    # clasificacion de verdad.
+    Regla("noforn", r"\bNOFORN\b", CRITICA,
+          "NOFORN: información clasificada, sin difusión extranjera"),
+    Regla("clasificado",
+          r"\b(?:TOP\s+SECRET|SECRET|CONFIDENTIAL)\b", CRITICA,
+          "Información clasificada (CONFIDENTIAL / SECRET)",
+          contexto=r"\bCLASSIFIED\b|\bCLASSIFICATION\b|\bNOFORN\b"
+                   r"|\bDD\s+FORM\s+254\b|\bDD\s?254\b"
+                   r"|\bFACILITY\s+CLEARANCE\b|\bSECURITY\s+CLEARANCE\b"
+                   r"|\bCLEARANCE\s+(?:LEVEL|STATUS|REQUIRED|APPROVAL)"
+                   r"|\bSECURITY\s+CLASSIFICATION|\bRELEASABLE\b"
+                   r"|\bCLASSIFIED\s+INFORMATION|\bACCESS\s+TO\s+CLASSIFIED"),
+    Regla("dd254", r"\bDD\s+FORM\s+254\b|\bDD\s?254\b", CRITICA,
+          "DD Form 254: guía de clasificación de seguridad"),
+    Regla("facility_clearance",
+          r"\bFACILITY\s+CLEARANCE\b|FAR\s+52\.204-2\b", CRITICA,
+          "Facility Clearance / FAR 52.204-2 (habilitación de seguridad)"),
 )
 
 # Penalizacion critica: friccion alta, pero superable con canal y tiempo.
@@ -241,6 +283,18 @@ ALTAS: tuple[Regla, ...] = (
           r"\bDD\s?250\b|Joint\s+Certification\s+Program|\bJCP\b"
           r"|certificate\s+of\s+conformance\s+to\s+origin", ALTA,
           "DD250 / JCP / certificado de origen de defensa"),
+    # --- Inspeccion superior en origen (Fase 10) ---
+    # No descalifican como SUBSAFE lo hace, pero exigen que alguien de
+    # contratacion revise y apruebe en planta algo que un reseller no
+    # fabrica: es friccion seria, superable solo con canal y plazo, y por
+    # eso va a ALTA y no a CRITICA.
+    Regla("dcma",
+          r"\bDCMA\b|Defense\s+Contract\s+Management\s+Agency", ALTA,
+          "DCMA: inspección de defensa en origen"),
+    Regla("qar", r"\bQAR\b|Quality\s+Assurance\s+Representative", ALTA,
+          "QAR: representante de aseguramiento de calidad del gobierno",
+          contexto=r"INSPECT|QUALITY|ASSURANCE|CONTRACT|GOVERNMENT"
+                   r"|DCMA|SOURCE|ORIGIN|PLANT|REPRESENTATIVE"),
 )
 
 # Estorba pero no descalifica: solo penaliza el score.
@@ -273,6 +327,22 @@ POSITIVAS: tuple[Regla, ...] = (
     Regla("fob_destino",
           r"FOB\s+Destination|inspection\s+at\s+destination", POSITIVA,
           "FOB Destination / inspección en destino"),
+    # --- Comercial simple, que es lo que de verdad se busca (Fase 10) ---
+    # Antes el lado bueno eran tres reglas y todas de contrato; ninguna
+    # nombraba al producto. Un pliego que dice COTS o "commercial item" esta
+    # diciendo literalmente "esto se compra en el mercado", que es la senal
+    # que mas pesa para un intermediario sin planta.
+    Regla("cots", r"\bCOTS\b|Commercial\s+Off[-\s]the[-\s]Shelf", POSITIVA,
+          "COTS: producto comercial listo para cotizar"),
+    Regla("item_comercial",
+          r"\bcommercial\s+item\b"
+          r"|supplies\s+available\s+in\s+the\s+commercial\s+marketplace"
+          r"|\bcommercial\s+products?\b", POSITIVA,
+          "Commercial item / producto disponible en el mercado"),
+    Regla("entrega_directa",
+          r"ship\s+direct|direct\s+delivery|delivery\s+directly"
+          r"|blind\s+drop[-\s]?shipping", POSITIVA,
+          "Entrega directa, sin instalación en sitio"),
 )
 
 REGLAS: tuple[Regla, ...] = CRITICAS + ALTAS + MEDIAS + POSITIVAS
