@@ -62,6 +62,17 @@ def resumen_escaneo(r: dict) -> str:
     _emb = str(r.get("embudo_texto") or "").strip()
     if _emb:
         lineas.append(f"<i>{_emb}</i>")
+    # Fase 11: la pausa por fallos consecutivos. Sin esta linea, un barrido
+    # con la API caida y uno sin oportunidades salen IGUALES, y son cosas
+    # distintas: una se arregla sola con el tiempo, la otra no.
+    # Solo si el escanero la trae: un resumen armado a mano no la lleva.
+    _ia = r.get("ia_estado") or {}
+    if _ia.get("activa"):
+        lineas.append(
+            f"⏸️ <b>Análisis IA en pausa</b>: "
+            f"{_ia.get('consecutivos', 0)} barridos seguidos con fallos. "
+            f"Reintento en ~{_ia.get('minutos_restantes', 0)} min"
+        )
     lineas.append(f"💎 <b>Viables para ti: {viables}</b>")
     q = r.get("cuota") or {}
     if q:

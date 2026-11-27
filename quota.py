@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS vista_quota (
     notice_id  TEXT PRIMARY KEY,
     dia        TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ia_cortacircuitos (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    consecutivos INTEGER NOT NULL DEFAULT 0,
+    ultimo_fallo TEXT,
+    pausa_hasta  TEXT
+);
 """
 
 
@@ -195,6 +201,167 @@ def limpiar() -> int:
         c.execute("DELETE FROM uso_gemini")
         c.execute("DELETE FROM vista_quota")
         return n
+
+
+# ---------------------------------------------------------------------------
+# Fase 11: cortacircuitos de fallos CONSECUTIVOS de la IA.
+#
+# Por que existe: `liberar()` (Fase 10) devolvio el cupo a los avisos cuyo
+# analisis fallo, que es lo correcto, pero con la clave de Gemini rota eso
+# convertia cada barrido en el mismo reintento inutil:
+#
+#     barrido 1 -> 4 fallos -> liberar -> barrido 2 -> 4 fallos -> ...
+#
+# Doce veces al dia, el mismo lote, el mismo error, y sin ninguna linea que
+# lo dijera. `gastar_fallo()` no lo frenaba porque incrementa `fallidas` y
+# no `llamadas`, asi que `estado()["restantes"]` seguia en el tope y la
+# guarda de presupuesto nunca se disparaba.
+#
+# Esta tabla es ADITIVA y vive aparte de `uso_gemini` A PROPOSITO: el
+# contrato de `estado()` no se toca, `test_cuota.py` sigue midiendo lo mismo
+# que siempre, y la racha de barridos rotos tiene su umbral en su sitio.
+#
+# Semantica de `ia_registrar(exitos, fallos)`, llamada UNA vez por barrido:
+#   - exitos > 0  -> resetea a cero YA y borra la pausa. Un solo analisis
+#                    bueno demuestra que la API vuelve.
+#   - fallos > 0  -> sube la racha; al cruzar el umbral se arma la pausa.
+#   - 0 y 0       -> no se concluye nada. Un barrido sin llamadas (sin
+#                    candidatos, todos reservados) no es evidencia de que la
+#                    API este rota, ni de que este arreglada.
+# ---------------------------------------------------------------------------
+_IA_CLAVE = 1
+
+
+def _leer_ia(c) -> tuple[int, str | None, str | None]:
+    """Lee la fila unica del cortacircuitos. Asume el cursor ya abierto."""
+    fila = c.execute(
+        "SELECT consecutivos, ultimo_fallo, pausa_hasta "
+        "FROM ia_cortacircuitos WHERE id = ?",
+        (_IA_CLAVE,),
+    ).fetchone()
+    if not fila:
+        return 0, None, None
+    try:
+        return int(fila[0] or 0), fila[1], fila[2]
+    except (TypeError, ValueError):
+        return 0, None, None
+
+
+def _estado_ia(consecutivos: int, pausa_hasta: str | None,
+               ahora: datetime, umbral: int) -> dict:
+    """
+    Monta el dict de estado a partir de la fila.
+
+    La pausa se compara por FECHA, no por presencia: una `pausa_hasta` de ayer
+    sigue en la tabla (nada la borra sola) pero ya no pausa nada. Asi un
+    proceso vivo que cruce la medianoche no se queda con el boton pulsado.
+    """
+    activa = False
+    minutos = 0
+    if pausa_hasta:
+        try:
+            hasta = datetime.fromisoformat(pausa_hasta)
+            if hasta.tzinfo is None:
+                hasta = hasta.replace(tzinfo=timezone.utc)
+            restante = (hasta - ahora).total_seconds()
+            activa = restante > 0
+            minutos = int(restante // 60) + (1 if restante % 60 else 0)
+        except (ValueError, TypeError):
+            activa = False
+    return {
+        "consecutivos": max(0, int(consecutivos)),
+        "umbral": umbral,
+        "activa": activa,
+        "pausa_hasta": pausa_hasta or "",
+        "minutos_restantes": max(0, minutos),
+    }
+
+
+def ia_estado() -> dict:
+    """
+    Como va el cortacircuitos de la IA.
+
+    No cuenta llamadas, no toca `estado()` y no cambia nada: es solo leer.
+    Autoinicializa, igual que `estado()`, porque /cuota se llama desde el menu
+    en un proceso recien arrancado.
+    """
+    init()
+    ahora = datetime.now(timezone.utc)
+    umbral = max(1, config.IA_FALLOS_CONSECUTIVOS_MAX)
+    with _lock, _conexion() as c:
+        consecutivos, _ultimo, pausa_hasta = _leer_ia(c)
+    return _estado_ia(consecutivos, pausa_hasta, ahora, umbral)
+
+
+def ia_en_pausa() -> bool:
+    """True si ahora mismo no hay que mandar nada a Gemini."""
+    try:
+        return bool(ia_estado()["activa"])
+    except sqlite3.Error:
+        return False
+
+
+def ia_registrar(exitos: int, fallos: int) -> dict:
+    """
+    Registra el resultado de UN barrido y devuelve el estado resultante.
+
+    Nunca lanza: si la base no puede escribirse, el barrido sigue y se
+    devuelve el estado tal como esta. Proteger no puede tumbar el escaneo.
+    """
+    umbral = max(1, config.IA_FALLOS_CONSECUTIVOS_MAX)
+    try:
+        exitos = max(0, int(exitos))
+        fallos = max(0, int(fallos))
+    except (TypeError, ValueError):
+        exitos, fallos = 0, 0
+    ahora = datetime.now(timezone.utc)
+    try:
+        with _lock, _conexion() as c:
+            consecutivos, ultimo_previo, pausa_previa = _leer_ia(c)
+            if exitos > 0:
+                # Reset inmediato: un analisis bueno basta para volver.
+                consecutivos = 0
+                pausa_hasta = None
+                ultimo = None
+            elif fallos > 0:
+                consecutivos += 1
+                ultimo = ahora.isoformat()
+                pausa_hasta = None
+                if consecutivos >= umbral:
+                    pausa_hasta = (
+                        ahora + timedelta(minutes=config.IA_PAUSA_MINUTOS)
+                    ).isoformat()
+            else:
+                # Sin llamadas no hay veredicto: no sumar ni resetear.
+                pausa_hasta = pausa_previa
+                ultimo = ultimo_previo
+            c.execute(
+                "INSERT INTO ia_cortacircuitos "
+                "(id, consecutivos, ultimo_fallo, pausa_hasta) "
+                "VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "consecutivos = excluded.consecutivos, "
+                "ultimo_fallo = excluded.ultimo_fallo, "
+                "pausa_hasta = excluded.pausa_hasta",
+                (_IA_CLAVE, consecutivos, ultimo, pausa_hasta),
+            )
+            return _estado_ia(consecutivos, pausa_hasta, ahora, umbral)
+    except sqlite3.Error:
+        try:
+            return ia_estado()
+        except sqlite3.Error:
+            return _estado_ia(0, None, ahora, umbral)
+
+
+def ia_reiniciar() -> bool:
+    """Pone el cortacircuitos a cero. Para pruebas y para un operador."""
+    try:
+        with _lock, _conexion() as c:
+            n = c.execute(
+                "DELETE FROM ia_cortacircuitos WHERE id = ?", (_IA_CLAVE,)
+            ).rowcount
+            return bool(n)
+    except sqlite3.Error:
+        return False
 
 
 def dias_registrados() -> list[dict]:

@@ -201,6 +201,7 @@ ETIQUETAS_EMBUDO: list[tuple[str, str]] = [
     ("duplicados", "duplicados por titulo"),
     ("sin_texto", "sin descripcion todavia"),
     ("reserva", "cupos ya reservados hoy"),
+    ("ia_pausa", "IA en pausa por fallos"),
 ]
 
 
@@ -429,7 +430,14 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         "cuota": {},
         "descarte_motivo": {},
         "embudo": {},
+        "ia_estado": {},
     }
+
+    # Estado del cortacircuitos de IA (Fase 11). Se lee AQUI, y no dentro del
+    # bucle de analisis, para que TODOS los retornos lo lleven: los tempranos
+    # (SAM caido, sin candidatos, sin puntaje) tambien tienen que poder decir
+    # que la IA estaba en pausa cuando llegaron.
+    resumen["ia_estado"] = quota.ia_estado()
 
     def avisar(texto: str) -> None:
         if progreso:
@@ -678,6 +686,40 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         resumen["analizadas"] = 0
         _publicar_embudo(resumen)
         return resumen
+
+    # ---- Fase 11: cortacircuitos de fallos consecutivos ----
+    #
+    # Se mira AQUI y no antes: es el ultimo punto en que se sabe que hay algo
+    # que analizar, y justo ANTES de `quota.reservar()`. Si se pusiera antes,
+    # el aviso se reservaria sin someterse y volvemos al embudo muerto de la
+    # Fase 10; si se pusiera despues, se estaria llamando a Gemini para
+    # comprobar que no hay que llamar a Gemini.
+    ia = resumen.get("ia_estado") or quota.ia_estado()
+    if ia.get("activa"):
+        pend = len(a_analizar)
+        _log(
+            f"IA en pausa: {ia.get('consecutivos', 0)} barridos seguidos con "
+            f"fallos (umbral {ia.get('umbral', 0)}); se reintenta en ~"
+            f"{ia.get('minutos_restantes', 0)} min. {pend} avisos quedan "
+            f"pendientes sin reservar."
+        )
+        resumen["errores"].append(
+            f"Analisis IA en PAUSA: {ia.get('consecutivos', 0)} barridos "
+            f"seguidos sin ni un analisis bueno de Gemini (umbral "
+            f"{ia.get('umbral', 0)}). Se reintenta en ~"
+            f"{ia.get('minutos_restantes', 0)} min en vez de a ciegas; los "
+            f"{pend} avisos que pasaron el filtro siguen pendientes y NO se "
+            f"marcaron como vistos."
+        )
+        # El tramo del embudo. Son un SUBCONJUNTO de `puntuales`, igual que
+        # `sin_texto`: esos avisos pasaron el filtro, no se descartaron, solo
+        # se difirieron. Por eso no entra en la identidad
+        # `rechazos + puntuales == traidas`.
+        sumar("ia_pausa", pend)
+        resumen["analizadas"] = 0
+        _publicar_embudo(resumen)
+        return resumen
+
     resumen["analizadas"] = len(a_analizar)
     avisar(
         f"🧠 Analizando {top} con Gemini "
@@ -804,6 +846,26 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
             f"{len(viables)} viables; el resto queda pendiente para manana."
         )
 
+    # ---- Fase 11: alimentar el cortacircuitos ----
+    #
+    # Un futuro que NO levanto excepcion es un exito, aunque el aviso salga
+    # "no viable": la API respondio, que es lo que importa aqui. Y cuando el
+    # cortacircuito de la Fase 9 abre por un 429, los demas futuros terminan
+    # en `ErrorDeCadena` y caen en `fallos_gemini`, que es correcto: la
+    # cuenta es "cuanta gente contesto", no "cuantos avisos gustaron".
+    #
+    # Con `futuros` vacio da 0/0, que `ia_registrar` interpreta como "sin
+    # llamadas": no suma ni resetea.
+    exitos_ia = max(0, len(futuros) - len(fallos_gemini))
+    resumen["ia_estado"] = quota.ia_registrar(exitos_ia, len(fallos_gemini))
+    if resumen["ia_estado"].get("activa"):
+        _log(
+            f"⚠️ Cortacircuitos de IA ARMADO: "
+            f"{resumen['ia_estado']['consecutivos']} barridos seguidos con "
+            f"fallos (umbral {resumen['ia_estado']['umbral']}). Pausa de "
+            f"{resumen['ia_estado']['minutos_restantes']} min."
+        )
+
     # "Las mejores" se ordenan por margen NETO, que es la metrica de decision
     # de verdad, y no solo por el puntaje previo del filtro: un aviso con
     # puntaje 9 y margen neto 13% es peor negocio que uno de 8 con 28%.
@@ -890,15 +952,35 @@ def escanear(chat_id: str, dias: int | None = None, progreso=None) -> dict:
         _emb = desglose_embudo(resumen)
         if _emb:
             _por_que += "\n\n" + _emb
+        # Fase 11: si el cortacircuitos se acaba de armar EN ESTE barrido, el
+        # titular tiene que decirlo. "Barrido sin oportunidades" + "No es un
+        # fallo" seria mentira con la API caida, y es exactamente la confusion
+        # que hay que evitar: un barrido vacio y una clave muerta se leen igual
+        # si no cambia el rotulo.
+        _ia = resumen.get("ia_estado") or {}
+        if _ia.get("activa"):
+            _titulo = "<b>Análisis IA en pausa</b>"
+            _cierre = (
+                "<i>Esto NO es un barrido vacio: es un fallo de la API de "
+                f"Gemini ({_ia.get('consecutivos', 0)} barridos seguidos sin "
+                "ni un analisis bueno). Kyomoto reintenta solo en ~"
+                f"{_ia.get('minutos_restantes', 0)} min y no vuelve a gastar "
+                "hasta entonces.</i>"
+            )
+        else:
+            _titulo = "<b>Barrido sin oportunidades</b>"
+            _cierre = (
+                "<i>No es un fallo: Kyomoto sigue trabajando. Si pasan varios "
+                "barridos igual, revisa /puntajes.</i>"
+            )
         telegram_notify.enviar(
             chat_id,
-            "<b>Barrido sin oportunidades</b>\n\n"
+            f"{_titulo}\n\n"
             f"Avisos vistos: <b>{resumen.get('traidas', 0)}</b>\n"
             f"Pasaron el filtro: <b>{resumen.get('puntuales', 0)}</b>\n"
             f"Analizados por IA: <b>{resumen.get('analizadas', 0)}</b>"
             f"{_por_que}\n\n"
-            "<i>No es un fallo: Kyomoto sigue trabajando. Si pasan varios "
-            "barridos igual, revisa /puntajes.</i>",
+            f"{_cierre}",
             html_mode=True,
         )
 

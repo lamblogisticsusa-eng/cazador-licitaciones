@@ -298,6 +298,22 @@ GEMINI_PAUSA_SEG = _float("GEMINI_PAUSA_SEG", 8.0)
 # barrido. Reintentar solo consume mas cuota.
 GEMINI_REINTENTOS_429 = _int("GEMINI_REINTENTOS_429", 1)
 
+# --- Fase 11: cortacircuitos de fallos CONSECUTIVOS de la IA ---
+#
+# `quota.liberar()` (Fase 10) devolvio el cupo a los avisos cuyo analisis
+# fallo, que es lo correcto, pero con la clave de Gemini rota eso convierte
+# cada barrido en el mismo reintento inutil: 12 veces al dia el mismo lote,
+# el mismo error. `gastar_fallo()` no lo frenaba porque suma `fallidas` y no
+# `llamadas`, de modo que `estado()["restantes"]` seguia en el tope.
+#
+# OJO: esto NO es "fallos del dia", es una RACHA. Un solo barrido con un
+# analisis bueno la pone a cero.
+IA_FALLOS_CONSECUTIVOS_MAX = _int("IA_FALLOS_CONSECUTIVOS_MAX", 3)
+# Minutos de pausa al cruzar el umbral. Con INTERVALO_HORAS=2, 240 min son
+# dos barridos de margen: se sondea una vez cada dos en vez de las 12 veces
+# del dia, que es exactamente el reintento a ciegas que esto viene a cortar.
+IA_PAUSA_MINUTOS = _int("IA_PAUSA_MINUTOS", 240)
+
 GEMINI_TEMPERATURE = _float("GEMINI_TEMPERATURE", 0.2)
 GEMINI_THINKING_BUDGET = _int("GEMINI_THINKING_BUDGET", 0)
 # Espera ante un 503 antes de cambiar de modelo. Lasweapon documented
